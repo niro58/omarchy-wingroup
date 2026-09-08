@@ -18,6 +18,14 @@ backup() {
   cp -p "$1" "$1.bak.$(date +%s)"
 }
 
+# True (exit 0) if the file's last byte is a newline. A missing or empty file
+# counts as "has a newline" -- there is nothing to preserve either way.
+wg_ends_with_newline() {
+  local f="$1"
+  [[ -s "$f" ]] || return 0
+  [[ "$(tail -c1 -- "$f" | wc -l)" -eq 1 ]]
+}
+
 link_binaries() {
   mkdir -p "$WG_BIN_DIR"
   local f
@@ -26,8 +34,13 @@ link_binaries() {
   done
 }
 
+# $1: suffix to append to the closing marker line (e.g. " no-eof-nl"). Every
+# append/rewrite this script does ends the file in a newline, even when the
+# original did not -- so uninstall.sh reads this suffix off the closing marker
+# to know whether it must strip that trailing newline back off to reverse
+# byte-exactly.
 waybar_modules_block() {
-  local i
+  local eof_flag="$1" i
   printf '  // >>> wingroup\n'
   for (( i = 0; i < WG_SLOTS; i++ )); do
     printf '  "custom/wingroup%d": {\n' "$i"
@@ -40,12 +53,14 @@ waybar_modules_block() {
     printf '    "tooltip": true\n'
     printf '  },\n'
   done
-  printf '  // <<< wingroup\n'
+  printf '  // <<< wingroup%s\n' "$eof_flag"
 }
 
 install_waybar_config() {
   grep -q 'custom/wingroup0' "$WG_WAYBAR_CONFIG" && return 0
-  backup "$WG_WAYBAR_CONFIG"
+
+  local eof_flag=""
+  wg_ends_with_newline "$WG_WAYBAR_CONFIG" || eof_flag=" no-eof-nl"
 
   local slots i tmp
   slots=""
@@ -54,16 +69,35 @@ install_waybar_config() {
   done
 
   tmp="$(mktemp)"
-  awk -v slots="$slots" -v block="$(waybar_modules_block)" '
+  awk -v slots="$slots" -v block="$(waybar_modules_block "$eof_flag")" '
     NR == 1 && $0 ~ /^\{/ { print; print block; next }
     /"modules-left"[[:space:]]*:/ { sub(/\][[:space:]]*,[[:space:]]*$/, slots "],"); print; next }
     { print }
   ' "$WG_WAYBAR_CONFIG" >"$tmp"
+
+  # sub() above only fires when the modules-left line ends in a trailing
+  # comma. If it didn't fire, we'd silently ship a config with the module
+  # definitions present but no slots wired into modules-left. Fail loudly
+  # instead, and touch nothing.
+  if ! grep -qE '"modules-left"[[:space:]]*:.*"custom/wingroup0"' "$tmp"; then
+    rm -f "$tmp"
+    printf 'install.sh: expected "modules-left" in %s to end in a trailing comma (e.g. "modules-left": [...],) so the wingroup slots could be appended to it. No changes were made.\n' "$WG_WAYBAR_CONFIG" >&2
+    exit 1
+  fi
+
+  backup "$WG_WAYBAR_CONFIG"
+  if [[ -n $eof_flag ]]; then
+    truncate -s -1 "$tmp"
+  fi
   mv -f "$tmp" "$WG_WAYBAR_CONFIG"
 }
 
 install_waybar_style() {
   grep -q '>>> wingroup' "$WG_WAYBAR_STYLE" && return 0
+
+  local eof_flag=""
+  wg_ends_with_newline "$WG_WAYBAR_STYLE" || eof_flag=" no-eof-nl"
+
   backup "$WG_WAYBAR_STYLE"
 
   local i base="" busy="" active=""
@@ -78,31 +112,39 @@ install_waybar_style() {
     printf '%s { padding: 0 6px; opacity: 0.55; }\n' "$base"
     printf '%s { opacity: 1; }\n' "$busy"
     printf '%s { opacity: 1; font-weight: bold; }\n' "$active"
-    printf '/* <<< wingroup */\n'
+    printf '/* <<< wingroup%s */\n' "$eof_flag"
   } >>"$WG_WAYBAR_STYLE"
 }
 
 install_bindings() {
   grep -q '>>> wingroup' "$WG_HYPR_BINDINGS" && return 0
+
+  local eof_flag=""
+  wg_ends_with_newline "$WG_HYPR_BINDINGS" || eof_flag=" no-eof-nl"
+
   backup "$WG_HYPR_BINDINGS"
-  cat >>"$WG_HYPR_BINDINGS" <<'EOF'
+  cat >>"$WG_HYPR_BINDINGS" <<EOF
 
 # >>> wingroup
 unbind = SUPER, G
 bindd = SUPER, G, Window groups, exec, wingroup menu
 bindd = SUPER CTRL, G, Send window to group, exec, wingroup send
-# <<< wingroup
+# <<< wingroup$eof_flag
 EOF
 }
 
 install_autostart() {
   grep -q '>>> wingroup' "$WG_HYPR_AUTOSTART" && return 0
+
+  local eof_flag=""
+  wg_ends_with_newline "$WG_HYPR_AUTOSTART" || eof_flag=" no-eof-nl"
+
   backup "$WG_HYPR_AUTOSTART"
-  cat >>"$WG_HYPR_AUTOSTART" <<'EOF'
+  cat >>"$WG_HYPR_AUTOSTART" <<EOF
 
 # >>> wingroup
 exec-once = wingroup-daemon
-# <<< wingroup
+# <<< wingroup$eof_flag
 EOF
 }
 
