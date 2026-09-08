@@ -1,0 +1,10 @@
+{
+  "auto": true,
+  "catchall": null,
+  "groups": [
+    {"name":"everest","label":"everest","projects":["everest-web","everest-rs","everest-api"],"monitor":null},
+    {"name":"plat","label":"plat","projects":["niro-platform"],"monitor":null},
+    {"name":"drivora","label":"drivora","projects":["driver-hub"],"monitor":null}
+  ],
+  "overrides": {"0xaaa3":"plat"}
+}

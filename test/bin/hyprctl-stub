@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ${1:-} == dispatch ]]; then
+  shift
+  printf '%s\n' "$*" >>"$WG_DISPATCH_LOG"
+  exit 0
+fi
+
+if [[ ${1:-} == -j ]]; then
+  case ${2:-} in
+    clients) cat "$WG_FIXTURES/clients.json" ;;
+    activeworkspace) cat "${WG_FIXTURE_ACTIVEWS:-$WG_FIXTURES/activeworkspace.json}" ;;
+    *) printf 'hyprctl-stub: unhandled query %s\n' "${2:-}" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
+printf 'hyprctl-stub: unhandled invocation %s\n' "$*" >&2
+exit 1
