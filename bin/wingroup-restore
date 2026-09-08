@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Restore the Claude sessions that were open at shutdown, then make sure every
+# restored terminal ends up in its project's group. The daemon files them as
+# they open; this tidy pass makes the result independent of that race.
+set -euo pipefail
+
+: "${WG_RESTORE_SCRIPT:=$HOME/restore-claude.sh}"
+: "${WG_RESTORE_SETTLE:=5}"
+
+if [[ ! -x $WG_RESTORE_SCRIPT ]]; then
+  printf 'wingroup-restore: no restore script at %s, nothing to do\n' "$WG_RESTORE_SCRIPT" >&2
+  exit 0
+fi
+
+"$WG_RESTORE_SCRIPT" "$@"
+
+# A dry run spawns nothing, so there is nothing to file.
+for arg in ${@+"$@"}; do
+  [[ $arg == --dry-run || $arg == -n ]] && exit 0
+done
+
+# Terminals need a moment to spawn their shells before cwd resolution works.
+[[ $WG_RESTORE_SETTLE == 0 ]] || sleep "$WG_RESTORE_SETTLE"
+
+wingroup tidy --yes

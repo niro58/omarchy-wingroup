@@ -144,6 +144,7 @@ install_autostart() {
 
 # >>> wingroup
 exec-once = wingroup-daemon
+exec-once = wingroup-restore
 # <<< wingroup$eof_flag
 EOF
 }

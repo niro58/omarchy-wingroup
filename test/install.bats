@@ -55,6 +55,7 @@ teardown() { wg_teardown_tmp; }
   grep -q 'bindd = SUPER, G, Window groups, exec, wingroup menu' "$WG_HYPR_BINDINGS"
   grep -q 'unbind = SUPER, G' "$WG_HYPR_BINDINGS"
   grep -q 'exec-once = wingroup-daemon' "$WG_HYPR_AUTOSTART"
+  grep -q 'exec-once = wingroup-restore' "$WG_HYPR_AUTOSTART"
 }
 
 @test "install backs up every file it edits" {

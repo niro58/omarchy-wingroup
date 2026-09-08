@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+printf 'restore %s\n' "$*" >>"$WG_RESTORE_LOG"
