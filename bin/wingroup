@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WG_LIB_DIR="${WG_LIB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib" && pwd)}"
+# shellcheck source=lib/hypr.sh
+source "$WG_LIB_DIR/hypr.sh"
+# shellcheck source=lib/state.sh
+source "$WG_LIB_DIR/state.sh"
+# shellcheck source=lib/resolve.sh
+source "$WG_LIB_DIR/resolve.sh"
+# shellcheck source=lib/menu.sh
+source "$WG_LIB_DIR/menu.sh"
+
+if [[ -n ${WG_TEST_STUB_CWD:-} ]]; then
+  wg_window_cwd() {
+    local pid="$1" p c
+    while IFS=$'\t' read -r p c; do
+      [[ $p == "$pid" ]] && { printf '%s\n' "$c"; return 0; }
+    done <"$WG_FIXTURES/cwd.map"
+    return 0
+  }
+fi
+
+wg_die() { printf 'wingroup: %s\n' "$1" >&2; exit 1; }
+
+wg_usage() {
+  cat >&2 <<'USAGE'
+usage: wingroup <command>
+
+  menu                          open the group and window picker
+  send [--address A --group G]  send a window to a group
+  activate <slot|name>          switch to a group
+  next | prev                   cycle through groups
+  tidy [--yes]                  file every window by its project
+  new <label> [project...]      create a group
+  rename <name> <label>         change a group's displayed label
+  dissolve <name>                remove a group, leaving its windows alone
+  toggle-auto                   turn automatic assignment on or off
+USAGE
+  exit 1
+}
+
+wg_slug() {
+  local s="$1"
+  s="${s,,}"
+  s="$(printf '%s' "$s" | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+  printf '%s\n' "$s"
+}
+
+wg_group_exists() {
+  local name="$1" state="${2:-$(wg_state_read)}"
+  [[ -n "$(jq -r --arg n "$name" 'first(.groups[] | select(.name == $n) | .name) // empty' <<<"$state")" ]]
+}
+
+wg_refresh() {
+  [[ -n ${WG_REFRESH_CMD:-} ]] && { "$WG_REFRESH_CMD"; return 0; }
+  pkill -RTMIN+11 waybar || true
+}
+
+cmd_activate() {
+  local target="${1:?}" state
+  local -a names=()
+  state="$(wg_state_read)"
+  mapfile -t names < <(wg_state_group_names "$state")
+
+  if [[ $target =~ ^[0-9]+$ ]] && (( target < ${#names[@]} )); then
+    target="${names[target]}"
+  fi
+  wg_group_exists "$target" "$state" || wg_die "no such group: $target"
+  wg_hypr_dispatch workspace "name:$target"
+}
+
+cmd_cycle() {
+  local direction="$1" active index=-1 i
+  local -a names=()
+  mapfile -t names < <(wg_state_group_names)
+  (( ${#names[@]} )) || wg_die "no groups defined"
+
+  active="$(wg_hypr_query activeworkspace | jq -r '.name')"
+  for (( i = 0; i < ${#names[@]}; i++ )); do
+    [[ ${names[i]} == "$active" ]] && { index=$i; break; }
+  done
+
+  if (( index < 0 )); then
+    index=$(( direction == 1 ? -1 : 0 ))
+  fi
+  index=$(( (index + direction + ${#names[@]}) % ${#names[@]} ))
+  wg_hypr_dispatch workspace "name:${names[index]}"
+}
+
+cmd_new() {
+  local label="${1:?usage: wingroup new <label> [project...]}"; shift
+  local state name projects
+  state="$(wg_state_read)"
+  name="$(wg_slug "$label")"
+  [[ -n $name ]] || wg_die "label produces an empty group name"
+  wg_group_exists "$name" "$state" && wg_die "group already exists: $name"
+  projects="$(printf '%s\n' ${@+"$@"} | jq -R -s 'split("\n") | map(select(length > 0))')"
+  wg_state_write "$(jq --arg n "$name" --arg l "$label" --argjson p "$projects" \
+    '.groups += [{name: $n, label: $l, projects: $p, monitor: null}]' <<<"$state")"
+  wg_refresh
+}
+
+cmd_rename() {
+  local name="${1:?}" label="${2:?}" state
+  state="$(wg_state_read)"
+  wg_group_exists "$name" "$state" || wg_die "no such group: $name"
+  wg_state_write "$(jq --arg n "$name" --arg l "$label" \
+    '(.groups[] | select(.name == $n) | .label) = $l' <<<"$state")"
+  wg_refresh
+}
+
+cmd_dissolve() {
+  local name="${1:?}" state
+  state="$(wg_state_read)"
+  wg_group_exists "$name" "$state" || wg_die "no such group: $name"
+  wg_state_write "$(jq --arg n "$name" \
+    '.groups |= map(select(.name != $n)) | .overrides |= with_entries(select(.value != $n))' <<<"$state")"
+  wg_refresh
+}
+
+cmd_send() {
+  local address="" group="" state
+  while (( $# )); do
+    case $1 in
+      --address) address="$2"; shift 2 ;;
+      --group)   group="$2";   shift 2 ;;
+      *) wg_usage ;;
+    esac
+  done
+
+  [[ -n $address ]] || address="$(wg_hypr_query activewindow | jq -r '.address')"
+  [[ -n $address && $address != null ]] || wg_die "no window to send"
+
+  if [[ -z $group ]]; then
+    local action
+    # shellcheck disable=SC2119  # no args intended: build the menu for the current state
+    action="$(wg_group_menu_build | wg_menu_run 'Send to group')"
+    [[ -n $action ]] || return 0
+    if [[ $action == new ]]; then
+      wg_die "create the group first: wingroup new <label> [project...]"
+    fi
+    group="${action#group:}"
+  fi
+
+  state="$(wg_state_read)"
+  wg_group_exists "$group" "$state" || wg_die "no such group: $group"
+  wg_state_write "$(jq --arg a "$address" --arg g "$group" '.overrides[$a] = $g' <<<"$state")"
+  wg_hypr_dispatch movetoworkspacesilent "name:$group,address:$address"
+  wg_refresh
+}
+
+# Prints one "address<TAB>group" line per window that is on the wrong workspace.
+#
+# NOTE: rows come from wg_window_table's nine tab-separated columns, and the
+# group/worktree columns are frequently empty. Bash's `read` treats tab as
+# IFS whitespace, so a multi-variable `IFS=$'\t' read -r a b c ...` silently
+# collapses consecutive tabs and strips leading ones -- an empty interior
+# column would shift every field after it (e.g. status landing in $group).
+# Read each row whole and pull columns out with `cut` instead.
+wg_tidy_moves() {
+  local state line address workspace floating group
+  state="$(wg_state_read)"
+  while IFS= read -r line; do
+    floating="$(cut -f4 <<<"$line")"
+    [[ $floating == "true" ]] && continue
+    group="$(cut -f5 <<<"$line")"
+    [[ -n $group ]] || continue
+    workspace="$(cut -f3 <<<"$line")"
+    [[ $workspace == "$group" ]] && continue
+    address="$(cut -f1 <<<"$line")"
+    [[ "$(jq -r --arg a "$address" '.overrides[$a] // empty' <<<"$state")" == "" ]] || continue
+    printf '%s\t%s\n' "$address" "$group"
+  done < <(wg_window_table)
+}
+
+cmd_tidy() {
+  local assume_yes=0 moves count address group
+  [[ ${1:-} == --yes ]] && assume_yes=1
+  moves="$(wg_tidy_moves)"
+  [[ -n $moves ]] || return 0
+  count="$(wc -l <<<"$moves")"
+
+  if (( ! assume_yes )); then
+    local action
+    action="$(printf 'tidy\tApply %s move(s)\nnoop\tCancel\n' "$count" | wg_menu_run 'Tidy')"
+    [[ $action == tidy ]] || return 0
+  fi
+
+  while IFS=$'\t' read -r address group; do
+    wg_hypr_dispatch movetoworkspacesilent "name:$group,address:$address"
+  done <<<"$moves"
+  wg_refresh
+}
+
+cmd_toggle_auto() {
+  local state
+  state="$(wg_state_read)"
+  wg_state_write "$(jq '.auto = (.auto | not)' <<<"$state")"
+  wg_refresh
+}
+
+cmd_menu() {
+  local action
+  # shellcheck disable=SC2119  # no args intended: build the menu for the current state
+  action="$(wg_menu_build | wg_menu_run 'Groups')"
+  case $action in
+    "")            return 0 ;;
+    group:*)       cmd_activate "${action#group:}" ;;
+    window:*)      wg_hypr_dispatch focuswindow "address:${action#window:}" ;;
+    new)           wg_die "create a group from the terminal: wingroup new <label> [project...]" ;;
+    tidy)          cmd_tidy ;;
+    toggle-auto)   cmd_toggle_auto ;;
+  esac
+}
+
+main() {
+  local command="${1:-}"
+  [[ -n $command ]] || wg_usage
+  shift || true
+  case $command in
+    menu)        cmd_menu "$@" ;;
+    send)        cmd_send "$@" ;;
+    activate)    cmd_activate "$@" ;;
+    next)        cmd_cycle 1 ;;
+    prev)        cmd_cycle -1 ;;
+    tidy)        cmd_tidy "$@" ;;
+    new)         cmd_new "$@" ;;
+    rename)      cmd_rename "$@" ;;
+    dissolve)    cmd_dissolve "$@" ;;
+    toggle-auto) cmd_toggle_auto ;;
+    *)           wg_usage ;;
+  esac
+}
+
+main "$@"

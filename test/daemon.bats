@@ -5,9 +5,6 @@ load helper
 setup() {
   wg_setup_tmp
   wg_seed_state
-  export WG_REFRESH_LOG="$WG_TMP/refresh.log"
-  : >"$WG_REFRESH_LOG"
-  export WG_REFRESH_CMD="$WG_ROOT/test/bin/refresh-stub"
   export WG_RESOLVE_RETRIES=1
   export WG_RESOLVE_DELAY=0
   export WG_DAEMON_NO_MAIN=1

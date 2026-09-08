@@ -13,6 +13,9 @@ wg_setup_tmp() {
   export WG_DISPATCH_LOG="$WG_TMP/dispatch.log"
   : >"$WG_DISPATCH_LOG"
   export WG_TEST_STUB_CWD="$WG_ROOT/test/stub-cwd.sh"
+  export WG_REFRESH_CMD="$WG_ROOT/test/bin/refresh-stub"
+  export WG_REFRESH_LOG="$WG_TMP/refresh.log"
+  : >"$WG_REFRESH_LOG"
 }
 
 wg_teardown_tmp() {

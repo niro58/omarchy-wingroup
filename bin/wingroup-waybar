@@ -50,12 +50,19 @@ main() {
   label="$(wg_state_group_field "$name" label "$state")"
   [[ -n $label ]] || label="$name"
 
-  local total=0 busy=0 group status
-  while IFS=$'\t' read -r group status; do
+  # Read each row whole and pull columns out with `cut` rather than a
+  # multi-variable `IFS=$'\t' read`: tab is IFS whitespace, so a read across
+  # an empty interior column (an ungrouped window's group is "") collapses
+  # and shifts status into $group -- group names are user-slugified, so a
+  # group literally named "busy" or "idle" would then corrupt these counts.
+  local total=0 busy=0 line group status
+  while IFS= read -r line; do
+    group="$(cut -f5 <<<"$line")"
     [[ $group == "$name" ]] || continue
+    status="$(cut -f6 <<<"$line")"
     total=$(( total + 1 ))
     [[ $status == busy ]] && busy=$(( busy + 1 ))
-  done < <(wg_window_table | cut -f5,6)
+  done < <(wg_window_table)
 
   active="$(wg_hypr_query activeworkspace | jq -r '.name')"
 
