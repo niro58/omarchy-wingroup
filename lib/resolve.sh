@@ -56,9 +56,6 @@ wg_window_group() {
 
 wg_title_status() {
   local title="$1" glyph
-  # Ensure arrays are defined (they may not be in subshells)
-  [[ -z "${WG_GLYPHS_IDLE+x}" ]] && WG_GLYPHS_IDLE=("✳")
-  [[ -z "${WG_GLYPHS_BUSY+x}" ]] && WG_GLYPHS_BUSY=("◐" "◑")
   for glyph in "${WG_GLYPHS_IDLE[@]}"; do
     [[ $title == "$glyph"* ]] && { printf 'idle\n'; return 0; }
   done
@@ -70,9 +67,6 @@ wg_title_status() {
 
 wg_title_text() {
   local title="$1" glyph
-  # Ensure arrays are defined (they may not be in subshells)
-  [[ -z "${WG_GLYPHS_IDLE+x}" ]] && WG_GLYPHS_IDLE=("✳")
-  [[ -z "${WG_GLYPHS_BUSY+x}" ]] && WG_GLYPHS_BUSY=("◐" "◑")
   for glyph in "${WG_GLYPHS_IDLE[@]}" "${WG_GLYPHS_BUSY[@]}"; do
     if [[ $title == "$glyph"* ]]; then
       title="${title#"$glyph"}"
@@ -106,6 +100,3 @@ wg_window_row() {
   local address="$1" clients="${2:-}"
   wg_window_table "$clients" | awk -F'\t' -v a="$address" '$1 == a'
 }
-
-export WG_STATE_FILE WG_STATE_DIR WG_HYPRCTL WG_PROJECTS_DIR WG_GLYPHS_IDLE WG_GLYPHS_BUSY
-export -f wg_hypr_query wg_state_default wg_state_read wg_state_write wg_window_cwd wg_cwd_project wg_cwd_worktree wg_project_group wg_window_group wg_title_status wg_title_text wg_window_table wg_window_row

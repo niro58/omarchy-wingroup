@@ -9,6 +9,7 @@ setup() {
   source "$WG_ROOT/lib/resolve.sh"
   wg_stub_cwd
   wg_seed_state
+  wg_export_lib
 }
 
 teardown() { wg_teardown_tmp; }
