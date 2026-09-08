@@ -96,7 +96,12 @@ wg_window_table() {
   done < <(jq -r '.[] | [.address, (.pid|tostring), .workspace.name, (.floating|tostring), .title] | @tsv' <<<"$clients")
 }
 
+# One row, for one address. Filters the client list down to that address
+# *before* building the table rather than building every row and throwing all
+# but one away: each row costs a pgrep plus two /proc readlinks, and the daemon
+# asks for a single row up to WG_RESOLVE_RETRIES + 1 times per window it opens.
 wg_window_row() {
   local address="$1" clients="${2:-}"
-  wg_window_table "$clients" | awk -F'\t' -v a="$address" '$1 == a'
+  [[ -n $clients ]] || clients="$(wg_hypr_query clients)"
+  wg_window_table "$(jq --arg a "$address" '[.[] | select(.address == $a)]' <<<"$clients")"
 }

@@ -29,15 +29,11 @@ wg_seed_state() {
   cp "$WG_FIXTURES/${1:-state.json}" "$WG_STATE_DIR/state.json"
 }
 
-# Replacement for wg_window_cwd that reads cwd.map instead of /proc.
+# Replacement for wg_window_cwd that reads cwd.map instead of /proc. One copy
+# only: the executables source the same file when $WG_TEST_STUB_CWD points at it.
 wg_stub_cwd() {
-  wg_window_cwd() {
-    local pid="$1" p c
-    while IFS=$'\t' read -r p c; do
-      [[ $p == "$pid" ]] && { printf '%s\n' "$c"; return 0; }
-    done <"$WG_FIXTURES/cwd.map"
-    return 0
-  }
+  # shellcheck source=test/stub-cwd.sh
+  source "$WG_ROOT/test/stub-cwd.sh"
 }
 
 dispatches() {

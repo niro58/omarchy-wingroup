@@ -135,3 +135,29 @@ teardown() { wg_teardown_tmp; }
   output="$(wg_window_row 0xdead | wc -c)"
   [ "$output" -eq 0 ]
 }
+
+@test "wg_window_row returns the same row the full table has for that address" {
+  local from_table from_row
+  from_table="$(wg_window_table | awk -F'\t' '$1 == "0xaaa2"')"
+  from_row="$(wg_window_row 0xaaa2)"
+  [ "$from_row" = "$from_table" ]
+}
+
+# The row is filtered by address before the table is built, not after: one row
+# costs one cwd resolution, not one per open window.
+@test "wg_window_row resolves only the address it was asked for" {
+  export WG_CWD_LOG="$WG_TMP/cwd.log"
+  : >"$WG_CWD_LOG"
+  wg_window_row 0xaaa1 >/dev/null
+  run bash -c "wc -l <'$WG_CWD_LOG'"
+  [ "$output" -eq 1 ]
+  run bash -c "cat '$WG_CWD_LOG'"
+  [ "$output" = "1001" ]
+}
+
+@test "wg_window_row for an unknown address resolves nothing at all" {
+  export WG_CWD_LOG="$WG_TMP/cwd.log"
+  : >"$WG_CWD_LOG"
+  wg_window_row 0xdead >/dev/null
+  [ ! -s "$WG_CWD_LOG" ]
+}

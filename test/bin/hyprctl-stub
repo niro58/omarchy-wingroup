@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Test-only: when $WG_HYPRCTL_LOG is set, record every invocation so a test can
+# assert how much work a code path asks of the compositor.
+if [[ -n ${WG_HYPRCTL_LOG:-} ]]; then
+  printf '%s\n' "$*" >>"$WG_HYPRCTL_LOG"
+fi
+
 if [[ ${1:-} == dispatch ]]; then
   shift
   printf '%s\n' "$*" >>"$WG_DISPATCH_LOG"

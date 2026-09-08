@@ -81,6 +81,42 @@ feed() {
   [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
+# Resolving one window used to build the whole table and throw all but one row
+# away, once for floating/workspace and again for every retry -- up to eleven
+# full builds per window opened. On a login burst that puts the daemon tens of
+# seconds behind, moving windows after the user has already started typing.
+@test "opening a window resolves only that window's cwd" {
+  export WG_RESOLVE_RETRIES=10
+  export WG_CWD_LOG="$WG_TMP/cwd.log"
+  : >"$WG_CWD_LOG"
+  wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
+  # Seven clients in the fixture; the old code looked up 14 cwds (two builds).
+  run bash -c "wc -l <'$WG_CWD_LOG'"
+  [ "$output" -eq 1 ]
+  run bash -c "sort -u '$WG_CWD_LOG'"
+  [ "$output" = "1001" ]
+}
+
+@test "opening a window queries the compositor once" {
+  export WG_RESOLVE_RETRIES=10
+  export WG_HYPRCTL_LOG="$WG_TMP/hyprctl.log"
+  : >"$WG_HYPRCTL_LOG"
+  wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
+  run bash -c "grep -c '^-j clients$' '$WG_HYPRCTL_LOG'"
+  [ "$output" -eq 1 ]
+}
+
+@test "an unresolvable window still retries the configured number of times" {
+  export WG_RESOLVE_RETRIES=3
+  export WG_HYPRCTL_LOG="$WG_TMP/hyprctl.log"
+  : >"$WG_HYPRCTL_LOG"
+  wg_daemon_handle_line "openwindow>>aaa6,1,Alacritty,niro@niro:~"
+  # One fetch for floating/workspace/group, then WG_RESOLVE_RETRIES more.
+  run bash -c "grep -c '^-j clients$' '$WG_HYPRCTL_LOG'"
+  [ "$output" -eq 4 ]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
 @test "closewindow prunes the override for that window" {
   wg_daemon_handle_line "closewindow>>aaa3"
   run bash -c "jq -r '.overrides[\"0xaaa3\"] // \"gone\"' '$WG_STATE_DIR/state.json'"

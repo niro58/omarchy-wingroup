@@ -63,13 +63,17 @@ wg_daemon_open_window() {
   [[ -z ${WG_SEEN[$address]:-} ]] || return 0
   WG_SEEN[$address]=1
 
+  # One fetch, three columns. Building the row again just to read the group off
+  # it doubled the work on the common path, where the cwd is already resolvable.
   row="$(wg_window_row "$address")"
   [[ -n $row ]] || return 0
   floating="$(cut -f4 <<<"$row")"
   [[ $floating == "true" ]] && return 0
   workspace="$(cut -f3 <<<"$row")"
+  group="$(cut -f5 <<<"$row")"
 
-  group="$(wg_daemon_resolve_group "$address")"
+  # Only when the shell had not spawned yet is it worth waiting and asking again.
+  [[ -n $group ]] || group="$(wg_daemon_resolve_group "$address")"
   if [[ -z $group ]]; then
     catchall="$(jq -r '.catchall // empty' <<<"$state")"
     [[ -n $catchall ]] || return 0
