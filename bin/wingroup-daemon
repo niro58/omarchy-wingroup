@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WG_LIB_DIR="${WG_LIB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib" && pwd)}"
+# shellcheck source=lib/hypr.sh
+source "$WG_LIB_DIR/hypr.sh"
+# shellcheck source=lib/state.sh
+source "$WG_LIB_DIR/state.sh"
+# shellcheck source=lib/resolve.sh
+source "$WG_LIB_DIR/resolve.sh"
+
+: "${WG_RESOLVE_RETRIES:=10}"
+: "${WG_RESOLVE_DELAY:=0.1}"
+: "${WG_REFRESH_DEBOUNCE_MS:=150}"
+
+declare -A WG_SEEN=()
+WG_LAST_REFRESH_MS=0
+
+wg_now_ms() {
+  local t="${EPOCHREALTIME/,/.}"
+  printf '%s\n' "$(( ${t%.*} * 1000 + 10#${t#*.} / 1000 ))"
+}
+
+wg_refresh_bar() {
+  if [[ -n ${WG_REFRESH_CMD:-} ]]; then
+    "$WG_REFRESH_CMD"
+  else
+    pkill -RTMIN+11 waybar || true
+  fi
+}
+
+wg_daemon_request_refresh() {
+  local now
+  now="$(wg_now_ms)"
+  if (( now - WG_LAST_REFRESH_MS < WG_REFRESH_DEBOUNCE_MS )); then
+    return 0
+  fi
+  WG_LAST_REFRESH_MS="$now"
+  wg_refresh_bar
+}
+
+# The compositor announces a window before its shell has spawned, so cwd
+# resolution has to be retried for a moment before giving up.
+wg_daemon_resolve_group() {
+  local address="$1" attempt=0 row group
+  while (( attempt < WG_RESOLVE_RETRIES )); do
+    row="$(wg_window_row "$address")"
+    if [[ -n $row ]]; then
+      group="$(cut -f5 <<<"$row")"
+      [[ -n $group ]] && { printf '%s\n' "$group"; return 0; }
+    fi
+    (( ++attempt < WG_RESOLVE_RETRIES )) || break
+    [[ $WG_RESOLVE_DELAY == 0 ]] || sleep "$WG_RESOLVE_DELAY"
+  done
+  return 0
+}
+
+wg_daemon_open_window() {
+  local address="$1" state row floating workspace group catchall
+
+  state="$(wg_state_read)"
+  [[ "$(jq -r '.auto' <<<"$state")" == "true" ]] || return 0
+  [[ -z ${WG_SEEN[$address]:-} ]] || return 0
+  WG_SEEN[$address]=1
+
+  row="$(wg_window_row "$address")"
+  [[ -n $row ]] || return 0
+  floating="$(cut -f4 <<<"$row")"
+  [[ $floating == "true" ]] && return 0
+  workspace="$(cut -f3 <<<"$row")"
+
+  group="$(wg_daemon_resolve_group "$address")"
+  if [[ -z $group ]]; then
+    catchall="$(jq -r '.catchall // empty' <<<"$state")"
+    [[ -n $catchall ]] || return 0
+    group="$catchall"
+  fi
+
+  [[ $workspace == "$group" ]] && return 0
+  wg_hypr_dispatch movetoworkspacesilent "name:$group,address:$address"
+  wg_daemon_request_refresh
+}
+
+wg_daemon_prune() {
+  local live
+  live="$(wg_hypr_query clients | jq -r '.[].address')"
+  # wg_state_prune_overrides reads live addresses from stdin, not $1; it takes
+  # no positional argument here by design.
+  # shellcheck disable=SC2119
+  wg_state_write "$(printf '%s\n' "$live" | wg_state_prune_overrides)"
+}
+
+wg_daemon_handle_line() {
+  local line="$1" event payload address
+  event="${line%%>>*}"
+  payload="${line#*>>}"
+
+  case $event in
+    openwindow)
+      address="0x${payload%%,*}"
+      wg_daemon_open_window "$address"
+      ;;
+    closewindow)
+      address="0x${payload}"
+      unset "WG_SEEN[$address]"
+      # Targeted deletion, not a prune: the closing window is still listed by
+      # hyprctl at this instant, so a live-address prune would keep its override.
+      wg_state_write "$(jq --arg a "$address" 'del(.overrides[$a])' <<<"$(wg_state_read)")"
+      wg_daemon_request_refresh
+      ;;
+    windowtitle | windowtitlev2 | workspace | workspacev2 | activewindow | activewindowv2 | movewindow | movewindowv2)
+      wg_daemon_request_refresh
+      ;;
+    *) : ;;
+  esac
+  return 0
+}
+
+wg_daemon_main() {
+  local lock="${XDG_RUNTIME_DIR:-/tmp}/wingroup-daemon.lock"
+  exec 9>"$lock"
+  if ! flock -n 9; then
+    printf 'wingroup-daemon: already running\n' >&2
+    exit 0
+  fi
+
+  # Overrides belonging to windows from a previous session are dead weight.
+  wg_daemon_prune
+
+  local sock="${XDG_RUNTIME_DIR}/hypr/${HYPRLAND_INSTANCE_SIGNATURE}/.socket2.sock"
+  [[ -S $sock ]] || { printf 'wingroup-daemon: no event socket at %s\n' "$sock" >&2; exit 1; }
+
+  local line
+  while IFS= read -r line; do
+    wg_daemon_handle_line "$line" || true
+  done < <(socat -U - "UNIX-CONNECT:$sock")
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" && -z ${WG_DAEMON_NO_MAIN:-} ]]; then
+  wg_daemon_main
+fi
