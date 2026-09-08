@@ -9,7 +9,6 @@ setup() {
   source "$WG_ROOT/lib/resolve.sh"
   wg_stub_cwd
   wg_seed_state
-  wg_export_lib
 }
 
 teardown() { wg_teardown_tmp; }
@@ -106,33 +105,33 @@ teardown() { wg_teardown_tmp; }
 }
 
 @test "wg_window_table emits one row per window" {
-  run bash -c "wg_window_table | wc -l"
+  output="$(wg_window_table | wc -l)"
   [ "$output" -eq 7 ]
 }
 
 @test "wg_window_table resolves a worktree window" {
-  run bash -c "wg_window_table | awk -F'\t' '\$1==\"0xaaa2\"{print \$5, \$6, \$7, \$8}'"
+  output="$(wg_window_table | awk -F'\t' '$1=="0xaaa2"{print $5, $6, $7, $8}')"
   [ "$output" = "everest busy everest-rs odtah-price" ]
 }
 
 @test "wg_window_table honours an override" {
-  run bash -c "wg_window_table | awk -F'\t' '\$1==\"0xaaa3\"{print \$5, \$7}'"
+  output="$(wg_window_table | awk -F'\t' '$1=="0xaaa3"{print $5, $7}')"
   [ "$output" = "plat everest-api" ]
 }
 
 @test "wg_window_table leaves a projectless window ungrouped" {
-  run bash -c "wg_window_table | awk -F'\t' '\$1==\"0xaaa6\"{print \"[\" \$5 \"]\" \$6}'"
+  output="$(wg_window_table | awk -F'\t' '$1=="0xaaa6"{print "[" $5 "]" $6}')"
   [ "$output" = "[]plain" ]
 }
 
 @test "wg_window_table marks the floating window" {
-  run bash -c "wg_window_table | awk -F'\t' '\$1==\"0xaaa7\"{print \$4}'"
+  output="$(wg_window_table | awk -F'\t' '$1=="0xaaa7"{print $4}')"
   [ "$output" = "true" ]
 }
 
 @test "wg_window_row returns exactly one row, or nothing for an unknown address" {
-  run bash -c "wg_window_row 0xaaa1 | wc -l"
+  output="$(wg_window_row 0xaaa1 | wc -l)"
   [ "$output" -eq 1 ]
-  run bash -c "wg_window_row 0xdead | wc -c"
+  output="$(wg_window_row 0xdead | wc -c)"
   [ "$output" -eq 0 ]
 }
