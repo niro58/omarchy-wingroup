@@ -39,7 +39,9 @@ teardown() { wg_teardown_tmp; }
   wg_seed_state
   wg_state_write "$(jq '.auto = false' "$WG_STATE_DIR/state.json")"
   [ "$(jq -r '.auto' "$WG_STATE_DIR/state.json")" = "false" ]
-  run bash -c "ls $WG_STATE_DIR | grep -c . "
+  # -A, not a bare ls: the temp files this is looking for are named
+  # .state.XXXXXX, and a bare ls never lists them.
+  run bash -c "ls -A $WG_STATE_DIR | grep -c . "
   [ "$output" -eq 1 ]
 }
 
