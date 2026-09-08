@@ -132,7 +132,55 @@ wg_ends_with_newline() {
   run "$WG_ROOT/install.sh"
   [ "$status" -ne 0 ]
   [[ "$output" == *modules-left* ]]
+  # the real constraint, not "a missing comma"
+  [[ "$output" == *'single line ending in "],"'* ]]
 
-  run diff "$WG_TMP/config.orig" "$WG_WAYBAR_CONFIG"
+  run cmp "$WG_TMP/config.orig" "$WG_WAYBAR_CONFIG"
+  [ "$status" -eq 0 ]
+}
+
+# --- Finding 3: the definitions block must be anchored to the object, not to
+# line 1, and a half-edit must never be reported as a success ---
+
+@test "install handles a config whose object does not start on line 1" {
+  cp "$WG_FIXTURES/waybar-config-leading-comment.jsonc" "$WG_WAYBAR_CONFIG"
+  cp "$WG_FIXTURES/waybar-style.css" "$WG_WAYBAR_STYLE"
+  printf '# my bindings\n' >"$WG_HYPR_BINDINGS"
+  printf '# my autostart\n' >"$WG_HYPR_AUTOSTART"
+  cp "$WG_WAYBAR_CONFIG" "$WG_TMP/config.orig"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+
+  # both halves: the slots and the definitions they point at
+  run bash -c "grep -cE '\"custom/wingroup[0-9]\": \{' '$WG_WAYBAR_CONFIG'"
+  [ "$output" -eq 8 ]
+  run bash -c "grep -cE '\"modules-left\".*\"custom/wingroup7\"' '$WG_WAYBAR_CONFIG'"
+  [ "$output" -eq 1 ]
+  # the leading comment is still the first thing in the file
+  run bash -c "head -1 '$WG_WAYBAR_CONFIG'"
+  [[ "$output" == "// Waybar configuration"* ]]
+  # and it is still readable JSONC
+  run bash -c "sed 's|//.*||' '$WG_WAYBAR_CONFIG' | jq -e . >/dev/null"
+  [ "$status" -eq 0 ]
+
+  "$WG_ROOT/uninstall.sh"
+  run cmp "$WG_TMP/config.orig" "$WG_WAYBAR_CONFIG"
+  [ "$status" -eq 0 ]
+}
+
+@test "install fails loudly when the module definitions cannot be placed" {
+  cp "$WG_FIXTURES/waybar-config-no-object.jsonc" "$WG_WAYBAR_CONFIG"
+  cp "$WG_FIXTURES/waybar-style.css" "$WG_WAYBAR_STYLE"
+  printf '# my bindings\n' >"$WG_HYPR_BINDINGS"
+  printf '# my autostart\n' >"$WG_HYPR_AUTOSTART"
+  cp "$WG_WAYBAR_CONFIG" "$WG_TMP/config.orig"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$WG_WAYBAR_CONFIG"* ]]
+  [[ "$output" == *"module definitions"* ]]
+
+  run cmp "$WG_TMP/config.orig" "$WG_WAYBAR_CONFIG"
   [ "$status" -eq 0 ]
 }

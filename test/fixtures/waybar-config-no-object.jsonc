@@ -1,0 +1,3 @@
+// A config with no top-level object for the module definitions to go into.
+"modules-left": ["custom/omarchy"],
+"modules-center": ["clock"]

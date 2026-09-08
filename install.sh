@@ -68,20 +68,35 @@ install_waybar_config() {
     slots+=", \"custom/wingroup$i\""
   done
 
+  # The definitions go in right after the line that opens the top-level object.
+  # That is not necessarily line 1: JSONC positively invites a leading comment,
+  # and a blank line or a BOM is legal too. Skip blank and comment lines, then
+  # anchor on the first line that contains a brace.
   tmp="$(mktemp)"
   awk -v slots="$slots" -v block="$(waybar_modules_block "$eof_flag")" '
-    NR == 1 && $0 ~ /^\{/ { print; print block; next }
+    !inserted && $0 !~ /^[[:space:]]*(\/\/|\/\*|\*)/ && index($0, "{") > 0 {
+      print; print block; inserted = 1; next
+    }
     /"modules-left"[[:space:]]*:/ { sub(/\][[:space:]]*,[[:space:]]*$/, slots "],"); print; next }
     { print }
   ' "$WG_WAYBAR_CONFIG" >"$tmp"
 
-  # sub() above only fires when the modules-left line ends in a trailing
-  # comma. If it didn't fire, we'd silently ship a config with the module
-  # definitions present but no slots wired into modules-left. Fail loudly
-  # instead, and touch nothing.
-  if ! grep -qE '"modules-left"[[:space:]]*:.*"custom/wingroup0"' "$tmp"; then
+  # Both halves of the edit have to have landed. The sub() above only fires
+  # when the modules-left line is a single line ending in "],", and the block
+  # only goes in when an opening brace was found. Either half alone ships a
+  # broken bar -- slots wired to modules that do not exist, or modules nothing
+  # displays -- and the idempotency guard would then refuse to repair it. So
+  # check for both, and on failure say which is missing and touch nothing.
+  local missing="" defs
+  defs="$(grep -cE '"custom/wingroup[0-9]+"[[:space:]]*:[[:space:]]*\{' "$tmp" || true)"
+  grep -qE '"modules-left"[[:space:]]*:.*"custom/wingroup0"' "$tmp" \
+    || missing+=$'\n  - the '"$WG_SLOTS"$' wingroup slots in "modules-left": it must be a single line ending in "],"'
+  (( defs == WG_SLOTS )) \
+    || missing+=$'\n  - the '"$WG_SLOTS"$' "custom/wingroupN": { ... } module definitions (found '"$defs"$'): they are inserted after the line that opens the top-level object'
+  if [[ -n $missing ]]; then
     rm -f "$tmp"
-    printf 'install.sh: expected "modules-left" in %s to end in a trailing comma (e.g. "modules-left": [...],) so the wingroup slots could be appended to it. No changes were made.\n' "$WG_WAYBAR_CONFIG" >&2
+    printf 'install.sh: cannot edit %s. Missing after the attempted edit:%s\nNo changes were made.\n' \
+      "$WG_WAYBAR_CONFIG" "$missing" >&2
     exit 1
   fi
 
