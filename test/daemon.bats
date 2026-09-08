@@ -118,7 +118,24 @@ feed() {
 }
 
 @test "closewindow prunes the override for that window" {
+  local before
+  before="$(stat -c '%i %y' "$WG_STATE_DIR/state.json")"
   wg_daemon_handle_line "closewindow>>aaa3"
   run bash -c "jq -r '.overrides[\"0xaaa3\"] // \"gone\"' '$WG_STATE_DIR/state.json'"
   [ "$output" = "gone" ]
+  # this one really is a rewrite
+  [ "$(stat -c '%i %y' "$WG_STATE_DIR/state.json")" != "$before" ]
+}
+
+# Every daemon write is a lost-update opportunity against the CLI -- there is no
+# lock between them -- and a window with no override is the common case.
+@test "closewindow does not rewrite the state file when there is no override" {
+  local before after
+  before="$(stat -c '%i %y' "$WG_STATE_DIR/state.json")"
+  wg_daemon_handle_line "closewindow>>aaa1"
+  wg_daemon_handle_line "closewindow>>aaa2"
+  wg_daemon_handle_line "closewindow>>aaa6"
+  after="$(stat -c '%i %y' "$WG_STATE_DIR/state.json")"
+  [ "$before" = "$after" ]
+  [ "$(jq -r '.overrides["0xaaa3"]' "$WG_STATE_DIR/state.json")" = "plat" ]
 }

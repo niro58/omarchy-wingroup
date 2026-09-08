@@ -95,7 +95,7 @@ wg_daemon_prune() {
 }
 
 wg_daemon_handle_line() {
-  local line="$1" event payload address
+  local line="$1" event payload address state
   event="${line%%>>*}"
   payload="${line#*>>}"
 
@@ -109,7 +109,16 @@ wg_daemon_handle_line() {
       unset "WG_SEEN[$address]"
       # Targeted deletion, not a prune: the closing window is still listed by
       # hyprctl at this instant, so a live-address prune would keep its override.
-      wg_state_write "$(jq --arg a "$address" 'del(.overrides[$a])' <<<"$(wg_state_read)")"
+      #
+      # And only when there is something to delete, which is the uncommon case.
+      # There is no lock between the daemon and bin/wingroup, so every state
+      # write is an opportunity to lose an update -- a `wingroup new` racing a
+      # window close could be silently discarded. Not writing at all on the
+      # common path removes essentially all of those races.
+      state="$(wg_state_read)"
+      if [[ -n "$(jq -r --arg a "$address" '.overrides[$a] // empty' <<<"$state")" ]]; then
+        wg_state_write "$(jq --arg a "$address" 'del(.overrides[$a])' <<<"$state")"
+      fi
       wg_daemon_request_refresh
       ;;
     windowtitle | windowtitlev2 | workspace | workspacev2 | activewindow | activewindowv2 | movewindow | movewindowv2)
