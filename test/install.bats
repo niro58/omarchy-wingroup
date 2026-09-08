@@ -9,6 +9,8 @@ setup() {
   export WG_WAYBAR_STYLE="$WG_TMP/style.css"
   export WG_HYPR_BINDINGS="$WG_TMP/bindings.conf"
   export WG_HYPR_AUTOSTART="$WG_TMP/autostart.conf"
+  # Never the real one: whether it exists decides what install writes.
+  export WG_RESTORE_SCRIPT="$WG_TMP/restore-claude.sh"
   cp "$WG_FIXTURES/waybar-config.jsonc" "$WG_WAYBAR_CONFIG"
   cp "$WG_FIXTURES/waybar-style.css" "$WG_WAYBAR_STYLE"
   printf '# my bindings\n' >"$WG_HYPR_BINDINGS"
@@ -55,7 +57,65 @@ teardown() { wg_teardown_tmp; }
   grep -q 'bindd = SUPER, G, Window groups, exec, wingroup menu' "$WG_HYPR_BINDINGS"
   grep -q 'unbind = SUPER, G' "$WG_HYPR_BINDINGS"
   grep -q 'exec-once = wingroup-daemon' "$WG_HYPR_AUTOSTART"
+}
+
+# The restore line arranges to run ~/restore-claude.sh at every login. Adding
+# it for someone who has no such script is a surprising side effect of
+# installing a window grouper, so it is opt-in by having the script.
+
+@test "install leaves the restore autostart out when there is no restore script" {
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  run bash -c "grep -c 'exec-once = wingroup-restore' '$WG_HYPR_AUTOSTART' || true"
+  [ "$output" -eq 0 ]
+  run bash -c "grep -c 'exec-once = wingroup-daemon' '$WG_HYPR_AUTOSTART'"
+  [ "$output" -eq 1 ]
+}
+
+@test "install says which autostart lines it added when it skips the restore line" {
+  run "$WG_ROOT/install.sh"
+  [[ "$output" == *'added "exec-once = wingroup-daemon"'* ]]
+  [[ "$output" == *'"exec-once = wingroup-restore" was left out'* ]]
+  [[ "$output" == *"$WG_RESTORE_SCRIPT"* ]]
+}
+
+@test "install adds the restore autostart when an executable restore script exists" {
+  printf '#!/usr/bin/env bash\n' >"$WG_RESTORE_SCRIPT"
+  chmod +x "$WG_RESTORE_SCRIPT"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'added "exec-once = wingroup-daemon" and "exec-once = wingroup-restore"'* ]]
+
+  grep -q 'exec-once = wingroup-daemon' "$WG_HYPR_AUTOSTART"
   grep -q 'exec-once = wingroup-restore' "$WG_HYPR_AUTOSTART"
+  # the daemon line comes first
+  run bash -c "grep -n 'exec-once' '$WG_HYPR_AUTOSTART' | head -1"
+  [[ "$output" == *wingroup-daemon* ]]
+}
+
+@test "a non-executable restore script does not count" {
+  printf '#!/usr/bin/env bash\n' >"$WG_RESTORE_SCRIPT"
+  chmod -x "$WG_RESTORE_SCRIPT"
+  "$WG_ROOT/install.sh"
+  run bash -c "grep -c 'exec-once = wingroup-restore' '$WG_HYPR_AUTOSTART' || true"
+  [ "$output" -eq 0 ]
+}
+
+@test "uninstall reverses the autostart byte for byte with the restore line present" {
+  printf '#!/usr/bin/env bash\n' >"$WG_RESTORE_SCRIPT"
+  chmod +x "$WG_RESTORE_SCRIPT"
+  "$WG_ROOT/install.sh"
+  "$WG_ROOT/uninstall.sh"
+  run cmp "$WG_TMP/autostart.orig" "$WG_HYPR_AUTOSTART"
+  [ "$status" -eq 0 ]
+}
+
+@test "uninstall reverses the autostart byte for byte without the restore line" {
+  "$WG_ROOT/install.sh"
+  "$WG_ROOT/uninstall.sh"
+  run cmp "$WG_TMP/autostart.orig" "$WG_HYPR_AUTOSTART"
+  [ "$status" -eq 0 ]
 }
 
 @test "install backs up every file it edits" {

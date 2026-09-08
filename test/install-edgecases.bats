@@ -9,6 +9,8 @@ setup() {
   export WG_WAYBAR_STYLE="$WG_TMP/style.css"
   export WG_HYPR_BINDINGS="$WG_TMP/bindings.conf"
   export WG_HYPR_AUTOSTART="$WG_TMP/autostart.conf"
+  # Never the real one: whether it exists decides what install writes.
+  export WG_RESTORE_SCRIPT="$WG_TMP/restore-claude.sh"
 }
 
 teardown() { wg_teardown_tmp; }

@@ -220,6 +220,24 @@ exec-once = wingroup-daemon
 exec-once = wingroup-restore
 ```
 
+This is opt-in by having the script: install adds the `wingroup-restore`
+line **only** if the restore script -- `$HOME/restore-claude.sh`, or
+`$WG_RESTORE_SCRIPT` if you set it -- exists and is executable at the moment
+you run `./install.sh`. Otherwise you get the daemon line alone, and install
+says so. Respawning terminals at every login is not something a window
+grouper should sign you up for silently.
+
+To turn it on later, create the script, then either re-run `./install.sh`
+after `./uninstall.sh`, or just add the line yourself inside the wingroup
+block in `~/.config/hypr/autostart.conf`:
+
+```
+# >>> wingroup
+exec-once = wingroup-daemon
+exec-once = wingroup-restore
+# <<< wingroup
+```
+
 `wingroup-restore` runs your restore script and then runs `wingroup tidy
 --yes`. The daemon already tries to file each terminal as it opens, but
 that's a race against the shell spawning — `wingroup-restore`'s `tidy` pass
@@ -249,8 +267,10 @@ $ ./install.sh
 - Appends matching styles to `~/.config/waybar/style.css`.
 - Adds the `SUPER+G` / `SUPER+CTRL+G` keybinds to
   `~/.config/hypr/bindings.conf` (and unbinds native `SUPER+G`).
-- Adds the daemon and restore autostart lines to
-  `~/.config/hypr/autostart.conf`.
+- Adds the `exec-once = wingroup-daemon` autostart line to
+  `~/.config/hypr/autostart.conf`, plus `exec-once = wingroup-restore` if
+  you have an executable restore script (see above). The output tells you
+  which of the two it added.
 - Seeds `~/.local/state/omarchy/wingroup/state.json` if it doesn't exist
   yet.
 

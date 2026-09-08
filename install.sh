@@ -9,9 +9,14 @@ WG_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 : "${WG_HYPR_BINDINGS:=$HOME/.config/hypr/bindings.conf}"
 : "${WG_HYPR_AUTOSTART:=$HOME/.config/hypr/autostart.conf}"
 : "${WG_STATE_DIR:=$HOME/.local/state/omarchy/wingroup}"
+: "${WG_RESTORE_SCRIPT:=$HOME/restore-claude.sh}"
 
 WG_SLOTS=8
 WG_SIGNAL=11
+
+# What install_autostart actually wrote, for the closing summary: "both",
+# "daemon", or empty when the block was already there.
+WG_AUTOSTART_ADDED=""
 
 backup() {
   [[ -f $1 ]] || return 0
@@ -148,19 +153,32 @@ bindd = SUPER CTRL, G, Send window to group, exec, wingroup send
 EOF
 }
 
+# The daemon line is unconditional and always first. The restore line arranges
+# to run $WG_RESTORE_SCRIPT at every login, so it only goes in for someone who
+# actually has that script -- opting a stranger into respawning terminals at
+# login is a surprising thing for a window grouper to do. $restore_line keeps
+# its own trailing newline so the closing marker, and the eof_flag that
+# uninstall.sh reads off it to reverse this byte-exactly, land either way.
 install_autostart() {
   grep -q '>>> wingroup' "$WG_HYPR_AUTOSTART" && return 0
 
   local eof_flag=""
   wg_ends_with_newline "$WG_HYPR_AUTOSTART" || eof_flag=" no-eof-nl"
 
+  local restore_line=""
+  if [[ -x $WG_RESTORE_SCRIPT ]]; then
+    restore_line="exec-once = wingroup-restore"$'\n'
+    WG_AUTOSTART_ADDED="both"
+  else
+    WG_AUTOSTART_ADDED="daemon"
+  fi
+
   backup "$WG_HYPR_AUTOSTART"
   cat >>"$WG_HYPR_AUTOSTART" <<EOF
 
 # >>> wingroup
 exec-once = wingroup-daemon
-exec-once = wingroup-restore
-# <<< wingroup$eof_flag
+${restore_line}# <<< wingroup$eof_flag
 EOF
 }
 
@@ -178,5 +196,17 @@ install_autostart
 seed_state
 
 printf 'wingroup installed. Reload with: hyprctl reload && pkill -SIGUSR2 waybar\n'
+case $WG_AUTOSTART_ADDED in
+  both)
+    printf 'Autostart (%s): added "exec-once = wingroup-daemon" and "exec-once = wingroup-restore".\n' \
+      "$WG_HYPR_AUTOSTART" ;;
+  daemon)
+    printf 'Autostart (%s): added "exec-once = wingroup-daemon".\n' "$WG_HYPR_AUTOSTART"
+    printf '  No executable restore script at %s, so "exec-once = wingroup-restore" was left out.\n' \
+      "$WG_RESTORE_SCRIPT"
+    printf '  To enable it later, see "Startup integration" in the README.\n' ;;
+  *)
+    printf 'Autostart (%s): already configured, left unchanged.\n' "$WG_HYPR_AUTOSTART" ;;
+esac
 printf 'Then create your first group, e.g.: wingroup new everest everest-web everest-rs\n'
 printf 'and file the windows you already have open: wingroup tidy\n'
