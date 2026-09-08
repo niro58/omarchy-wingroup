@@ -43,6 +43,57 @@ teardown() { wg_teardown_tmp; }
   [ "$output" -eq 1 ]
 }
 
+# wg_state_read treats an unparseable state file as corrupt and replaces it with
+# the empty default, so committing invalid JSON silently destroys every group.
+@test "wg_state_write refuses invalid JSON and leaves the previous state intact" {
+  wg_seed_state
+  local before
+  before="$(cat "$WG_STATE_DIR/state.json")"
+  run wg_state_write 'not json at all'
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not valid JSON"* ]]
+  [ "$(cat "$WG_STATE_DIR/state.json")" = "$before" ]
+  [ ! -f "$WG_STATE_DIR/state.json.corrupt" ]
+}
+
+@test "wg_state_write refuses truncated JSON" {
+  wg_seed_state
+  local before
+  before="$(cat "$WG_STATE_DIR/state.json")"
+  run wg_state_write '{"auto":true,"groups":['
+  [ "$status" -ne 0 ]
+  [ "$(cat "$WG_STATE_DIR/state.json")" = "$before" ]
+}
+
+@test "wg_state_write leaves the state alone and fails when the temp write fails" {
+  wg_seed_state
+  local before
+  before="$(cat "$WG_STATE_DIR/state.json")"
+  # A temp file that exists but cannot be written: the redirection fails while
+  # the file is still there for mv to commit, which is what a full disk or an
+  # exceeded quota looks like from here. The daemon runs its handlers under
+  # `|| true`, so errexit does not stop the mv -- the write itself has to.
+  mktemp() {
+    local t="$WG_STATE_DIR/.state.stubbed"
+    printf 'garbage, not the state\n' >"$t"
+    chmod 400 "$t"
+    printf '%s\n' "$t"
+  }
+  run wg_state_write '{"auto":false,"catchall":null,"groups":[],"overrides":{}}'
+  unset -f mktemp
+  [ "$status" -ne 0 ]
+  [ "$(cat "$WG_STATE_DIR/state.json")" = "$before" ]
+  # and the failed temp file is not left behind
+  [ ! -e "$WG_STATE_DIR/.state.stubbed" ]
+}
+
+@test "wg_state_write commits a valid write" {
+  wg_seed_state
+  run wg_state_write '{"auto":false,"catchall":null,"groups":[],"overrides":{}}'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.auto' "$WG_STATE_DIR/state.json")" = "false" ]
+}
+
 @test "wg_state_group_names lists groups in order" {
   wg_seed_state
   run wg_state_group_names
