@@ -5,7 +5,6 @@ load helper
 setup() {
   wg_setup_tmp
   wg_seed_state
-  export WG_TEST_STUB_CWD=1
   export WG_WALKER="$WG_ROOT/test/bin/walker-stub"
 }
 

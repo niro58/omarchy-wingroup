@@ -5,7 +5,6 @@ load helper
 setup() {
   wg_setup_tmp
   wg_seed_state
-  export WG_TEST_STUB_CWD=1
   export WG_RESTORE_LOG="$WG_TMP/restore.log"
   : >"$WG_RESTORE_LOG"
   export WG_RESTORE_SCRIPT="$WG_ROOT/test/bin/restore-stub"

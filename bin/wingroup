@@ -11,14 +11,10 @@ source "$WG_LIB_DIR/resolve.sh"
 # shellcheck source=lib/menu.sh
 source "$WG_LIB_DIR/menu.sh"
 
+# Tests point this at a stub that replaces /proc lookups with a fixture map.
 if [[ -n ${WG_TEST_STUB_CWD:-} ]]; then
-  wg_window_cwd() {
-    local pid="$1" p c
-    while IFS=$'\t' read -r p c; do
-      [[ $p == "$pid" ]] && { printf '%s\n' "$c"; return 0; }
-    done <"$WG_FIXTURES/cwd.map"
-    return 0
-  }
+  # shellcheck source=test/stub-cwd.sh
+  source "$WG_TEST_STUB_CWD"
 fi
 
 wg_die() { printf 'wingroup: %s\n' "$1" >&2; exit 1; }
