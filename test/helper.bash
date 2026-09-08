@@ -12,6 +12,7 @@ wg_setup_tmp() {
   export WG_STATE_DIR="$WG_TMP/state"
   export WG_DISPATCH_LOG="$WG_TMP/dispatch.log"
   : >"$WG_DISPATCH_LOG"
+  export WG_TEST_STUB_CWD="$WG_ROOT/test/stub-cwd.sh"
 }
 
 wg_teardown_tmp() {

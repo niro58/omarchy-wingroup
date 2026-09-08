@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WG_LIB_DIR="${WG_LIB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib" && pwd)}"
+# shellcheck source=lib/hypr.sh
+source "$WG_LIB_DIR/hypr.sh"
+# shellcheck source=lib/state.sh
+source "$WG_LIB_DIR/state.sh"
+# shellcheck source=lib/resolve.sh
+source "$WG_LIB_DIR/resolve.sh"
+
+# Tests point this at a stub that replaces /proc lookups with a fixture map.
+if [[ -n ${WG_TEST_STUB_CWD:-} ]]; then
+  # shellcheck source=test/stub-cwd.sh
+  source "$WG_TEST_STUB_CWD"
+fi
+
+WG_SLOTS=8
+
+wg_superscript() {
+  local n="$1" out="" i
+  local sup=("⁰" "¹" "²" "³" "⁴" "⁵" "⁶" "⁷" "⁸" "⁹")
+  [[ $n =~ ^[0-9]+$ ]] || return 0
+  (( n > 0 )) || return 0
+  for (( i = 0; i < ${#n}; i++ )); do
+    out+="${sup[${n:i:1}]}"
+  done
+  printf '%s\n' "$out"
+}
+
+wg_emit() {
+  jq -cn --arg text "$1" --arg tooltip "$2" --arg class "$3" \
+    '{text: $text, tooltip: $tooltip, class: $class}'
+}
+
+main() {
+  local slot="${1:?usage: wingroup-waybar <slot>}"
+  local state name label projects active
+  local -a names=()
+
+  state="$(wg_state_read)"
+  mapfile -t names < <(wg_state_group_names "$state")
+
+  if (( slot >= ${#names[@]} )); then
+    wg_emit "" "" ""
+    return 0
+  fi
+
+  name="${names[slot]}"
+  label="$(wg_state_group_field "$name" label "$state")"
+  [[ -n $label ]] || label="$name"
+
+  local total=0 busy=0 group status
+  while IFS=$'\t' read -r group status; do
+    [[ $group == "$name" ]] || continue
+    total=$(( total + 1 ))
+    [[ $status == busy ]] && busy=$(( busy + 1 ))
+  done < <(wg_window_table | cut -f5,6)
+
+  active="$(wg_hypr_query activeworkspace | jq -r '.name')"
+
+  local class=""
+  if [[ $active == "$name" ]]; then
+    class="active"
+  elif (( busy > 0 )); then
+    class="busy"
+  fi
+
+  projects="$(jq -r --arg n "$name" \
+    'first(.groups[] | select(.name == $n) | .projects) | join(", ")' <<<"$state")"
+
+  local tooltip
+  tooltip="$(printf '%s — %d windows, %d busy' "$label" "$total" "$busy")"
+  [[ -n $projects ]] && tooltip+=$'\n'"Projects: $projects"
+
+  if (( slot == WG_SLOTS - 1 && ${#names[@]} > WG_SLOTS )); then
+    local -a overflow=("${names[@]:WG_SLOTS}")
+    local joined
+    joined="$(printf '%s, ' "${overflow[@]}")"
+    tooltip+=$'\n'"${#overflow[@]} more: ${joined%, }"
+  fi
+
+  wg_emit "$label$(wg_superscript "$busy")" "$tooltip" "$class"
+}
+
+main "$@"
