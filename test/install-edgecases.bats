@@ -171,11 +171,12 @@ wg_ends_with_newline() {
   [ "$status" -eq 0 ]
 }
 
-# Removing "hyprland/workspaces" from a modules-left that held nothing else
-# leaves "[", and appending the slots to that gives "[, ...": not JSON. Better
-# to say so than to write it over a bar that works.
-@test "install fails loudly when removing the workspace module would empty modules-left" {
-  cp "$WG_FIXTURES/waybar-config-workspaces-only.jsonc" "$WG_WAYBAR_CONFIG"
+# The "ignore-workspaces" line has to go inside the "hyprland/workspaces"
+# object. A config that references the module but never defines an object for
+# it has nowhere to put it, and installing anyway would leave a dot per group
+# on the bar with nothing saying why. Say so instead, and change nothing.
+@test "install fails loudly when there is no hyprland/workspaces object to edit" {
+  cp "$WG_FIXTURES/waybar-config-no-ws-object.jsonc" "$WG_WAYBAR_CONFIG"
   cp "$WG_FIXTURES/waybar-style.css" "$WG_WAYBAR_STYLE"
   printf '# my bindings\n' >"$WG_HYPR_BINDINGS"
   printf '# my autostart\n' >"$WG_HYPR_AUTOSTART"
@@ -183,16 +184,17 @@ wg_ends_with_newline() {
 
   run "$WG_ROOT/install.sh"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"would have emptied it"* ]]
+  [[ "$output" == *"ignore-workspaces"* ]]
+  [[ "$output" == *'"hyprland/workspaces": {'* ]]
 
   run cmp "$WG_TMP/config.orig" "$WG_WAYBAR_CONFIG"
   [ "$status" -eq 0 ]
 }
 
-# The reversal has to survive the awkward file too: the recorded modules-left
-# line is put back before the marked block that carries it is stripped, and the
-# missing trailing newline still has to come out the other side missing.
-@test "the workspace module comes back byte for byte in a config with no trailing newline" {
+# Two marked blocks in one file now -- the module definitions and the
+# "ignore-workspaces" line -- and strip_block has to take both while the
+# missing trailing newline still comes out the other side missing.
+@test "both marked blocks come back out byte for byte in a config with no trailing newline" {
   cp "$WG_FIXTURES/waybar-config-no-eof-nl.jsonc" "$WG_WAYBAR_CONFIG"
   cp "$WG_FIXTURES/waybar-style.css" "$WG_WAYBAR_STYLE"
   printf '# my bindings\n' >"$WG_HYPR_BINDINGS"
@@ -200,8 +202,10 @@ wg_ends_with_newline() {
   cp "$WG_WAYBAR_CONFIG" "$WG_TMP/config.orig"
 
   "$WG_ROOT/install.sh"
-  run bash -c "grep -E '\"modules-left\"' '$WG_WAYBAR_CONFIG' | grep -v 'wingroup-modules-left' | grep -c 'hyprland/workspaces' || true"
-  [ "$output" -eq 0 ]
+  run bash -c "grep -c 'ignore-workspaces' '$WG_WAYBAR_CONFIG'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep -cE '\"modules-left\".*hyprland/workspaces.*custom/wingroup0' '$WG_WAYBAR_CONFIG'"
+  [ "$output" -eq 1 ]
 
   "$WG_ROOT/uninstall.sh"
   run cmp "$WG_TMP/config.orig" "$WG_WAYBAR_CONFIG"

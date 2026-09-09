@@ -301,13 +301,17 @@ $ ./install.sh
 - Symlinks everything in `bin/` into `~/.local/bin`.
 - Adds 8 `custom/wingroup0`–`custom/wingroup7` modules to
   `~/.config/waybar/config.jsonc` and wires them into `modules-left`.
-- Removes `"hyprland/workspaces"` from `modules-left`. The group strip is the
-  workspace indicator now, and Omarchy's numbered-workspace module draws a
-  named group workspace as an anonymous dot beside it — a second, worse view of
-  the same thing. `uninstall.sh` puts the entry back exactly where it was. If
-  `modules-left` cannot be edited — it is spread over several lines, or
-  `"hyprland/workspaces"` is the only thing in it — install says so and changes
-  nothing.
+  `"hyprland/workspaces"` stays exactly where it was, so the bar reads left to
+  right: Omarchy menu icon, your numbered workspaces, then the group strip.
+- Adds `"ignore-workspaces": ["^[^0-9]"]` to the `"hyprland/workspaces"`
+  object. A group *is* a named Hyprland workspace, and that module has no icon
+  for a name — it falls through to its `format-icons` `default` glyph and draws
+  an anonymous dot per group, right next to that group's own name in the strip.
+  The regex matches workspace names that do not start with a digit, so the dots
+  go and your numbered workspaces 1–0 are untouched. `uninstall.sh` takes the
+  line back out. If the edit cannot be made — `modules-left` is spread over
+  several lines, or there is no `"hyprland/workspaces": {` object to put the
+  setting in — install says which part failed and changes nothing.
 - Appends matching styles to `~/.config/waybar/style.css`.
 - Adds the `SUPER+G` / `SUPER+CTRL+G` keybinds to
   `~/.config/hypr/bindings.conf` (and unbinds native `SUPER+G`).

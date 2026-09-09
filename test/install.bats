@@ -30,21 +30,33 @@ teardown() { wg_teardown_tmp; }
   [ -L "$WG_BIN_DIR/wingroup-waybar" ]
 }
 
-# Groups have their own strip now, and Omarchy's numbered-workspace module
-# renders a named group workspace as an anonymous dot beside it -- a second,
-# worse view of the same thing. It comes out as part of installing.
-@test "install takes the numbered workspace indicator out of modules-left" {
+# The numbered workspaces are the user's own and stay on the bar. Left to
+# right: the Omarchy menu icon, then 1..0, then the group strip -- which is
+# exactly the order "modules-left" already had plus the slots appended.
+@test "install keeps hyprland/workspaces where it was and appends the slots after it" {
   "$WG_ROOT/install.sh"
-  run bash -c "grep -E '\"modules-left\"' '$WG_WAYBAR_CONFIG' | grep -v 'wingroup-modules-left' | grep -c 'hyprland/workspaces' || true"
-  [ "$output" -eq 0 ]
-  # and the rest of modules-left is untouched
-  run bash -c "grep -E '\"modules-left\"' '$WG_WAYBAR_CONFIG' | grep -v 'wingroup-modules-left'"
-  [[ "$output" == *'["custom/omarchy", "custom/wingroup0"'* ]]
+  run bash -c "grep -E '\"modules-left\"' '$WG_WAYBAR_CONFIG'"
+  [ "$output" = '  "modules-left": ["custom/omarchy", "hyprland/workspaces", "custom/wingroup0", "custom/wingroup1", "custom/wingroup2", "custom/wingroup3", "custom/wingroup4", "custom/wingroup5", "custom/wingroup6", "custom/wingroup7"],' ]
 }
 
-@test "uninstall puts the numbered workspace indicator back where it was" {
+# A group is a *named* workspace, and the numbered module has no icon for a
+# name -- it falls through to the "default" glyph and draws an anonymous dot
+# per group, next to that group's own name in the strip. "ignore-workspaces"
+# takes the dots away and leaves 1..0 alone.
+@test "install hides the named group workspaces from the numbered indicator" {
+  "$WG_ROOT/install.sh"
+  run bash -c "grep -A3 '\"hyprland/workspaces\": {' '$WG_WAYBAR_CONFIG'"
+  [[ "$output" == *'"ignore-workspaces": ["^[^0-9]"]'* ]]
+  # inside the object it belongs to, not loose in the file
+  run bash -c "grep -c 'ignore-workspaces' '$WG_WAYBAR_CONFIG'"
+  [ "$output" -eq 1 ]
+}
+
+@test "uninstall takes the ignore-workspaces line back out" {
   "$WG_ROOT/install.sh"
   "$WG_ROOT/uninstall.sh"
+  run bash -c "grep -c 'ignore-workspaces' '$WG_WAYBAR_CONFIG' || true"
+  [ "$output" -eq 0 ]
   run bash -c "grep -E '\"modules-left\"' '$WG_WAYBAR_CONFIG'"
   [ "$output" = '  "modules-left": ["custom/omarchy", "hyprland/workspaces"],' ]
 }
@@ -164,6 +176,10 @@ teardown() { wg_teardown_tmp; }
   "$WG_ROOT/install.sh"
   run bash -c "grep -o 'custom/wingroup0' '$WG_WAYBAR_CONFIG' | wc -l"
   [ "$output" -eq 2 ]
+  run bash -c "grep -c 'ignore-workspaces' '$WG_WAYBAR_CONFIG'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep -cE '\"modules-left\".*custom/wingroup7' '$WG_WAYBAR_CONFIG'"
+  [ "$output" -eq 1 ]
   run bash -c "grep -c 'exec-once = wingroup-daemon' '$WG_HYPR_AUTOSTART'"
   [ "$output" -eq 1 ]
   run bash -c "grep -c 'bindd = SUPER, G, Window groups' '$WG_HYPR_BINDINGS'"

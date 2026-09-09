@@ -3,7 +3,7 @@
   "layer": "top",
   "position": "top",
   "height": 26,
-  "modules-left": ["hyprland/workspaces"],
+  "modules-left": ["custom/omarchy", "hyprland/workspaces"],
   "modules-center": ["clock"],
   "modules-right": ["battery"],
   // Omarchy menu button

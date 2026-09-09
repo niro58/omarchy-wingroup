@@ -5,5 +5,18 @@
   "height": 26,
   "modules-center": ["clock"],
   "modules-right": ["battery"],
+  // Numbered workspace indicator
+  "hyprland/workspaces": {
+    "on-click": "activate",
+    "format": "{icon}",
+    "format-icons": {
+      "default": "●",
+      "1": "1",
+      "2": "2",
+      "3": "3",
+      "10": "0",
+      "active": "◉"
+    }
+  },
   "modules-left": ["custom/omarchy", "hyprland/workspaces"]
 }

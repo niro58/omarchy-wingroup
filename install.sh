@@ -44,16 +44,9 @@ link_binaries() {
 # original did not -- so uninstall.sh reads this suffix off the closing marker
 # to know whether it must strip that trailing newline back off to reverse
 # byte-exactly.
-#
-# $2: the "modules-left" line exactly as it was before this script touched it.
-# Install rewrites that line in two ways -- it appends the slots and it drops
-# "hyprland/workspaces" -- and recording the original verbatim is what lets
-# uninstall.sh put the line back byte for byte instead of trying to undo each
-# edit in turn. It is a // comment, so waybar and jq both ignore it.
 waybar_modules_block() {
-  local eof_flag="$1" modules_left="$2" i
+  local eof_flag="$1" i
   printf '  // >>> wingroup\n'
-  [[ -z $modules_left ]] || printf '  // wingroup-modules-left:%s\n' "$modules_left"
   for (( i = 0; i < WG_SLOTS; i++ )); do
     printf '  "custom/wingroup%d": {\n' "$i"
     printf '    "exec": "wingroup-waybar %d",\n' "$i"
@@ -68,67 +61,90 @@ waybar_modules_block() {
   printf '  // <<< wingroup%s\n' "$eof_flag"
 }
 
+# A group is a *named* Hyprland workspace, and Omarchy's "hyprland/workspaces"
+# module keys its format-icons by workspace number -- so every group falls
+# through to the "default" glyph and draws as an anonymous dot, one per group,
+# right next to that group's own name in the strip. Two views of the same
+# thing, and the dot is the useless one.
+#
+# The numbers themselves stay: 1..10 are the user's own, nothing to do with
+# groups. "ignore-workspaces" holds regexes matched against the workspace name,
+# so "^[^0-9]" drops exactly the named ones. (Verified present in the waybar
+# 0.15.0 build this targets: strings on the binary matches "ignore-workspaces".)
+#
+# The markers are the same pair uninstall.sh's strip_block already looks for,
+# and it strips every block it finds, so this one needs nothing new to reverse
+# it. It carries no eof flag -- only the definitions block does, and one flagged
+# closing marker anywhere in the file is what strip_block reads.
+waybar_ignore_block() {
+  printf '    // >>> wingroup\n'
+  printf '    "ignore-workspaces": ["^[^0-9]"],\n'
+  printf '    // <<< wingroup\n'
+}
+
 install_waybar_config() {
   grep -q 'custom/wingroup0' "$WG_WAYBAR_CONFIG" && return 0
 
   local eof_flag=""
   wg_ends_with_newline "$WG_WAYBAR_CONFIG" || eof_flag=" no-eof-nl"
 
-  local slots i tmp modules_left
+  local slots i tmp
   slots=""
   for (( i = 0; i < WG_SLOTS; i++ )); do
     slots+=", \"custom/wingroup$i\""
   done
 
-  modules_left="$(grep -m1 -E '"modules-left"[[:space:]]*:' "$WG_WAYBAR_CONFIG" || true)"
-
+  # Three edits, one pass.
+  #
   # The definitions go in right after the line that opens the top-level object.
   # That is not necessarily line 1: JSONC positively invites a leading comment,
   # and a blank line or a BOM is legal too. Skip blank and comment lines, then
   # anchor on the first line that contains a brace.
   #
-  # On the modules-left line, "hyprland/workspaces" comes out. The group strip
-  # is the workspace indicator now; Omarchy's numbered-workspace module renders
-  # a named group workspace as an anonymous dot next to it, which is a second,
-  # worse view of the same thing. Whichever separator the entry carries goes
-  # with it, so the array stays well formed.
+  # The slots are appended to "modules-left", after whatever is already there.
+  # "hyprland/workspaces" stays and stays where it is: that ordering is what
+  # puts the numbered workspaces first and the group strip after them.
+  #
+  # The "ignore-workspaces" line goes inside the "hyprland/workspaces" object,
+  # which is why that object's opening line has to be findable. See
+  # waybar_ignore_block for what it is for.
   #
   # Values reach awk through the environment, not -v: an -v assignment runs
-  # escape processing over its value, and both the block and the recorded line
-  # are verbatim text that must survive unaltered.
+  # escape processing over its value, and these blocks are verbatim text that
+  # must survive unaltered.
   tmp="$(mktemp)"
-  wg_slots="$slots" wg_block="$(waybar_modules_block "$eof_flag" "$modules_left")" awk '
+  wg_slots="$slots" \
+  wg_block="$(waybar_modules_block "$eof_flag")" \
+  wg_ignore="$(waybar_ignore_block)" awk '
     !inserted && $0 !~ /^[[:space:]]*(\/\/|\/\*|\*)/ && index($0, "{") > 0 {
       print; print ENVIRON["wg_block"]; inserted = 1; next
     }
     /"modules-left"[[:space:]]*:/ {
-      if (gsub(/,[[:space:]]*"hyprland\/workspaces"/, "") == 0)
-        if (gsub(/"hyprland\/workspaces"[[:space:]]*,[[:space:]]*/, "") == 0)
-          gsub(/"hyprland\/workspaces"/, "")
       sub(/\][[:space:]]*,[[:space:]]*$/, ENVIRON["wg_slots"] "],")
       print; next
+    }
+    !ignored && /"hyprland\/workspaces"[[:space:]]*:[[:space:]]*\{[[:space:]]*$/ {
+      print; print ENVIRON["wg_ignore"]; ignored = 1; next
     }
     { print }
   ' "$WG_WAYBAR_CONFIG" >"$tmp"
 
-  # Every half of the edit has to have landed. The sub() above only fires
-  # when the modules-left line is a single line ending in "],", and the block
-  # only goes in when an opening brace was found. Either half alone ships a
-  # broken bar -- slots wired to modules that do not exist, or modules nothing
-  # displays -- and the idempotency guard would then refuse to repair it. So
-  # check for both, and on failure say which is missing and touch nothing.
+  # Every part of the edit has to have landed. The sub() above only fires when
+  # the modules-left line is a single line ending in "],", the definitions only
+  # go in when an opening brace was found, and the ignore line only goes in
+  # when the "hyprland/workspaces" object opens on a line of its own. Any part
+  # alone ships a bar that is wrong -- slots wired to modules that do not
+  # exist, modules nothing displays, or a dot per group next to the names --
+  # and the idempotency guard would then refuse to repair it. So check for all
+  # three, and on failure say which is missing and touch nothing.
   local missing="" defs
   defs="$(grep -cE '"custom/wingroup[0-9]+"[[:space:]]*:[[:space:]]*\{' "$tmp" || true)"
   grep -qE '"modules-left"[[:space:]]*:.*"custom/wingroup0"' "$tmp" \
     || missing+=$'\n  - the '"$WG_SLOTS"$' wingroup slots in "modules-left": it must be a single line ending in "],"'
   (( defs == WG_SLOTS )) \
     || missing+=$'\n  - the '"$WG_SLOTS"$' "custom/wingroupN": { ... } module definitions (found '"$defs"$'): they are inserted after the line that opens the top-level object'
-  # Dropping "hyprland/workspaces" out of a modules-left that held nothing else
-  # leaves "[", and appending the slots to that gives "[, ...": not JSON, and
-  # not something to write over a working bar.
-  if grep -qE '"modules-left"[[:space:]]*:[[:space:]]*\[[[:space:]]*,' "$tmp"; then
-    missing+=$'\n  - a "modules-left" with an entry of its own: removing "hyprland/workspaces" would have emptied it'
-  fi
+  grep -qF '"ignore-workspaces"' "$tmp" \
+    || missing+=$'\n  - the "ignore-workspaces" entry that hides named group workspaces from the numbered indicator: it goes inside the "hyprland/workspaces" object, whose opening line must read \'"hyprland/workspaces": {\''
   if [[ -n $missing ]]; then
     rm -f "$tmp"
     printf 'install.sh: cannot edit %s. Missing after the attempted edit:%s\nNo changes were made.\n' \
