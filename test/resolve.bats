@@ -89,7 +89,7 @@ teardown() { wg_teardown_tmp; }
 }
 
 @test "wg_title_status degrades unknown and absent glyphs to plain" {
-  run wg_title_status "niro@niro:~"
+  run wg_title_status "dev@host:~"
   [ "$output" = "plain" ]
   run wg_title_status "⏳ some future glyph"
   [ "$output" = "plain" ]
@@ -100,8 +100,8 @@ teardown() { wg_teardown_tmp; }
 @test "wg_title_text strips the status glyph but leaves plain titles alone" {
   run wg_title_text "✳ Everest-web full redesign"
   [ "$output" = "Everest-web full redesign" ]
-  run wg_title_text "niro@niro:~"
-  [ "$output" = "niro@niro:~" ]
+  run wg_title_text "dev@host:~"
+  [ "$output" = "dev@host:~" ]
 }
 
 @test "wg_window_table emits one row per window" {

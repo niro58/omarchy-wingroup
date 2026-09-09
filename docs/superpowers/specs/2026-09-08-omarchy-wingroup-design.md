@@ -47,7 +47,7 @@ These were settled during brainstorming and are not open in the plan:
 
 | Question | Decision |
 | --- | --- |
-| What is a group, mechanically? | A **named Hyprland workspace** (`name:everest`) plus metadata. Activating a group dispatches `workspace name:<group>`; its windows tile normally. |
+| What is a group, mechanically? | A **named Hyprland workspace** (`name:shop`) plus metadata. Activating a group dispatches `workspace name:<group>`; its windows tile normally. |
 | How do windows land in a group? | **Automatically by project, with manual override.** Resolution happens once, at window-open time. |
 | Can a group span projects? | Yes. A group owns a list of projects. |
 | What does the keybind open? | **walker in dmenu mode**, themed like the Omarchy menu. |
@@ -123,14 +123,14 @@ Path: `~/.local/state/omarchy/wingroup/state.json`.
   "catchall": null,
   "groups": [
     {
-      "name": "everest",
-      "label": "everest",
-      "projects": ["everest-web", "everest-rs", "everest-api"],
+      "name": "shop",
+      "label": "shop",
+      "projects": ["shop-web", "shop-core", "shop-api"],
       "monitor": null
     },
-    { "name": "plat", "label": "plat", "projects": ["niro-platform"], "monitor": null }
+    { "name": "site", "label": "site", "projects": ["site-platform"], "monitor": null }
   ],
-  "overrides": { "0x5573a1e5f650": "plat" }
+  "overrides": { "0x5573a1e5f650": "site" }
 }
 ```
 
@@ -190,7 +190,7 @@ dies with the Hyprland session.
 `wingroup-waybar <slot-index>` prints one line of waybar JSON for slot *n*:
 
 ```json
-{ "text": "everest²", "tooltip": "everest — 3 windows, 2 busy\nProjects: everest-web, everest-rs", "class": "active" }
+{ "text": "shop²", "tooltip": "shop — 3 windows, 2 busy\nProjects: shop-web, shop-core", "class": "active" }
 ```
 
 Waybar cannot turn a single custom module into several independently clickable
