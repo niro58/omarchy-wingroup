@@ -322,5 +322,5 @@ case $WG_AUTOSTART_ADDED in
   *)
     printf 'Autostart (%s): already configured, left unchanged.\n' "$WG_HYPR_AUTOSTART" ;;
 esac
-printf 'Then create your first group, e.g.: wingroup new everest everest-web everest-rs\n'
+printf 'Then create your first group, e.g.: wingroup new shop shop-web shop-api\n'
 printf 'and file the windows you already have open: wingroup tidy\n'

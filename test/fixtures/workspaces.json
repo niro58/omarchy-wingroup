@@ -1,6 +1,6 @@
 [
   {"id":1,"name":"1","monitor":"eDP-2"},
   {"id":3,"name":"3","monitor":"eDP-2"},
-  {"id":-99,"name":"everest","monitor":"eDP-2"},
-  {"id":-98,"name":"plat","monitor":"DP-1"}
+  {"id":-99,"name":"shop","monitor":"eDP-2"},
+  {"id":-98,"name":"site","monitor":"DP-1"}
 ]

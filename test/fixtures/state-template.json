@@ -2,7 +2,7 @@
   "auto": true,
   "catchall": null,
   "groups": [
-    {"name":"template","label":"template","projects":["everest-web","everest-rs"],"monitor":null}
+    {"name":"template","label":"template","projects":["shop-web","shop-core"],"monitor":null}
   ],
   "overrides": {}
 }

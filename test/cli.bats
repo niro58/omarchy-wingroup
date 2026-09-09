@@ -13,13 +13,13 @@ teardown() { wg_teardown_tmp; }
 wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 
 @test "activate by name switches to the group workspace" {
-  wingroup activate everest
-  [ "$(dispatches)" = "workspace name:everest" ]
+  wingroup activate shop
+  [ "$(dispatches)" = "workspace name:shop" ]
 }
 
 @test "activate by slot index switches to that group" {
   wingroup activate 1
-  [ "$(dispatches)" = "workspace name:plat" ]
+  [ "$(dispatches)" = "workspace name:site" ]
 }
 
 @test "activate rejects an unknown group without dispatching" {
@@ -30,56 +30,56 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 
 @test "next moves to the first group when the focus is not on a group" {
   wingroup next
-  [ "$(dispatches)" = "workspace name:everest" ]
+  [ "$(dispatches)" = "workspace name:shop" ]
 }
 
 @test "next advances from the focused group" {
-  export WG_FIXTURE_ACTIVEWS="$WG_FIXTURES/activeworkspace-everest.json"
+  export WG_FIXTURE_ACTIVEWS="$WG_FIXTURES/activeworkspace-shop.json"
   wingroup next
-  [ "$(dispatches)" = "workspace name:plat" ]
+  [ "$(dispatches)" = "workspace name:site" ]
 }
 
 @test "prev wraps around from the first group to the last" {
-  export WG_FIXTURE_ACTIVEWS="$WG_FIXTURES/activeworkspace-everest.json"
+  export WG_FIXTURE_ACTIVEWS="$WG_FIXTURES/activeworkspace-shop.json"
   wingroup prev
-  [ "$(dispatches)" = "workspace name:drivora" ]
+  [ "$(dispatches)" = "workspace name:fleet" ]
 }
 
 @test "new creates a group with a slugified name and the given projects" {
-  wingroup new "Niro 3D Print" niro-3dprint-app niro-3dprint-web
+  wingroup new "Acme 3D Print" acme-3d-app acme-3d-web
   run bash -c "jq -r '.groups[-1].name' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "niro-3d-print" ]
+  [ "$output" = "acme-3d-print" ]
   run bash -c "jq -r '.groups[-1].label' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "Niro 3D Print" ]
+  [ "$output" = "Acme 3D Print" ]
   run bash -c "jq -r '.groups[-1].projects | join(\",\")' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "niro-3dprint-app,niro-3dprint-web" ]
+  [ "$output" = "acme-3d-app,acme-3d-web" ]
 }
 
 @test "new refuses a duplicate group name" {
-  run wingroup new everest
+  run wingroup new shop
   [ "$status" -ne 0 ]
 }
 
 @test "rename changes the label and leaves the workspace name alone" {
-  wingroup rename everest "EV stack"
+  wingroup rename shop "EV stack"
   run bash -c "jq -r '.groups[0].label' '$WG_STATE_DIR/state.json'"
   [ "$output" = "EV stack" ]
   run bash -c "jq -r '.groups[0].name' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "everest" ]
+  [ "$output" = "shop" ]
 }
 
 @test "dissolve removes the group and never touches a window" {
-  wingroup dissolve plat
+  wingroup dissolve site
   run bash -c "jq -r '[.groups[].name] | join(\",\")' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "everest,drivora" ]
+  [ "$output" = "shop,fleet" ]
   [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
 @test "send writes an override and moves the window" {
-  wingroup send --address 0xaaa1 --group plat
+  wingroup send --address 0xaaa1 --group site
   run bash -c "jq -r '.overrides[\"0xaaa1\"]' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "plat" ]
-  [ "$(dispatches)" = "movetoworkspacesilent name:plat,address:0xaaa1" ]
+  [ "$output" = "site" ]
+  [ "$(dispatches)" = "movetoworkspacesilent name:site,address:0xaaa1" ]
 }
 
 @test "send refuses an unknown group" {
@@ -129,7 +129,7 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 @test "menu activates the group the picker returned" {
   export WG_WALKER_PICK=1
   wingroup menu
-  [ "$(dispatches)" = "workspace name:plat" ]
+  [ "$(dispatches)" = "workspace name:site" ]
 }
 
 # SUPER+G pressed twice, or the keybind and the bar's right-click together,
@@ -151,7 +151,7 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
   flock -n 9
   exec 9>&-
   wingroup menu
-  [ "$(dispatches)" = "workspace name:plat" ]
+  [ "$(dispatches)" = "workspace name:site" ]
 }
 
 # Three groups, then new/delete/tidy/toggle-auto, then the separator: the first
@@ -166,25 +166,25 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 
 @test "the picker's new-group entry creates the group from what was typed" {
   export WG_WALKER_PICK=3
-  export WG_WALKER_INPUT="Niro 3D Print"
+  export WG_WALKER_INPUT="Acme 3D Print"
   wingroup menu
   run bash -c "jq -r '.groups[-1].name' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "niro-3d-print" ]
+  [ "$output" = "acme-3d-print" ]
   run bash -c "jq -r '.groups[-1].label' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "Niro 3D Print" ]
+  [ "$output" = "Acme 3D Print" ]
 }
 
 # A group with no projects files nothing, so the entry would still leave the
 # user with work to do. The window in front of them is the obvious first
 # project, and wanting a group for it is why they reached for the entry.
 @test "the new group picks up the focused window's project when nothing owns it" {
-  wg_patch_state '.groups[0].projects = ["everest-rs", "everest-api"]'
+  wg_patch_state '.groups[0].projects = ["shop-core", "shop-api"]'
   export WG_WALKER_PICK=3
   export WG_WALKER_INPUT="Web"
   wingroup menu
   run bash -c "jq -r '.groups[-1].projects | join(\",\")' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "everest-web" ]
-  [[ "$(notifications)" == *"everest-web"* ]]
+  [ "$output" = "shop-web" ]
+  [[ "$(notifications)" == *"shop-web"* ]]
 }
 
 @test "the new group takes no project when another group already owns it" {
@@ -193,7 +193,7 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
   wingroup menu
   run bash -c "jq -r '.groups[-1].projects | length' '$WG_STATE_DIR/state.json'"
   [ "$output" -eq 0 ]
-  [[ "$(notifications)" == *"already belongs to everest"* ]]
+  [[ "$(notifications)" == *"already belongs to shop"* ]]
 }
 
 @test "the new group takes no project when the focused window is in none" {
@@ -229,7 +229,7 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 
 @test "the new-group entry rejects a duplicate exactly as wingroup new does" {
   export WG_WALKER_PICK=3
-  export WG_WALKER_INPUT="everest"
+  export WG_WALKER_INPUT="shop"
   run wingroup menu
   [ "$status" -ne 0 ]
   run bash -c "jq -r '.groups | length' '$WG_STATE_DIR/state.json'"
@@ -243,22 +243,22 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 # open elsewhere showed them in its count and on the bar, then activating it
 # showed an empty workspace, because nothing ever moved them.
 @test "new files the windows its projects already own onto its workspace" {
-  wg_patch_state '.groups |= map(select(.name != "everest"))'
-  wingroup new everest everest-web everest-rs everest-api
+  wg_patch_state '.groups |= map(select(.name != "shop"))'
+  wingroup new shop shop-web shop-core shop-api
   run dispatches
-  [ "${lines[0]}" = "movetoworkspacesilent name:everest,address:0xaaa1" ]
-  [ "${lines[1]}" = "movetoworkspacesilent name:everest,address:0xaaa2" ]
+  [ "${lines[0]}" = "movetoworkspacesilent name:shop,address:0xaaa1" ]
+  [ "${lines[1]}" = "movetoworkspacesilent name:shop,address:0xaaa2" ]
   [ "${#lines[@]}" -eq 2 ]
 }
 
-# 0xaaa1 is already on the everest workspace, 0xaaa8 floats over everest-web,
-# and 0xaaa3 was sent to plat by hand. Filing is tidy's rules, narrowed to the
+# 0xaaa1 is already on the shop workspace, 0xaaa8 floats over shop-web,
+# and 0xaaa3 was sent to site by hand. Filing is tidy's rules, narrowed to the
 # new group -- so of the group's four windows only one is dispatched at.
 @test "new moves nothing that is floating, already filed, or sent by hand" {
   export WG_FIXTURE_CLIENTS="$WG_FIXTURES/clients-new-group.json"
-  wg_patch_state '.groups |= map(select(.name != "everest"))'
-  wingroup new everest everest-web everest-rs everest-api
-  [ "$(dispatches)" = "movetoworkspacesilent name:everest,address:0xaaa2" ]
+  wg_patch_state '.groups |= map(select(.name != "shop"))'
+  wingroup new shop shop-web shop-core shop-api
+  [ "$(dispatches)" = "movetoworkspacesilent name:shop,address:0xaaa2" ]
 }
 
 # A group with no projects owns no window yet, so there is nothing to file and
@@ -271,8 +271,8 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 }
 
 @test "new leaves the windows of every other group where they are" {
-  wg_patch_state '.groups |= map(select(.name != "everest"))'
-  wingroup new everest everest-web everest-rs everest-api
+  wg_patch_state '.groups |= map(select(.name != "shop"))'
+  wingroup new shop shop-web shop-core shop-api
   run bash -c "grep -c '0xaaa4\|0xaaa5' '$WG_DISPATCH_LOG' || true"
   [ "$output" -eq 0 ]
 }
@@ -280,12 +280,12 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 # The picker shares cmd_new, so it files too -- and says what it filed, since a
 # picker action has no terminal to print to.
 @test "the picker's new-group entry files the windows the group claims, and says so" {
-  wg_patch_state '.groups |= map(select(.name != "everest"))'
+  wg_patch_state '.groups |= map(select(.name != "shop"))'
   # Two groups left, so "+ new group…" is index 2.
   export WG_WALKER_PICK=2
-  export WG_WALKER_INPUT="Everest"
+  export WG_WALKER_INPUT="Shop"
   wingroup menu
-  [ "$(dispatches)" = "movetoworkspacesilent name:everest,address:0xaaa1" ]
+  [ "$(dispatches)" = "movetoworkspacesilent name:shop,address:0xaaa1" ]
   [[ "$(notifications)" == *"Filed 1 window(s) onto it"* ]]
 }
 
@@ -297,8 +297,8 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
   export WG_WALKER_PICKS="4 1 1"
   wingroup menu
   run bash -c "jq -r '[.groups[].name] | join(\",\")' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "everest,drivora" ]
-  [[ "$(notifications)" == *"Removed group plat"* ]]
+  [ "$output" = "shop,fleet" ]
+  [[ "$(notifications)" == *"Removed group site"* ]]
 }
 
 # dissolve's semantics, unchanged: the group and its overrides go, the windows
@@ -317,7 +317,7 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
   export WG_WALKER_PICKS="4 1 0"
   wingroup menu
   run bash -c "jq -r '[.groups[].name] | join(\",\")' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "everest,plat,drivora" ]
+  [ "$output" = "shop,site,fleet" ]
   [ ! -s "$WG_NOTIFY_LOG" ]
   [ ! -s "$WG_DISPATCH_LOG" ]
 }
@@ -378,10 +378,10 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 
 @test "the picker's own failures reach the notification daemon" {
   export WG_WALKER_PICK=3
-  export WG_WALKER_INPUT="everest"
+  export WG_WALKER_INPUT="shop"
   run wingroup menu
   [ "$status" -ne 0 ]
-  [[ "$(notifications)" == *"group already exists: everest"* ]]
+  [[ "$(notifications)" == *"group already exists: shop"* ]]
 }
 
 # At a terminal the message is already in front of the user; a desktop
@@ -397,20 +397,20 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 # --- pinning a group to a monitor ---
 
 @test "monitor pins a group to a monitor that exists" {
-  wingroup monitor everest DP-1
+  wingroup monitor shop DP-1
   run bash -c "jq -r '.groups[0].monitor' '$WG_STATE_DIR/state.json'"
   [ "$output" = "DP-1" ]
 }
 
 @test "monitor - clears the pin" {
-  wingroup monitor everest DP-1
-  wingroup monitor everest -
+  wingroup monitor shop DP-1
+  wingroup monitor shop -
   run bash -c "jq -r '.groups[0].monitor' '$WG_STATE_DIR/state.json'"
   [ "$output" = "null" ]
 }
 
 @test "monitor refuses a monitor that does not exist, and lists the ones that do" {
-  run wingroup monitor everest HDMI-9
+  run wingroup monitor shop HDMI-9
   [ "$status" -ne 0 ]
   [[ "$output" == *"HDMI-9"* ]]
   [[ "$output" == *"eDP-2, DP-1"* ]]
@@ -429,20 +429,20 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 # stays on the laptop forever, and the pin does nothing at all.
 @test "activate on a pinned group focuses the monitor and drags the workspace over" {
   wg_patch_state '.groups[0].monitor = "DP-1"'
-  wingroup activate everest
+  wingroup activate shop
   run dispatches
   [ "${lines[0]}" = "focusmonitor DP-1" ]
-  [ "${lines[1]}" = "moveworkspacetomonitor name:everest DP-1" ]
-  [ "${lines[2]}" = "workspace name:everest" ]
+  [ "${lines[1]}" = "moveworkspacetomonitor name:shop DP-1" ]
+  [ "${lines[2]}" = "workspace name:shop" ]
   [ "${#lines[@]}" -eq 3 ]
 }
 
 @test "activate does not move a workspace that is already on its pinned monitor" {
   wg_patch_state '.groups[1].monitor = "DP-1"'
-  wingroup activate plat
+  wingroup activate site
   run dispatches
   [ "${lines[0]}" = "focusmonitor DP-1" ]
-  [ "${lines[1]}" = "workspace name:plat" ]
+  [ "${lines[1]}" = "workspace name:site" ]
   [ "${#lines[@]}" -eq 2 ]
   run bash -c "grep -c moveworkspacetomonitor '$WG_DISPATCH_LOG' || true"
   [ "$output" -eq 0 ]
@@ -452,17 +452,17 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 # created on the monitor that was just focused.
 @test "activate on a pinned group whose workspace does not exist yet only focuses and switches" {
   wg_patch_state '.groups[2].monitor = "DP-1"'
-  wingroup activate drivora
+  wingroup activate fleet
   run dispatches
   [ "${lines[0]}" = "focusmonitor DP-1" ]
-  [ "${lines[1]}" = "workspace name:drivora" ]
+  [ "${lines[1]}" = "workspace name:fleet" ]
   [ "${#lines[@]}" -eq 2 ]
 }
 
 @test "activate on an unpinned group touches no monitor, even beside a pinned one" {
   wg_patch_state '.groups[1].monitor = "DP-1"'
-  wingroup activate everest
-  [ "$(dispatches)" = "workspace name:everest" ]
+  wingroup activate shop
+  [ "$(dispatches)" = "workspace name:shop" ]
 }
 
 @test "an unknown subcommand exits non-zero with usage" {

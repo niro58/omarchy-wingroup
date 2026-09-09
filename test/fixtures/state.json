@@ -2,9 +2,9 @@
   "auto": true,
   "catchall": null,
   "groups": [
-    {"name":"everest","label":"everest","projects":["everest-web","everest-rs","everest-api"],"monitor":null},
-    {"name":"plat","label":"plat","projects":["niro-platform"],"monitor":null},
-    {"name":"drivora","label":"drivora","projects":["driver-hub"],"monitor":null}
+    {"name":"shop","label":"shop","projects":["shop-web","shop-core","shop-api"],"monitor":null},
+    {"name":"site","label":"site","projects":["site-platform"],"monitor":null},
+    {"name":"fleet","label":"fleet","projects":["fleet-hub"],"monitor":null}
   ],
-  "overrides": {"0xaaa3":"plat"}
+  "overrides": {"0xaaa3":"site"}
 }

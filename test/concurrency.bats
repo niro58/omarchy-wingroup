@@ -106,5 +106,5 @@ EOF
   for i in "${pids[@]}"; do wait "$i"; done
 
   run jq -r '[.groups[].name] | sort | join(",")' "$WG_STATE_DIR/state.json"
-  [ "$output" = "drivora,everest,g0,g1,g2,g3,g4,plat" ]
+  [ "$output" = "fleet,g0,g1,g2,g3,g4,shop,site" ]
 }

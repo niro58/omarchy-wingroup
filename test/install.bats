@@ -77,7 +77,7 @@ pattern_hides() {
   local pattern name
   pattern="$(installed_ignore_pattern)"
   [ -n "$pattern" ]
-  for name in plat mgmt template other 3dprint niro-3d-print; do
+  for name in site mgmt template other 3dprint niro-3d-print; do
     pattern_hides "$pattern" "$name" || {
       printf 'pattern %s does not hide workspace %s\n' "$pattern" "$name" >&2
       return 1
