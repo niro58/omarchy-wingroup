@@ -76,6 +76,7 @@ wingroup tidy [--yes]                  file every window by its project
 wingroup new <label> [project...]      create a group
 wingroup rename <name> <label>         change a group's displayed label
 wingroup dissolve <name>               remove a group, leaving its windows alone
+wingroup monitor <group> <mon|->       pin a group to a monitor, or clear the pin
 wingroup toggle-auto                   turn automatic assignment on or off
 ```
 
@@ -127,6 +128,21 @@ it. It never touches a window — anything sitting on that workspace just
 stays there, no longer tracked as a group.
 
 ```console
+$ wingroup monitor everest DP-1
+$ wingroup monitor everest -
+```
+Pins a group to a monitor, or clears the pin with `-`. The monitor name is one
+of the names `hyprctl monitors` reports; anything else is refused, with the
+available names listed. A pinned group always opens on its monitor: `wingroup
+activate` focuses that monitor first and, if the group's workspace is currently
+living on a different one, moves the workspace across before switching to it.
+That move is the point — Hyprland creates a named workspace on whichever
+monitor happens to be focused and leaves it bound there, so a group first
+opened on the laptop would otherwise stay on the laptop forever. A group with
+no pin (`"monitor": null`, the default) is switched to exactly as before,
+wherever it already is.
+
+```console
 $ wingroup tidy --yes
 ```
 Files every window that's on the wrong workspace for its group in one pass.
@@ -144,11 +160,26 @@ affecting groups, overrides, or windows already placed.
 ```console
 $ wingroup menu
 ```
-Opens the walker picker: every group with its window, idle and busy counts,
-every window with its status glyph and group, then `+ new group…`, `⟳ tidy`,
-and `⏻ auto-assign: on/off`. This is `SUPER+G`. Opening it while a picker is
-already up does nothing — the second one would only stack on top of the
-first.
+Opens the walker picker, in this order:
+
+1. every group, with its window, idle and busy counts, and the monitor it is
+   pinned to if it has one;
+2. the three actions — `+ new group…`, `⟳ tidy`, `⏻ auto-assign: on/off`;
+3. a separator, then every window with its status glyph and group.
+
+The actions sit directly under the groups rather than at the bottom, so they
+stay a few rows in no matter how many windows are open. This is `SUPER+G`.
+Opening it while a picker is already up does nothing — the second one would
+only stack on top of the first.
+
+`+ new group…` prompts for the label in a walker text field, then creates the
+group the same way `wingroup new` does — same slugification, same refusal of a
+duplicate name. If the window you had focused sits in a project that no group
+owns yet, that project is added to the new group; otherwise the group starts
+empty. Either way it tells you which happened with a desktop notification,
+since a picker opened from a keybind has no terminal to print to. Failures from
+picker actions are notified the same way, so an entry can never look like it
+silently did nothing.
 
 ## `state.json`
 
@@ -180,8 +211,8 @@ Lives at `~/.local/state/omarchy/wingroup/state.json`. Shape:
   stable); `label` is what's shown in waybar and the picker; `projects` is
   the list of `~/projects/*` directory names this group owns — the example
   above is one group (`everest`) owning three projects
-  (`everest-web`, `everest-rs`, `everest-api`); `monitor` is reserved for a
-  future per-group monitor binding and currently unused.
+  (`everest-web`, `everest-rs`, `everest-api`); `monitor` is the monitor this
+  group is pinned to (`wingroup monitor`), or `null` for no pin.
 - **`overrides`** — window address to group name, for windows explicitly
   sent to a group with `wingroup send` (or the picker). Overrides beat
   automatic resolution and are dropped automatically when the window
@@ -270,6 +301,13 @@ $ ./install.sh
 - Symlinks everything in `bin/` into `~/.local/bin`.
 - Adds 8 `custom/wingroup0`–`custom/wingroup7` modules to
   `~/.config/waybar/config.jsonc` and wires them into `modules-left`.
+- Removes `"hyprland/workspaces"` from `modules-left`. The group strip is the
+  workspace indicator now, and Omarchy's numbered-workspace module draws a
+  named group workspace as an anonymous dot beside it — a second, worse view of
+  the same thing. `uninstall.sh` puts the entry back exactly where it was. If
+  `modules-left` cannot be edited — it is spread over several lines, or
+  `"hyprland/workspaces"` is the only thing in it — install says so and changes
+  nothing.
 - Appends matching styles to `~/.config/waybar/style.css`.
 - Adds the `SUPER+G` / `SUPER+CTRL+G` keybinds to
   `~/.config/hypr/bindings.conf` (and unbinds native `SUPER+G`).
@@ -312,6 +350,9 @@ All of these ship with Omarchy:
   it.
 - `socat` — the daemon reads Hyprland's event socket through it.
 - `pkill` — signals waybar to redraw its custom modules after a change.
+- `notify-send` — how a picker action reports what it did, or why it could
+  not. There is no terminal behind `SUPER+G`. If it is missing, nothing breaks:
+  the same message still goes to stderr.
 - Standard base utilities the scripts and installer rely on: `flock` (the
   daemon's and the picker's single-instance locks), `mktemp`, `readlink`,
   `ps` (one walk of the process table per window-table build, to find each
@@ -338,11 +379,6 @@ picker before applying anything, so you can confirm or cancel.
 
 ## Known limitations
 
-- **`+ new group…` in the picker doesn't create a group.** Walker's dmenu
-  mode has no text-entry step, so picking that entry just tells you to run
-  `wingroup new <label> [project...]` in a terminal instead. There's no way
-  around this without either changing the picker mechanism or bolting on a
-  separate prompt.
 - **Only the first 8 groups get a waybar slot.** Groups beyond the 8th
   aren't shown as their own button, but they're still fully usable — reach
   them from `wingroup menu`, and the 8th slot's tooltip lists how many more
@@ -357,8 +393,6 @@ picker before applying anything, so you can confirm or cancel.
 - **A GTK layer-shell overlay** replacing the walker picker, with
   drag-and-drop between groups. The backend is already CLI-shaped, so the
   UI is replaceable without touching resolution, state, or the daemon.
-- **Per-group monitor binding.** `state.json` already carries a `monitor`
-  field; nothing reads it yet.
 
 ## License
 
