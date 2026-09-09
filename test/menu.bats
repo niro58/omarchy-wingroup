@@ -54,23 +54,31 @@ teardown() { wg_teardown_tmp; }
   [[ "$display" == *"ungrouped"* ]]
 }
 
-# Order matters more than it looks. The three actions used to sit below every
-# window, which on a working desktop is some twenty rows down: far enough that
+# Order matters more than it looks. The actions used to sit below every window,
+# which on a working desktop is some twenty rows down: far enough that
 # "+ new group…" read as an entry the picker did not have. Groups stay first --
 # switching to one is what SUPER+G is for -- and the actions come next.
-@test "the picker lists groups, then the three actions, then the windows" {
+@test "the picker lists groups, then the actions, then the windows" {
   actions="$(wg_menu_build | cut -f1 | sed 's/:.*//' | tr '\n' ' ')"
-  [ "$actions" = "group group group new tidy toggle-auto noop window window window window window window window " ]
+  [ "$actions" = "group group group new delete tidy toggle-auto noop window window window window window window window " ]
 }
 
 # The index walker returns is a position in this list, so the layout is a
 # contract, not a presentation detail.
-@test "the action entries follow the last group, at indices 3, 4 and 5" {
+@test "the action entries follow the last group, at indices 3 to 6" {
   [ "$(wg_menu_build | sed -n '4p' | cut -f1)" = "new" ]
-  [ "$(wg_menu_build | sed -n '5p' | cut -f1)" = "tidy" ]
-  [ "$(wg_menu_build | sed -n '6p' | cut -f1)" = "toggle-auto" ]
-  [ "$(wg_menu_build | sed -n '7p' | cut -f1)" = "noop" ]
-  [ "$(wg_menu_build | sed -n '8p' | cut -f1)" = "window:0xaaa1" ]
+  [ "$(wg_menu_build | sed -n '5p' | cut -f1)" = "delete" ]
+  [ "$(wg_menu_build | sed -n '6p' | cut -f1)" = "tidy" ]
+  [ "$(wg_menu_build | sed -n '7p' | cut -f1)" = "toggle-auto" ]
+  [ "$(wg_menu_build | sed -n '8p' | cut -f1)" = "noop" ]
+  [ "$(wg_menu_build | sed -n '9p' | cut -f1)" = "window:0xaaa1" ]
+}
+
+# A group can be made from the picker; until now it could only be unmade from a
+# terminal.
+@test "the picker offers a way to remove a group" {
+  display="$(wg_menu_build | grep '^delete\b' | cut -f2)"
+  [[ "$display" == *"remove a group"* ]]
 }
 
 # state.json has carried a per-group monitor since the first version and
@@ -136,6 +144,23 @@ teardown() { wg_teardown_tmp; }
 @test "wg_group_menu_build offers only groups and a way to make a new one" {
   groups="$(wg_group_menu_build | cut -f1 | tr '\n' ' ')"
   [ "$groups" = "group:everest group:plat group:drivora new " ]
+}
+
+# The chooser for removing a group: no "+ new group…" on it -- offering to make
+# one there is noise, and one entry off is the wrong group gone.
+@test "wg_group_list_build offers the groups and nothing else" {
+  groups="$(wg_group_list_build | cut -f1 | tr '\n' ' ')"
+  [ "$groups" = "group:everest group:plat group:drivora " ]
+}
+
+# Nothing is under the cursor by accident: the entry at index 0 is the one that
+# does nothing.
+@test "the delete confirmation puts cancel first and names the group" {
+  run bash -c "cd '$WG_ROOT' && source lib/hypr.sh && source lib/state.sh \
+    && source lib/resolve.sh && source lib/menu.sh && wg_delete_confirm_build plat plat"
+  [ "${lines[0]}" = "$(printf 'noop\tCancel')" ]
+  [[ "${lines[1]}" == "delete:plat"*"Remove group plat"* ]]
+  [[ "${lines[1]}" == *"windows stay where they are"* ]]
 }
 
 @test "wg_menu_run returns the action at the index walker chose" {

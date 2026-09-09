@@ -91,6 +91,15 @@ picker and tooltips. `project...` is the list of `~/projects/*` directories
 that belong to this group — you can pass none and add windows to it later
 with `wingroup send`.
 
+Creating the group also **files the windows it has just claimed**: every open
+window whose project belongs to the new group is moved onto its workspace
+straight away, by the same rules `wingroup tidy` uses — a floating window is
+left floating, a window already on the right workspace is not touched, and a
+window you sent somewhere by hand keeps the group you sent it to. A group that
+counts a window has to be a group that holds it; otherwise the bar says
+`other¹` and activating it shows an empty workspace. A group created with no
+projects owns no window yet, so nothing moves.
+
 ```console
 $ wingroup activate everest      # by name
 $ wingroup activate 1            # by slot index (0-based, in state.json order)
@@ -112,7 +121,9 @@ Moves a specific window to a group and remembers that choice as an
 **override**, so automatic assignment won't move it back even if its cwd
 says otherwise. Run without `--address`/`--group` and it defaults to the
 currently focused window and opens a picker of groups to send it to —
-that's what `SUPER+CTRL+G` does.
+that's what `SUPER+CTRL+G` does. That picker's last entry, `+ new group…`,
+opens the same prompt `SUPER+G`'s does: it creates the group and then sends the
+window to it, so a window can go somewhere that does not exist yet.
 
 ```console
 $ wingroup rename everest "EV stack"
@@ -125,7 +136,8 @@ $ wingroup dissolve plat
 ```
 Removes a group from `state.json` and drops any overrides that pointed at
 it. It never touches a window — anything sitting on that workspace just
-stays there, no longer tracked as a group.
+stays there, no longer tracked as a group. The picker's `− remove a group…`
+does exactly this, after asking which group and confirming that one by name.
 
 ```console
 $ wingroup monitor everest DP-1
@@ -164,7 +176,8 @@ Opens the walker picker, in this order:
 
 1. every group, with its window, idle and busy counts, and the monitor it is
    pinned to if it has one;
-2. the three actions — `+ new group…`, `⟳ tidy`, `⏻ auto-assign: on/off`;
+2. the four actions — `+ new group…`, `− remove a group…`, `⟳ tidy`,
+   `⏻ auto-assign: on/off`;
 3. a separator, then every window with its status glyph and group.
 
 The actions sit directly under the groups rather than at the bottom, so they
@@ -174,12 +187,20 @@ only stack on top of the first.
 
 `+ new group…` prompts for the label in a walker text field, then creates the
 group the same way `wingroup new` does — same slugification, same refusal of a
-duplicate name. If the window you had focused sits in a project that no group
-owns yet, that project is added to the new group; otherwise the group starts
-empty. Either way it tells you which happened with a desktop notification,
+duplicate name, and the same filing of the windows the new group claims. If the
+window you had focused sits in a project that no group owns yet, that project is
+added to the new group; otherwise the group starts empty. Either way it tells
+you which happened, and how many windows it filed, with a desktop notification,
 since a picker opened from a keybind has no terminal to print to. Failures from
 picker actions are notified the same way, so an entry can never look like it
 silently did nothing.
+
+`− remove a group…` is `wingroup dissolve` without a terminal: it asks which
+group, then asks again to confirm that one by name — with *Cancel* as the entry
+already under the cursor, because there is no undo — and then removes the group
+and its overrides. It never closes or moves a window; everything on that
+workspace stays exactly where it is. It says which group went, and says so too
+when there are no groups to remove.
 
 ## `state.json`
 
@@ -303,15 +324,17 @@ $ ./install.sh
   `~/.config/waybar/config.jsonc` and wires them into `modules-left`.
   `"hyprland/workspaces"` stays exactly where it was, so the bar reads left to
   right: Omarchy menu icon, your numbered workspaces, then the group strip.
-- Adds `"ignore-workspaces": ["^[^0-9]"]` to the `"hyprland/workspaces"`
+- Adds `"ignore-workspaces": [".*[^0-9].*"]` to the `"hyprland/workspaces"`
   object. A group *is* a named Hyprland workspace, and that module has no icon
   for a name — it falls through to its `format-icons` `default` glyph and draws
   an anonymous dot per group, right next to that group's own name in the strip.
-  The regex matches workspace names that do not start with a digit, so the dots
-  go and your numbered workspaces 1–0 are untouched. `uninstall.sh` takes the
-  line back out. If the edit cannot be made — `modules-left` is spread over
-  several lines, or there is no `"hyprland/workspaces": {` object to put the
-  setting in — install says which part failed and changes nothing.
+  Waybar matches these patterns against the *whole* workspace name, so the regex
+  reads "contains at least one non-digit": every group name matches, including
+  one that starts with a digit like `3dprint`, and your numbered workspaces 1–0
+  match nothing and stay. `uninstall.sh` takes the line back out. If the edit
+  cannot be made — `modules-left` is spread over several lines, or there is no
+  `"hyprland/workspaces": {` object to put the setting in — install says which
+  part failed and changes nothing.
 - Appends matching styles to `~/.config/waybar/style.css`.
 - Adds the `SUPER+G` / `SUPER+CTRL+G` keybinds to
   `~/.config/hypr/bindings.conf` (and unbinds native `SUPER+G`).

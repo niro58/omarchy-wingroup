@@ -15,4 +15,17 @@ for arg in "$@"; do
     exit 0
   fi
 done
+# A flow with more than one picker in it -- choose a group, then confirm --
+# needs a different answer each time, so $WG_WALKER_PICKS is a space-separated
+# list consumed one entry per invocation. Running past the end answers nothing,
+# which is what cancelling looks like.
+if [[ -n ${WG_WALKER_PICKS:-} ]]; then
+  counter="${WG_WALKER_PICKS_STATE:-${WG_TMP:-/tmp}/walker-picks.n}"
+  n=0
+  [[ -f $counter ]] && n="$(cat "$counter")"
+  printf '%s' "$(( n + 1 ))" >"$counter"
+  read -r -a picks <<<"$WG_WALKER_PICKS"
+  printf '%s\n' "${picks[n]:-}"
+  exit 0
+fi
 printf '%s\n' "${WG_WALKER_PICK:-}"

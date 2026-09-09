@@ -157,9 +157,17 @@ cmd_cycle() {
   wg_hypr_dispatch workspace "name:${names[index]}"
 }
 
+# The group cmd_new last created, and how many windows it filed onto it. Its
+# callers -- the picker's "+ new group…" and the send picker -- need both, and
+# a subshell would lose them.
+WG_NEW_NAME=""
+WG_NEW_MOVED=0
+
 cmd_new() {
   local label="${1:?usage: wingroup new <label> [project...]}"; shift
   local state name projects
+  WG_NEW_NAME=""
+  WG_NEW_MOVED=0
   state="$(wg_state_read)"
   name="$(wg_slug "$label")"
   [[ -n $name ]] || wg_die "label produces an empty group name"
@@ -167,7 +175,18 @@ cmd_new() {
   projects="$(printf '%s\n' ${@+"$@"} | jq -R -s 'split("\n") | map(select(length > 0))')"
   wg_state_write "$(jq --arg n "$name" --arg l "$label" --argjson p "$projects" \
     '.groups += [{name: $n, label: $l, projects: $p, monitor: null}]' <<<"$state")"
+  WG_NEW_NAME="$name"
+
+  # A group that owns no project cannot own a window yet -- an override names a
+  # group that already existed when the window was sent to it -- so there is
+  # nothing to file, and no reason to ask the compositor for the window table.
+  if (( $# )); then
+    WG_NEW_MOVED="$(wg_group_file_windows "$name")"
+  fi
   wg_refresh
+  if (( WG_NEW_MOVED > 0 )); then
+    printf 'wingroup: filed %s window(s) onto %s\n' "$WG_NEW_MOVED" "$name"
+  fi
 }
 
 # The picker's "+ new group…".
@@ -200,16 +219,55 @@ cmd_new_interactive() {
     owner="$(wg_project_group "$project" "$state")"
   fi
 
+  local body
   if [[ -n $project && -z $owner ]]; then
     cmd_new "$label" "$project"
-    wg_notify "wingroup" "Created group $label with project $project."
+    body="Created group $label with project $project."
   elif [[ -n $owner ]]; then
     cmd_new "$label"
-    wg_notify "wingroup" "Created group $label with no projects: $project already belongs to $owner."
+    body="Created group $label with no projects: $project already belongs to $owner."
   else
     cmd_new "$label"
-    wg_notify "wingroup" "Created group $label with no projects: the focused window is not in a project."
+    body="Created group $label with no projects: the focused window is not in a project."
   fi
+  # The windows cmd_new just filed onto it: a group that claims windows moves
+  # them, and the notification is the only place a picker action can say so.
+  if (( WG_NEW_MOVED > 0 )); then
+    body+=" Filed $WG_NEW_MOVED window(s) onto it."
+  fi
+  wg_notify "wingroup" "$body"
+}
+
+# The picker's "− remove a group…".
+#
+# `wingroup dissolve` has always existed, but only in a terminal -- a group made
+# by mistake from the picker could not be unmade from it. Two steps, because
+# there is no undo: pick which group, then confirm that one by name.
+#
+# Semantics are dissolve's, unchanged: the group and any overrides pointing at
+# it go, and not one window is closed, moved or otherwise touched. Windows
+# sitting on the workspace stay exactly where they are.
+cmd_delete_interactive() {
+  local state action name label confirm
+
+  state="$(wg_state_read)"
+  if [[ -z "$(wg_state_group_names "$state")" ]]; then
+    wg_notify "wingroup" "There are no groups to remove."
+    return 0
+  fi
+
+  action="$(wg_group_list_build "$state" | wg_menu_run 'Remove which group?')"
+  [[ -n $action ]] || return 0
+  name="${action#group:}"
+
+  label="$(wg_state_group_field "$name" label "$state")"
+  [[ -n $label ]] || label="$name"
+
+  confirm="$(wg_delete_confirm_build "$name" "$label" | wg_menu_run "Remove $label?")"
+  [[ $confirm == "delete:$name" ]] || return 0
+
+  cmd_dissolve "$name"
+  wg_notify "wingroup" "Removed group $label. Its windows were left where they are."
 }
 
 cmd_rename() {
@@ -249,9 +307,15 @@ cmd_send() {
     action="$(wg_group_menu_build | wg_menu_run 'Send to group')"
     [[ -n $action ]] || return 0
     if [[ $action == new ]]; then
-      wg_die "create the group first: wingroup new <label> [project...]"
+      # The same prompt SUPER+G's "+ new group…" opens, and the same creation
+      # behind it -- then carry on and send the window to what it made. A
+      # cancelled prompt creates nothing, so there is nothing to send to.
+      cmd_new_interactive
+      [[ -n $WG_NEW_NAME ]] || return 0
+      group="$WG_NEW_NAME"
+    else
+      group="${action#group:}"
     fi
-    group="${action#group:}"
   fi
 
   state="$(wg_state_read)"
@@ -263,6 +327,11 @@ cmd_send() {
 
 # Prints one "address<TAB>group" line per window that is on the wrong workspace.
 #
+# With $1 given, only that group's windows are considered -- same skips, same
+# resolution, just narrowed. That is what a freshly created group needs: the
+# windows it now owns are already open somewhere else, and nothing else on the
+# desktop should be touched on its account.
+#
 # NOTE: rows come from wg_window_table's nine tab-separated columns, and the
 # group/worktree columns are frequently empty. Bash's `read` treats tab as
 # IFS whitespace, so a multi-variable `IFS=$'\t' read -r a b c ...` silently
@@ -270,6 +339,7 @@ cmd_send() {
 # column would shift every field after it (e.g. status landing in $group).
 # Read each row whole and pull columns out with `cut` instead.
 wg_tidy_moves() {
+  local only="${1:-}"
   local state line address workspace floating group
   state="$(wg_state_read)"
   while IFS= read -r line; do
@@ -277,6 +347,7 @@ wg_tidy_moves() {
     [[ $floating == "true" ]] && continue
     group="$(cut -f5 <<<"$line")"
     [[ -n $group ]] || continue
+    [[ -z $only || $group == "$only" ]] || continue
     workspace="$(cut -f3 <<<"$line")"
     [[ $workspace == "$group" ]] && continue
     address="$(cut -f1 <<<"$line")"
@@ -285,9 +356,34 @@ wg_tidy_moves() {
   done < <(wg_window_table)
 }
 
+# Files every open window that resolves to group $1 onto $1's workspace, and
+# prints how many it moved.
+#
+# Counting a window in a group while it sits on some other workspace is the
+# whole complaint this answers: the bar said "other -- 1 window", activating the
+# group showed an empty workspace, because creating a group never moved the
+# windows it had just claimed. Membership and location have to agree.
+#
+# The skips are wg_tidy_moves' skips, because this *is* wg_tidy_moves, narrowed
+# to one group: a floating window is left floating, a window already on the
+# right workspace is not dispatched at, and a window whose group was chosen by
+# hand (an override) keeps the group it was sent to.
+wg_group_file_windows() {
+  local group="$1" moves count=0 address target
+  moves="$(wg_tidy_moves "$group")"
+  [[ -n $moves ]] || { printf '0\n'; return 0; }
+  while IFS=$'\t' read -r address target; do
+    [[ -n $address ]] || continue
+    wg_hypr_dispatch movetoworkspacesilent "name:$target,address:$address"
+    count=$(( count + 1 ))
+  done <<<"$moves"
+  printf '%s\n' "$count"
+}
+
 cmd_tidy() {
   local assume_yes=0 moves count address group
   [[ ${1:-} == --yes ]] && assume_yes=1
+  # shellcheck disable=SC2119  # no args intended: every group, not one of them
   moves="$(wg_tidy_moves)"
   [[ -n $moves ]] || return 0
   count="$(wc -l <<<"$moves")"
@@ -331,6 +427,7 @@ cmd_menu() {
     group:*)       cmd_activate "${action#group:}" ;;
     window:*)      wg_hypr_dispatch focuswindow "address:${action#window:}" ;;
     new)           cmd_new_interactive ;;
+    delete)        cmd_delete_interactive ;;
     tidy)          cmd_tidy ;;
     toggle-auto)   cmd_toggle_auto ;;
   esac

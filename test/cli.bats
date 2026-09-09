@@ -154,10 +154,10 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
   [ "$(dispatches)" = "workspace name:plat" ]
 }
 
-# Three groups, then new/tidy/toggle-auto, then the separator: the first window
-# is index 7 now that the actions no longer sit at the bottom of the list.
+# Three groups, then new/delete/tidy/toggle-auto, then the separator: the first
+# window is index 8 now that the actions no longer sit at the bottom of the list.
 @test "menu focuses the window the picker returned" {
-  export WG_WALKER_PICK=7
+  export WG_WALKER_PICK=8
   wingroup menu
   [[ "$(dispatches)" == focuswindow* ]]
 }
@@ -234,6 +234,135 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
   [ "$status" -ne 0 ]
   run bash -c "jq -r '.groups | length' '$WG_STATE_DIR/state.json'"
   [ "$output" -eq 3 ]
+}
+
+# --- a group that counts a window has to be one that holds it ---
+
+# The complaint this answers, verbatim: "if counts on window it should actually
+# move to it not just group". A new group owning a project whose windows were
+# open elsewhere showed them in its count and on the bar, then activating it
+# showed an empty workspace, because nothing ever moved them.
+@test "new files the windows its projects already own onto its workspace" {
+  wg_patch_state '.groups |= map(select(.name != "everest"))'
+  wingroup new everest everest-web everest-rs everest-api
+  run dispatches
+  [ "${lines[0]}" = "movetoworkspacesilent name:everest,address:0xaaa1" ]
+  [ "${lines[1]}" = "movetoworkspacesilent name:everest,address:0xaaa2" ]
+  [ "${#lines[@]}" -eq 2 ]
+}
+
+# 0xaaa1 is already on the everest workspace, 0xaaa8 floats over everest-web,
+# and 0xaaa3 was sent to plat by hand. Filing is tidy's rules, narrowed to the
+# new group -- so of the group's four windows only one is dispatched at.
+@test "new moves nothing that is floating, already filed, or sent by hand" {
+  export WG_FIXTURE_CLIENTS="$WG_FIXTURES/clients-new-group.json"
+  wg_patch_state '.groups |= map(select(.name != "everest"))'
+  wingroup new everest everest-web everest-rs everest-api
+  [ "$(dispatches)" = "movetoworkspacesilent name:everest,address:0xaaa2" ]
+}
+
+# A group with no projects owns no window yet, so there is nothing to file and
+# no reason to go and build the window table to find that out.
+@test "new with no projects moves nothing and asks the compositor for nothing" {
+  export WG_HYPRCTL_LOG="$WG_TMP/hyprctl.log"
+  wingroup new "Scratch"
+  [ ! -s "$WG_DISPATCH_LOG" ]
+  [ ! -s "$WG_HYPRCTL_LOG" ]
+}
+
+@test "new leaves the windows of every other group where they are" {
+  wg_patch_state '.groups |= map(select(.name != "everest"))'
+  wingroup new everest everest-web everest-rs everest-api
+  run bash -c "grep -c '0xaaa4\|0xaaa5' '$WG_DISPATCH_LOG' || true"
+  [ "$output" -eq 0 ]
+}
+
+# The picker shares cmd_new, so it files too -- and says what it filed, since a
+# picker action has no terminal to print to.
+@test "the picker's new-group entry files the windows the group claims, and says so" {
+  wg_patch_state '.groups |= map(select(.name != "everest"))'
+  # Two groups left, so "+ new group…" is index 2.
+  export WG_WALKER_PICK=2
+  export WG_WALKER_INPUT="Everest"
+  wingroup menu
+  [ "$(dispatches)" = "movetoworkspacesilent name:everest,address:0xaaa1" ]
+  [[ "$(notifications)" == *"Filed 1 window(s) onto it"* ]]
+}
+
+# --- removing a group from the picker ---
+
+# dissolve has always existed, but only in a terminal: a group made by mistake
+# from the picker could not be unmade from it. Pick the group, then confirm it.
+@test "the picker removes the group that was chosen and confirmed" {
+  export WG_WALKER_PICKS="4 1 1"
+  wingroup menu
+  run bash -c "jq -r '[.groups[].name] | join(\",\")' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "everest,drivora" ]
+  [[ "$(notifications)" == *"Removed group plat"* ]]
+}
+
+# dissolve's semantics, unchanged: the group and its overrides go, the windows
+# stay exactly where they are.
+@test "removing a group from the picker closes and moves no window" {
+  export WG_WALKER_PICKS="4 1 1"
+  wingroup menu
+  [ ! -s "$WG_DISPATCH_LOG" ]
+  run bash -c "jq -r '.overrides | length' '$WG_STATE_DIR/state.json'"
+  [ "$output" -eq 0 ]
+}
+
+# A mis-click must not silently destroy a group, so the confirmation's first
+# entry -- the one already under the cursor -- is the one that cancels.
+@test "cancelling the confirmation leaves the group alone and says nothing" {
+  export WG_WALKER_PICKS="4 1 0"
+  wingroup menu
+  run bash -c "jq -r '[.groups[].name] | join(\",\")' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "everest,plat,drivora" ]
+  [ ! -s "$WG_NOTIFY_LOG" ]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+@test "backing out of the group chooser removes nothing" {
+  export WG_WALKER_PICKS="4"
+  wingroup menu
+  run bash -c "jq -r '.groups | length' '$WG_STATE_DIR/state.json'"
+  [ "$output" -eq 3 ]
+  [ ! -s "$WG_NOTIFY_LOG" ]
+}
+
+# With no groups the chooser would be empty, and an empty walker reads as a
+# broken entry rather than as "nothing to do here".
+@test "the remove entry says so when there are no groups at all" {
+  wg_patch_state '.groups = []'
+  export WG_WALKER_PICKS="1"
+  wingroup menu
+  [[ "$(notifications)" == *"no groups to remove"* ]]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# --- the send picker's "+ new group…" ---
+
+# SUPER+CTRL+G's group chooser has always carried this entry, and it only ever
+# printed "create the group first" at a terminal nobody was looking at.
+@test "the send picker's new-group entry creates the group and sends the window to it" {
+  export WG_WALKER_PICK=3
+  export WG_WALKER_INPUT="Games"
+  wingroup send --address 0xaaa1
+  run bash -c "jq -r '.groups[-1].name' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "games" ]
+  run bash -c "jq -r '.overrides[\"0xaaa1\"]' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "games" ]
+  [ "$(dispatches)" = "movetoworkspacesilent name:games,address:0xaaa1" ]
+}
+
+@test "cancelling the send picker's prompt creates nothing and sends nothing" {
+  export WG_WALKER_PICK=3
+  export WG_WALKER_INPUT=""
+  run wingroup send --address 0xaaa1
+  [ "$status" -eq 0 ]
+  run bash -c "jq -r '.groups | length' '$WG_STATE_DIR/state.json'"
+  [ "$output" -eq 3 ]
+  [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
 # --- failures from a keybind-launched picker have to be visible ---

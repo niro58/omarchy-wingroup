@@ -56,12 +56,17 @@ wg_menu_build() {
       (if (.monitor // "") == "" then "" else (.monitor | tostring) end), "\u0000"' \
     <<<"$state")
 
-  # Then the three actions, above the window list rather than below it. With
-  # fifteen windows open they used to land some twenty rows down -- far enough
-  # that "+ new group…" read as something the picker did not have.
+  # Then the actions, above the window list rather than below it. With fifteen
+  # windows open they used to land some twenty rows down -- far enough that
+  # "+ new group…" read as something the picker did not have.
+  #
+  # The two that make and unmake a group sit together, then the two that act on
+  # everything at once. "− remove a group…" only opens a chooser and then a
+  # confirmation, so landing on it by mistake costs a keystroke, not a group.
   local auto
   auto="$(jq -r 'if .auto then "on" else "off" end' <<<"$state")"
   printf 'new\t%s\n' "+ new group…"
+  printf 'delete\t%s\n' "− remove a group…"
   printf 'tidy\t%s\n' "⟳ tidy — file every window by its project"
   printf 'toggle-auto\t%s\n' "⏻ auto-assign: $auto"
 
@@ -78,7 +83,8 @@ wg_menu_build() {
   done <<<"$table"
 }
 
-wg_group_menu_build() {
+# Every group and nothing else: the chooser for picking one to act on.
+wg_group_list_build() {
   local state="${1:-$(wg_state_read)}" name label
   while IFS= read -r name; do
     [[ -n $name ]] || continue
@@ -86,7 +92,24 @@ wg_group_menu_build() {
     [[ -n $label ]] || label="$name"
     printf 'group:%s\t%s\n' "$name" "$label"
   done < <(wg_state_group_names "$state")
+}
+
+# The same list plus a way out of it: sending a window to a group you have not
+# made yet is the one place where creating one is part of the same errand.
+wg_group_menu_build() {
+  wg_group_list_build "${1:-}"
   printf 'new\t%s\n' "+ new group…"
+}
+
+# The confirmation in front of removing a group.
+#
+# Cancel is first, so the entry already under the cursor is the harmless one --
+# tidy can put its action first because the worst a stray Enter does there is
+# move some windows, and this one cannot be undone.
+wg_delete_confirm_build() {
+  local name="$1" label="${2:-$1}"
+  printf 'noop\t%s\n' "Cancel"
+  printf 'delete:%s\t%s\n' "$name" "Remove group $label — its windows stay where they are"
 }
 
 # The command that puts walker on the screen, left in WG_PICKER.
