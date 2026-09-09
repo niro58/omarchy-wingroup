@@ -171,6 +171,45 @@ wg_ends_with_newline() {
   [ "$status" -eq 0 ]
 }
 
+# Removing "hyprland/workspaces" from a modules-left that held nothing else
+# leaves "[", and appending the slots to that gives "[, ...": not JSON. Better
+# to say so than to write it over a bar that works.
+@test "install fails loudly when removing the workspace module would empty modules-left" {
+  cp "$WG_FIXTURES/waybar-config-workspaces-only.jsonc" "$WG_WAYBAR_CONFIG"
+  cp "$WG_FIXTURES/waybar-style.css" "$WG_WAYBAR_STYLE"
+  printf '# my bindings\n' >"$WG_HYPR_BINDINGS"
+  printf '# my autostart\n' >"$WG_HYPR_AUTOSTART"
+  cp "$WG_WAYBAR_CONFIG" "$WG_TMP/config.orig"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"would have emptied it"* ]]
+
+  run cmp "$WG_TMP/config.orig" "$WG_WAYBAR_CONFIG"
+  [ "$status" -eq 0 ]
+}
+
+# The reversal has to survive the awkward file too: the recorded modules-left
+# line is put back before the marked block that carries it is stripped, and the
+# missing trailing newline still has to come out the other side missing.
+@test "the workspace module comes back byte for byte in a config with no trailing newline" {
+  cp "$WG_FIXTURES/waybar-config-no-eof-nl.jsonc" "$WG_WAYBAR_CONFIG"
+  cp "$WG_FIXTURES/waybar-style.css" "$WG_WAYBAR_STYLE"
+  printf '# my bindings\n' >"$WG_HYPR_BINDINGS"
+  printf '# my autostart\n' >"$WG_HYPR_AUTOSTART"
+  cp "$WG_WAYBAR_CONFIG" "$WG_TMP/config.orig"
+
+  "$WG_ROOT/install.sh"
+  run bash -c "grep -E '\"modules-left\"' '$WG_WAYBAR_CONFIG' | grep -v 'wingroup-modules-left' | grep -c 'hyprland/workspaces' || true"
+  [ "$output" -eq 0 ]
+
+  "$WG_ROOT/uninstall.sh"
+  run cmp "$WG_TMP/config.orig" "$WG_WAYBAR_CONFIG"
+  [ "$status" -eq 0 ]
+  run wg_ends_with_newline "$WG_WAYBAR_CONFIG"
+  [ "$status" -ne 0 ]
+}
+
 @test "install fails loudly when the module definitions cannot be placed" {
   cp "$WG_FIXTURES/waybar-config-no-object.jsonc" "$WG_WAYBAR_CONFIG"
   cp "$WG_FIXTURES/waybar-style.css" "$WG_WAYBAR_STYLE"

@@ -30,6 +30,25 @@ teardown() { wg_teardown_tmp; }
   [ -L "$WG_BIN_DIR/wingroup-waybar" ]
 }
 
+# Groups have their own strip now, and Omarchy's numbered-workspace module
+# renders a named group workspace as an anonymous dot beside it -- a second,
+# worse view of the same thing. It comes out as part of installing.
+@test "install takes the numbered workspace indicator out of modules-left" {
+  "$WG_ROOT/install.sh"
+  run bash -c "grep -E '\"modules-left\"' '$WG_WAYBAR_CONFIG' | grep -v 'wingroup-modules-left' | grep -c 'hyprland/workspaces' || true"
+  [ "$output" -eq 0 ]
+  # and the rest of modules-left is untouched
+  run bash -c "grep -E '\"modules-left\"' '$WG_WAYBAR_CONFIG' | grep -v 'wingroup-modules-left'"
+  [[ "$output" == *'["custom/omarchy", "custom/wingroup0"'* ]]
+}
+
+@test "uninstall puts the numbered workspace indicator back where it was" {
+  "$WG_ROOT/install.sh"
+  "$WG_ROOT/uninstall.sh"
+  run bash -c "grep -E '\"modules-left\"' '$WG_WAYBAR_CONFIG'"
+  [ "$output" = '  "modules-left": ["custom/omarchy", "hyprland/workspaces"],' ]
+}
+
 @test "install adds eight slots to modules-left and eight module definitions" {
   "$WG_ROOT/install.sh"
   run bash -c "grep -o 'custom/wingroup[0-9]' '$WG_WAYBAR_CONFIG' | sort -u | wc -l"

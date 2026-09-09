@@ -58,6 +58,37 @@ strip_block() {
   mv -f "$tmp" "$file"
 }
 
+# Puts the "modules-left" line back exactly as install.sh found it.
+#
+# install.sh edits that line twice -- it appends the slots and it removes
+# "hyprland/workspaces" -- and it records the line verbatim inside its own
+# marked block first. Restoring the recording is a byte-exact reversal of both
+# edits at once, and of any spacing this script would otherwise have to guess
+# at. It has to run before strip_block, which deletes the recording along with
+# the rest of the block.
+#
+# The recorded line is itself a "modules-left" line, and it sits above the real
+# one, so it is skipped explicitly rather than matched first. ENVIRON, not -v:
+# an -v assignment runs escape processing over the value.
+restore_modules_left() {
+  local recorded tmp
+  [[ -f $WG_WAYBAR_CONFIG ]] || return 0
+  recorded="$(sed -n 's|^  // wingroup-modules-left:||p' "$WG_WAYBAR_CONFIG" | head -n1)"
+  [[ -n $recorded ]] || return 0
+
+  tmp="$(mktemp)"
+  wg_line="$recorded" awk '
+    index($0, "// wingroup-modules-left:") { print; next }
+    !restored && /"modules-left"[[:space:]]*:/ { print ENVIRON["wg_line"]; restored = 1; next }
+    { print }
+  ' "$WG_WAYBAR_CONFIG" >"$tmp"
+  mv -f "$tmp" "$WG_WAYBAR_CONFIG"
+}
+
+# A fallback, and only that: restore_modules_left already put the whole line
+# back, slots and all, whenever install.sh's recording survived. This catches
+# the config whose marked block was edited away by hand, leaving the slots
+# behind with nothing to restore them.
 strip_waybar_slots() {
   local i tmp
   [[ -f $WG_WAYBAR_CONFIG ]] || return 0
@@ -70,6 +101,7 @@ strip_waybar_slots() {
 }
 
 unlink_binaries
+restore_modules_left
 strip_block "$WG_WAYBAR_CONFIG" '// >>> wingroup' '// <<< wingroup'
 strip_waybar_slots
 strip_block "$WG_WAYBAR_STYLE" '/* >>> wingroup' '/* <<< wingroup'

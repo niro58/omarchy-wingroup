@@ -44,9 +44,16 @@ link_binaries() {
 # original did not -- so uninstall.sh reads this suffix off the closing marker
 # to know whether it must strip that trailing newline back off to reverse
 # byte-exactly.
+#
+# $2: the "modules-left" line exactly as it was before this script touched it.
+# Install rewrites that line in two ways -- it appends the slots and it drops
+# "hyprland/workspaces" -- and recording the original verbatim is what lets
+# uninstall.sh put the line back byte for byte instead of trying to undo each
+# edit in turn. It is a // comment, so waybar and jq both ignore it.
 waybar_modules_block() {
-  local eof_flag="$1" i
+  local eof_flag="$1" modules_left="$2" i
   printf '  // >>> wingroup\n'
+  [[ -z $modules_left ]] || printf '  // wingroup-modules-left:%s\n' "$modules_left"
   for (( i = 0; i < WG_SLOTS; i++ )); do
     printf '  "custom/wingroup%d": {\n' "$i"
     printf '    "exec": "wingroup-waybar %d",\n' "$i"
@@ -67,26 +74,44 @@ install_waybar_config() {
   local eof_flag=""
   wg_ends_with_newline "$WG_WAYBAR_CONFIG" || eof_flag=" no-eof-nl"
 
-  local slots i tmp
+  local slots i tmp modules_left
   slots=""
   for (( i = 0; i < WG_SLOTS; i++ )); do
     slots+=", \"custom/wingroup$i\""
   done
 
+  modules_left="$(grep -m1 -E '"modules-left"[[:space:]]*:' "$WG_WAYBAR_CONFIG" || true)"
+
   # The definitions go in right after the line that opens the top-level object.
   # That is not necessarily line 1: JSONC positively invites a leading comment,
   # and a blank line or a BOM is legal too. Skip blank and comment lines, then
   # anchor on the first line that contains a brace.
+  #
+  # On the modules-left line, "hyprland/workspaces" comes out. The group strip
+  # is the workspace indicator now; Omarchy's numbered-workspace module renders
+  # a named group workspace as an anonymous dot next to it, which is a second,
+  # worse view of the same thing. Whichever separator the entry carries goes
+  # with it, so the array stays well formed.
+  #
+  # Values reach awk through the environment, not -v: an -v assignment runs
+  # escape processing over its value, and both the block and the recorded line
+  # are verbatim text that must survive unaltered.
   tmp="$(mktemp)"
-  awk -v slots="$slots" -v block="$(waybar_modules_block "$eof_flag")" '
+  wg_slots="$slots" wg_block="$(waybar_modules_block "$eof_flag" "$modules_left")" awk '
     !inserted && $0 !~ /^[[:space:]]*(\/\/|\/\*|\*)/ && index($0, "{") > 0 {
-      print; print block; inserted = 1; next
+      print; print ENVIRON["wg_block"]; inserted = 1; next
     }
-    /"modules-left"[[:space:]]*:/ { sub(/\][[:space:]]*,[[:space:]]*$/, slots "],"); print; next }
+    /"modules-left"[[:space:]]*:/ {
+      if (gsub(/,[[:space:]]*"hyprland\/workspaces"/, "") == 0)
+        if (gsub(/"hyprland\/workspaces"[[:space:]]*,[[:space:]]*/, "") == 0)
+          gsub(/"hyprland\/workspaces"/, "")
+      sub(/\][[:space:]]*,[[:space:]]*$/, ENVIRON["wg_slots"] "],")
+      print; next
+    }
     { print }
   ' "$WG_WAYBAR_CONFIG" >"$tmp"
 
-  # Both halves of the edit have to have landed. The sub() above only fires
+  # Every half of the edit has to have landed. The sub() above only fires
   # when the modules-left line is a single line ending in "],", and the block
   # only goes in when an opening brace was found. Either half alone ships a
   # broken bar -- slots wired to modules that do not exist, or modules nothing
@@ -98,6 +123,12 @@ install_waybar_config() {
     || missing+=$'\n  - the '"$WG_SLOTS"$' wingroup slots in "modules-left": it must be a single line ending in "],"'
   (( defs == WG_SLOTS )) \
     || missing+=$'\n  - the '"$WG_SLOTS"$' "custom/wingroupN": { ... } module definitions (found '"$defs"$'): they are inserted after the line that opens the top-level object'
+  # Dropping "hyprland/workspaces" out of a modules-left that held nothing else
+  # leaves "[", and appending the slots to that gives "[, ...": not JSON, and
+  # not something to write over a working bar.
+  if grep -qE '"modules-left"[[:space:]]*:[[:space:]]*\[[[:space:]]*,' "$tmp"; then
+    missing+=$'\n  - a "modules-left" with an entry of its own: removing "hyprland/workspaces" would have emptied it'
+  fi
   if [[ -n $missing ]]; then
     rm -f "$tmp"
     printf 'install.sh: cannot edit %s. Missing after the attempted edit:%s\nNo changes were made.\n' \
