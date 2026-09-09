@@ -1,116 +1,296 @@
 # omarchy-wingroup
 
-Project-based window grouping for [Omarchy](https://omarchy.org) / Hyprland.
+Project-based window grouping for [Omarchy](https://omarchy.org) and plain
+Hyprland. A **group** is a named Hyprland workspace that owns one or more
+projects — directories under `~/projects`. Open a terminal in
+`~/projects/alpha-web` and the window is filed onto the group that owns
+`alpha-web`, automatically, by the working directory the shell is sitting in.
+A strip of buttons in waybar shows every group, and — if the terminals are
+running Claude Code — how many sessions in each one have finished and are
+waiting on you.
+
+![Waybar strip: the numbered workspaces 1 to 5 and 0, then four group buttons — "plat" with a superscript four in bold red, "3dprint" plain and dimmed, "other" and "letuska" each with a superscript three in red-orange](docs/images/bar.png)
+
+## The problem
+
+You have a dozen or more terminals open. Each one is a Claude Code session in
+a different project. They are piled onto workspace 1 and workspace 2, stacked
+on top of each other, and the only way to find the one that has finished is to
+tab through all of them.
+
+Two things are missing. First, the windows have no relationship to the work
+they belong to: Hyprland's numbered workspaces are a place, not a project.
+Second, a session that has finished and a session that is still grinding look
+identical from the outside — you have to look at each one to find out.
+
+`wingroup` answers both with the same mechanism. Every project family gets a
+named workspace of its own, new terminals are filed into theirs by working
+directory without you doing anything, and each group's button in waybar carries
+a count of the sessions in it that are waiting for you, coloured so a group with
+work piling up is visible from across the room.
+
+If you do not use Claude Code, the grouping half still works on its own — the
+idle and busy counts simply stay at zero.
+
+## Requirements
+
+Everything here ships with Omarchy. On plain Hyprland you may need to install
+some of it.
+
+- **`hyprctl`** — every query and every window move goes through it. Hyprland
+  itself is required; there is no other compositor backend.
+- **`waybar`** — the group strip is eight custom waybar modules. Without waybar
+  you still get the CLI and the picker, but no bar.
+- **`walker`** — the picker behind `SUPER+G` and `wingroup send`. On Omarchy it
+  is opened through `~/.local/share/omarchy/bin/omarchy-launch-walker`, which
+  starts the walker and elephant services if they are not up and applies the
+  house geometry; elsewhere `walker` is run directly with the same geometry.
+- **`jq`** — all state and window-table handling.
+- **`socat`** — the daemon reads Hyprland's event socket through it.
+- **`pkill`** — sends waybar the redraw signal (`RTMIN+11`).
+- **`notify-send`** — how an action started from the picker reports what it did.
+  Optional: without it the same message still goes to stderr.
+- Base utilities: `bash` 5.0 or newer (the daemon times its refresh debounce
+  with `EPOCHREALTIME`),
+  `flock`, `ps`, `mktemp`, `readlink`, `truncate`, `awk`, `sed`, `cut`, `wc`,
+  `tail`, `grep`, `date`.
+
+Your terminals must set the window title (Claude Code's status glyph is read
+out of it), and your login shell must be listed in `/etc/shells` — that is how
+a terminal's shell is identified before its working directory is read.
+
+## Install
+
+```console
+$ git clone https://github.com/<you>/omarchy-wingroup.git
+$ cd omarchy-wingroup
+$ ./install.sh
+$ hyprctl reload && pkill -SIGUSR2 waybar
+```
+
+`install.sh` edits your real waybar and Hyprland configuration in place. **It
+copies every file to `<file>.bak.<unix-timestamp>` before touching it**, and it
+is idempotent: a file that already contains the wingroup block is left alone, so
+re-running it is safe.
+
+Exactly four files are modified, plus two directories written to:
+
+| File | What changes |
+| --- | --- |
+| `~/.config/waybar/config.jsonc` | Eight `"custom/wingroup0".."custom/wingroup7"` module definitions, appended to `"modules-left"`; `"ignore-workspaces"` added inside `"hyprland/workspaces"` |
+| `~/.config/waybar/style.css` | The `/* >>> wingroup */` block: base, idle ramp and state rules for all eight slots |
+| `~/.config/hypr/bindings.conf` | `unbind = SUPER, G`, then `SUPER+G` and `SUPER+CTRL+G` bound to wingroup |
+| `~/.config/hypr/autostart.conf` | `exec-once = wingroup-daemon`, and `exec-once = wingroup-restore` only if you have a restore script |
+| `~/.local/bin/` | Symlinks to `wingroup`, `wingroup-daemon`, `wingroup-restore`, `wingroup-waybar` |
+| `~/.local/state/omarchy/wingroup/` | `state.json` seeded with an empty group list, if it does not exist |
+
+Three details worth knowing before you run it:
+
+- **It takes over `SUPER+G`.** Hyprland binds that to `togglegroup` — its own
+  window-tabbing feature, which is a different concept from this tool's project
+  groups. Install emits `unbind = SUPER, G` and rebinds it to `wingroup menu`.
+  If you use `togglegroup`, move it to another key first.
+- **`"ignore-workspaces": [".*[^0-9].*"]`** goes into the numbered-workspace
+  indicator. A group *is* a named workspace, so without this the indicator draws
+  an anonymous `format-icons` default dot for every group, right next to that
+  group's own name in the strip. The regex is matched against the whole
+  workspace name and means "contains at least one non-digit", so every group
+  name is hidden — including one starting with a digit, like `3dprint` — and
+  workspaces `1`–`10` are kept. Note that it hides *every* named workspace, not
+  only wingroup's.
+- **The waybar edit is line-shaped.** `"modules-left"` must be a single line
+  ending in `],`, and `"hyprland/workspaces": {` must open on a line of its own.
+  If any of the three edits does not land, install prints which one and changes
+  nothing at all.
+
+`"hyprland/workspaces"` keeps its position, so the bar reads left to right:
+Omarchy menu button, your numbered workspaces, then the group strip.
+
+### First run
+
+```console
+$ wingroup new alpha alpha-web alpha-api
+wingroup: filed 2 window(s) onto alpha
+$ wingroup new beta beta
+$ wingroup tidy --yes
+```
+
+`wingroup new` takes a label and the project directory names the group owns.
+Creating a group immediately files the windows it has just claimed onto its
+workspace; `wingroup tidy` does the same sweep for every group at once, which is
+what you want for the windows you already had open.
+
+## Reading the bar
+
+Each group gets one button showing its label, and a superscript when it has idle
+sessions. In the screenshot above: `plat⁴` has four or more sessions finished
+and waiting, `3dprint` has none, `other³` and `letuska³` have three each. The
+gaps between the labels are the gaps between separate waybar modules, not
+characters wingroup prints.
+
+A window counts as **idle** when its title starts with `✳`, and **busy** when it
+starts with `◐` or `◑` — the glyphs Claude Code puts at the head of its window
+title. Anything else is a plain window: it counts towards the group's total and
+towards nothing else. The superscript counts idle sessions only, because that is
+the number you act on. Hover a button for the full breakdown:
 
 ```
-󱓻 1 2 3   ● everest² · plat · drivora · 3dprint
+alpha — 5 windows · 2 idle · 1 busy
+Projects: alpha-web, alpha-api
 ```
 
-## What this is
+Left-click a button to switch to that group's workspace. Right-click any button
+to open the picker.
 
-If you work on several projects at once, your windows end up scattered
-across numbered Hyprland workspaces with no relationship to the work they
-belong to. `wingroup` fixes that by giving each project family its own named
-workspace — a **group** — and filing windows into their group automatically,
-by the working directory their shell is sitting in.
+### Highlighting
 
-A **group** is just a named Hyprland workspace (`everest`, `plat`,
-`drivora`, ...) that owns one or more **projects** — directories under
-`~/projects`. Open a terminal in `~/projects/everest-web` and the window
-lands on the `everest` workspace without you doing anything. Open a Claude
-Code session there and its busy/idle status shows up on the group's waybar
-button too.
+A group is in exactly one of four states, and the module emits at most one class
+for it:
 
-## The waybar strip
+| Where the group is | Class | Installed rule |
+| --- | --- | --- |
+| Off screen, nothing busy | *(none)* | `padding: 0 6px; opacity: 0.55;` |
+| Off screen, a session busy | `busy` | `opacity: 1;` |
+| On screen, on an unfocused monitor | `visible` | `opacity: 0.85;` |
+| On the focused monitor | `active` | `opacity: 1; font-weight: bold;` |
 
-```
-everest² · plat · drivora · 3dprint
-```
+Being looked at beats being on screen, which beats being busy.
 
-Each group gets a short button showing its label (each `·` above is just
-the gap between separate waybar modules, not a character wingroup prints).
-Reading the example above:
+With more than one monitor, "active" is a fact about *this* screen: the bar on
+the external monitor draws the group filling that monitor as active, while the
+laptop's bar draws the same group as merely visible. That depends on waybar
+exporting `WAYBAR_OUTPUT_NAME` to the module's script. If your waybar does not,
+the module falls back to the globally focused monitor and every bar marks the
+same group active. Nothing breaks either way.
 
-- **`everest²`** — two of the group's Claude Code sessions are **idle**:
-  finished, waiting for input, ready for the next thing (title starts with
-  `✳`). The small `²` is that idle count, rendered as a Unicode superscript.
-  A group with nothing waiting on you shows no superscript at all. Hover the
-  button for the full breakdown — `everest — 3 windows · 2 idle · 1 busy`,
-  where a busy session is one currently working (`◐` or `◑`) and the
-  remainder are plain terminals with no session in them.
-- **Highlighting** — a group's button is dimmed (55% opacity) by default.
-  It goes to 85% when the group's workspace is on screen on a monitor that
-  does not have focus, to full opacity when one of its sessions is busy, and
-  to full opacity **and bold** when its workspace is the focused one. Being
-  looked at beats being on screen, which beats being busy.
-- **Idle heat** — an idle session is capacity you are not using, so a group's
-  label warms up as they pile up: amber at one, orange at two, red-orange at
-  three, and bright red at four or more, with the label getting brighter and
-  heavier as it goes. It is a fact about the group separate from the
-  highlighting above, so the two combine: the group you are looking at can also
-  be the one holding four finished sessions, and it stays bold and bright while
-  taking the red. A group with nothing idle is not coloured at all and looks
-  exactly as it always has.
-- **Per-screen highlighting** — with more than one monitor, "active" is a
-  fact about *this* screen: the bar on the external monitor draws the group
-  filling that monitor as active, while the laptop's bar draws the same group
-  as merely visible. This depends on waybar exporting `WAYBAR_OUTPUT_NAME` to
-  the module's script, which names the monitor the bar is drawn on. If your
-  waybar does not export it, the module falls back to what it has always
-  done — highlighting relative to the globally focused monitor, so every bar
-  marks the same group active. Nothing breaks either way; only which bar
-  bolds which button changes.
+### The idle colour ramp
 
-Left-click a button to switch to that group's workspace. Right-click any
-button to open the picker menu (`wingroup menu`).
+Idle heat is a separate fact from the state above, so it is a *second* class
+alongside the first, never instead of it — a group can be the one you are
+looking at and hold four finished sessions at once.
 
-### The CSS classes, and recolouring the idle ramp
+| Idle sessions | Class | Installed rule |
+| --- | --- | --- |
+| 0 | *(none)* | — |
+| 1 | `idle1` | `color: #e0a458; opacity: 0.75;` |
+| 2 | `idle2` | `color: #ef8354; opacity: 0.85;` |
+| 3 | `idle3` | `color: #f45d48; opacity: 0.95; font-weight: 600;` |
+| 4 or more | `idle4` | `color: #ff3b30; opacity: 1; font-weight: bold;` |
 
-The module hands waybar a class per state — none for a dimmed group, then
-`busy`, `visible`, `active` — plus, when the group has idle sessions, one of
-`idle1`, `idle2`, `idle3`, `idle4`, where `idle4` means *four or more*. Both go
-on the widget at once (waybar takes a module's `class` as an array), so
-`#custom-wingroup0.active.idle3` is a selector that matches a group you are
-looking at with three sessions waiting in it.
+`idle4` is a ceiling: past a handful the exact number stops changing what you do
+about it. A group with nothing waiting emits no idle class and looks exactly as
+it always has.
 
-`install.sh` writes the ramp into the `/* >>> wingroup */` block in
-`~/.config/waybar/style.css`, before the state rules so that `active` keeps the
-last word on opacity and weight. To change it, add your own rules **after** that
-block rather than editing inside it — the block is what `uninstall.sh` removes,
-and rules of equal specificity are won by the last one:
+In the stylesheet the ramp sits **between** the base rule and the three state
+rules. Both kinds of selector are one id plus one class, so they have equal
+specificity and the later rule wins each property they share. That ordering
+means the ramp lifts the dimmed default for a group with work waiting in it,
+while `active` keeps the last word on opacity and weight — the group you are
+looking at stays bright and bold and merely takes the ramp's colour with it.
+
+### Changing the ramp yourself
+
+Every installed rule is one line with one selector list naming all eight slots.
+To change a step, restate it **after** the wingroup block in
+`~/.config/waybar/style.css` — never inside it, because that block is what
+`uninstall.sh` removes. Last rule of equal specificity wins, and a step you do
+not restate keeps its shipped colour.
 
 ```css
 /* >>> wingroup */
 /* ... installed rules ... */
 /* <<< wingroup */
 
-/* your ramp: keep the theme's colour, say what is waiting with weight alone */
-#custom-wingroup0.idle1, #custom-wingroup1.idle1 { color: @foreground; opacity: 0.8; }
-#custom-wingroup0.idle4, #custom-wingroup1.idle4 { color: #ff8ac6; font-weight: bold; }
+/* keep the theme colour; say what is waiting with weight alone */
+#custom-wingroup0.idle1, #custom-wingroup1.idle1,
+#custom-wingroup2.idle1, #custom-wingroup3.idle1,
+#custom-wingroup4.idle1, #custom-wingroup5.idle1,
+#custom-wingroup6.idle1, #custom-wingroup7.idle1 { color: @foreground; opacity: 0.8; }
 ```
 
-Each installed rule is one line with one selector list — one line per step,
-naming all 8 slots — so a step you do not restate keeps the shipped colour.
-
-Only the first 8 groups get a button — see **Known limitations** below.
+Both classes land on the widget together, so `#custom-wingroup0.active.idle3`
+is a valid selector for "the group I am looking at, with three sessions waiting
+in it".
 
 ## Keybinds
 
-Installed into `~/.config/hypr/bindings.conf`:
+| Keybind | Command | What it does |
+| --- | --- | --- |
+| `SUPER+G` | `wingroup menu` | Open the group and window picker |
+| `SUPER+CTRL+G` | `wingroup send` | Send the focused window to a group |
 
-| Keybind | Action |
-| --- | --- |
-| `SUPER+G` | Open the group and window picker (`wingroup menu`) |
-| `SUPER+CTRL+G` | Send the focused window to a group (`wingroup send`) |
+`SUPER+G` replaces Hyprland's native `togglegroup`, as described under
+[Install](#install).
 
-Installing `wingroup` unbinds Hyprland's native `SUPER+G` (`togglegroup`,
-which toggles Hyprland's own window-grouping feature — a different concept
-from this tool's project groups) and rebinds it to open the picker instead.
-If you rely on `togglegroup`, remap it to something else before installing.
+## The picker
 
-## The `wingroup` command
+`SUPER+G` opens walker with the groups first, the actions next, and every open
+window below a separator:
 
-Every subcommand:
+```
+▸ alpha              2 windows · 1 idle · 1 busy · on DP-1
+▸ beta               1 windows · 1 idle · 0 busy
++ new group…
+− remove a group…
+⟳ tidy — file every window by its project
+⏻ auto-assign: on
+──────────────────────────────
+  ✳ ready for review                             alpha
+  ◐ running the test suite                       alpha
+  ✳ migration written                            beta
+  · user@host:~                                  ungrouped
+```
+
+Picking a group switches to its workspace. Picking a window focuses it. The
+group rows show the monitor a group is pinned to, if it has one. The window rows
+show each window's status glyph — `✳` idle, `◐` busy, `·` plain — its title with
+the glyph stripped, and the group it resolves to, or `ungrouped`.
+
+The four actions sit directly under the groups rather than at the bottom, so
+they stay a few rows in no matter how many windows are open:
+
+- **`+ new group…`** prompts for a label in a walker text field, then creates
+  the group exactly as `wingroup new` would — same slugification, same refusal
+  of a duplicate name, same filing of the windows the new group claims. If the
+  window you had focused sits in a project no group owns yet, that project seeds
+  the new group; otherwise the group starts empty. Either way you get a desktop
+  notification saying which happened, since a picker opened from a keybind has
+  no terminal to print to.
+- **`− remove a group…`** is `wingroup dissolve` without a terminal. It asks
+  which group, then asks again to confirm that one by name — with *Cancel* as
+  the entry already under the cursor, because there is no undo. It never closes
+  or moves a window.
+- **`⟳ tidy`** is `wingroup tidy`.
+- **`⏻ auto-assign: on/off`** is `wingroup toggle-auto`, and the row shows the
+  current setting.
+
+Opening the picker while one is already up does nothing: the second would only
+stack on top of the first.
+
+## Uninstall
+
+```console
+$ ./uninstall.sh
+$ hyprctl reload && pkill -SIGUSR2 waybar
+```
+
+It removes the four symlinks from `~/.local/bin` and strips out exactly what
+install added from each of the four config files, restoring the surrounding
+content **byte for byte** — including any blank line install prepended to a
+block, and including whether the file originally ended in a newline (install
+records that on the closing marker so uninstall can put it back).
+
+**Your groups are kept.** `~/.local/state/omarchy/wingroup/state.json` is never
+touched, so uninstalling and reinstalling later picks up where you left off. To
+throw the groups away too, delete that directory by hand.
+
+Run it from the checkout: it reads `bin/` to know which symlinks to remove.
+
+---
+
+# Reference
+
+## Every subcommand
 
 ```
 wingroup menu                          open the group and window picker
@@ -121,135 +301,138 @@ wingroup tidy [--yes]                  file every window by its project
 wingroup new <label> [project...]      create a group
 wingroup rename <name> <label>         change a group's displayed label
 wingroup dissolve <name>               remove a group, leaving its windows alone
-wingroup monitor <group> <mon|->       pin a group to a monitor, or clear the pin
+wingroup monitor <group> <name|->      pin a group to a monitor, or clear the pin
 wingroup toggle-auto                   turn automatic assignment on or off
 ```
 
-Worked examples:
+### `wingroup new <label> [project...]`
 
 ```console
-$ wingroup new "Niro 3D Print" niro-3dprint-app niro-3dprint-web
+$ wingroup new "Alpha Stack" alpha-web alpha-api
+wingroup: filed 2 window(s) onto alpha-stack
 ```
-Creates a group. The workspace/group name is slugified from the label
-(`niro-3d-print`), while the label (`Niro 3D Print`) is what shows in the
-picker and tooltips. `project...` is the list of `~/projects/*` directories
-that belong to this group — you can pass none and add windows to it later
-with `wingroup send`.
 
-Creating the group also **files the windows it has just claimed**: every open
-window whose project belongs to the new group is moved onto its workspace
-straight away, by the same rules `wingroup tidy` uses — a floating window is
-left floating, a window already on the right workspace is not touched, and a
-window you sent somewhere by hand keeps the group you sent it to. A group that
-counts a window has to be a group that holds it; otherwise the bar says
-`other¹` and activating it shows an empty workspace. A group created with no
-projects owns no window yet, so nothing moves.
+The workspace name is slugified from the label — lowercased, every run of
+non-alphanumeric characters replaced by `-`, leading and trailing dashes
+trimmed. `Alpha Stack` becomes `alpha-stack`. The label is what shows in the bar
+and the picker; the name is what Hyprland sees and never changes afterwards. A
+label that slugifies to an empty string, or to the name of an existing group, is
+refused.
+
+`project...` is the list of `~/projects/*` directory names the group owns. You
+can pass none and add windows later with `wingroup send`.
+
+Creating a group also **files the windows it has just claimed**, by the same
+rules `tidy` uses: a floating window is left floating, a window already on the
+right workspace is not touched, and a window you sent somewhere by hand keeps
+the group you sent it to. A group that counts a window has to be a group that
+holds it — otherwise the bar says `alpha¹` and activating it shows an empty
+workspace. A group created with no projects owns no window yet, so nothing
+moves and nothing is printed.
+
+### `wingroup activate <slot|name>`
 
 ```console
-$ wingroup activate everest      # by name
-$ wingroup activate 1            # by slot index (0-based, in state.json order)
+$ wingroup activate alpha    # by name
+$ wingroup activate 0        # by slot: 0-based index into state.json order
 ```
-Switches to a group's workspace.
+
+An all-digit argument smaller than the number of groups is read as a slot index;
+anything else is a group name. This is what a left-click on waybar slot *N*
+runs. An unpinned group is switched to wherever it already lives.
+
+### `wingroup next` / `wingroup prev`
 
 ```console
 $ wingroup next
-$ wingroup prev
 ```
-Cycles to the next/previous group's workspace, wrapping around. If focus
-isn't currently on a group workspace, `next` starts at the first group and
-`prev` at the last.
+
+Cycles to the next or previous group's workspace in `state.json` order, wrapping
+around. If the focused workspace is not a group's, `next` starts at the first
+group and `prev` at the last. Fails if there are no groups.
+
+### `wingroup send [--address A --group G]`
 
 ```console
-$ wingroup send --address 0xaaa1 --group plat
+$ wingroup send --address 0xaaa3 --group beta
 ```
-Moves a specific window to a group and remembers that choice as an
-**override**, so automatic assignment won't move it back even if its cwd
-says otherwise. Run without `--address`/`--group` and it defaults to the
-currently focused window and opens a picker of groups to send it to —
-that's what `SUPER+CTRL+G` does. That picker's last entry, `+ new group…`,
-opens the same prompt `SUPER+G`'s does: it creates the group and then sends the
-window to it, so a window can go somewhere that does not exist yet.
 
-```console
-$ wingroup rename everest "EV stack"
-```
-Changes a group's display label. The underlying workspace name (`everest`)
-never changes, so open windows and existing overrides aren't disturbed.
+Moves that window to that group's workspace and records the choice as an
+**override**, so automatic assignment will not move it back even though its
+working directory says otherwise.
 
-```console
-$ wingroup dissolve plat
-```
-Removes a group from `state.json` and drops any overrides that pointed at
-it. It never touches a window — anything sitting on that workspace just
-stays there, no longer tracked as a group. The picker's `− remove a group…`
-does exactly this, after asking which group and confirming that one by name.
+With neither flag it defaults to the focused window and opens a picker of
+groups — that is what `SUPER+CTRL+G` does. The picker's last entry, `+ new
+group…`, opens the same prompt `SUPER+G`'s does: it creates the group and then
+sends the window to it, so a window can go somewhere that does not exist yet.
+Cancelling the prompt creates nothing and sends nothing.
 
-```console
-$ wingroup monitor everest DP-1
-$ wingroup monitor everest -
-```
-Pins a group to a monitor, or clears the pin with `-`. The monitor name is one
-of the names `hyprctl monitors` reports; anything else is refused, with the
-available names listed. A pinned group always opens on its monitor: `wingroup
-activate` focuses that monitor first and, if the group's workspace is currently
-living on a different one, moves the workspace across before switching to it.
-That move is the point — Hyprland creates a named workspace on whichever
-monitor happens to be focused and leaves it bound there, so a group first
-opened on the laptop would otherwise stay on the laptop forever. A group with
-no pin (`"monitor": null`, the default) is switched to exactly as before,
-wherever it already is.
+### `wingroup tidy [--yes]`
 
 ```console
 $ wingroup tidy --yes
 ```
-Files every window that's on the wrong workspace for its group in one pass.
-Floating windows and windows with no resolvable group are left alone.
-Without `--yes` it previews the moves in the picker first ("Apply N
-move(s)" / "Cancel") — this doubles as a way to see exactly what the
-resolver currently thinks, before committing to anything.
+
+One pass over every open window, moving each one that is on the wrong workspace
+for the group it resolves to. Skipped: floating windows, windows already in the
+right place, windows with no resolvable group, and windows carrying an override.
+
+Without `--yes` it shows the count in the picker first — `Apply 3 move(s)` /
+`Cancel` — which doubles as a preview of what the resolver currently thinks.
+
+### `wingroup rename <name> <label>`
+
+```console
+$ wingroup rename alpha-stack "EV stack"
+```
+
+Changes the displayed label only. The workspace name stays `alpha-stack`, so
+open windows and existing overrides are not disturbed.
+
+### `wingroup dissolve <name>`
+
+```console
+$ wingroup dissolve beta
+```
+
+Removes the group from `state.json` and drops any overrides that pointed at it.
+It never touches a window: anything sitting on that workspace stays there, no
+longer tracked as a group.
+
+### `wingroup monitor <group> <name|->`
+
+```console
+$ wingroup monitor alpha DP-1     # pin
+$ wingroup monitor alpha -        # clear the pin
+```
+
+The monitor name must be one `hyprctl monitors` reports; anything else is
+refused and the available names are listed:
+
+```console
+$ wingroup monitor alpha HDMI-9
+wingroup: no such monitor: HDMI-9 (available: eDP-2, DP-1)
+```
+
+Hyprland creates a named workspace on whichever monitor happens to be focused
+and leaves it bound there, so a group first opened on the laptop stays on the
+laptop forever. A pin fixes that: `wingroup activate` focuses the pinned monitor
+first and, if the group's workspace is currently living on a different one,
+drags the workspace across before switching to it.
+
+### `wingroup toggle-auto`
 
 ```console
 $ wingroup toggle-auto
 ```
-Turns automatic assignment (new windows filed on open) on or off, without
-affecting groups, overrides, or windows already placed.
 
-```console
-$ wingroup menu
-```
-Opens the walker picker, in this order:
-
-1. every group, with its window, idle and busy counts, and the monitor it is
-   pinned to if it has one;
-2. the four actions — `+ new group…`, `− remove a group…`, `⟳ tidy`,
-   `⏻ auto-assign: on/off`;
-3. a separator, then every window with its status glyph and group.
-
-The actions sit directly under the groups rather than at the bottom, so they
-stay a few rows in no matter how many windows are open. This is `SUPER+G`.
-Opening it while a picker is already up does nothing — the second one would
-only stack on top of the first.
-
-`+ new group…` prompts for the label in a walker text field, then creates the
-group the same way `wingroup new` does — same slugification, same refusal of a
-duplicate name, and the same filing of the windows the new group claims. If the
-window you had focused sits in a project that no group owns yet, that project is
-added to the new group; otherwise the group starts empty. Either way it tells
-you which happened, and how many windows it filed, with a desktop notification,
-since a picker opened from a keybind has no terminal to print to. Failures from
-picker actions are notified the same way, so an entry can never look like it
-silently did nothing.
-
-`− remove a group…` is `wingroup dissolve` without a terminal: it asks which
-group, then asks again to confirm that one by name — with *Cancel* as the entry
-already under the cursor, because there is no undo — and then removes the group
-and its overrides. It never closes or moves a window; everything on that
-workspace stays exactly where it is. It says which group went, and says so too
-when there are no groups to remove.
+Flips `.auto` in `state.json`. Turns automatic filing of newly opened windows on
+or off without touching groups, overrides, or windows already placed.
 
 ## `state.json`
 
-Lives at `~/.local/state/omarchy/wingroup/state.json`. Shape:
+Lives at `~/.local/state/omarchy/wingroup/state.json`. One group here owns three
+projects, and one window has been sent somewhere by hand:
 
 ```json
 {
@@ -258,119 +441,119 @@ Lives at `~/.local/state/omarchy/wingroup/state.json`. Shape:
   "catchall": null,
   "groups": [
     {
-      "name": "everest",
-      "label": "everest",
-      "projects": ["everest-web", "everest-rs", "everest-api"],
+      "name": "alpha",
+      "label": "Alpha Stack",
+      "projects": ["alpha-web", "alpha-api", "alpha-infra"],
+      "monitor": "DP-1"
+    },
+    {
+      "name": "beta",
+      "label": "beta",
+      "projects": ["beta"],
       "monitor": null
     }
   ],
   "overrides": {
-    "0xaaa3": "plat"
+    "0xaaa3": "beta"
   }
 }
 ```
 
-- **`auto`** — whether new windows get filed automatically on open
-  (`wingroup toggle-auto`).
-- **`follow`** — whether the daemon takes you *to* a window it files, rather
-  than filing it behind your back. `true` by default; see **Following a
-  window you just opened** below. A state file written before this setting
-  existed has no `follow` key, and behaves as `true`.
-- **`catchall`** — an optional group name that windows with no resolvable
-  project are filed into instead of being left alone. `null` by default.
-- **`groups[]`** — `name` is the Hyprland workspace name (slugified,
-  stable); `label` is what's shown in waybar and the picker; `projects` is
-  the list of `~/projects/*` directory names this group owns — the example
-  above is one group (`everest`) owning three projects
-  (`everest-web`, `everest-rs`, `everest-api`); `monitor` is the monitor this
-  group is pinned to (`wingroup monitor`), or `null` for no pin.
-- **`overrides`** — window address to group name, for windows explicitly
-  sent to a group with `wingroup send` (or the picker). Overrides beat
-  automatic resolution and are dropped automatically when the window
-  closes.
+- **`auto`** — whether newly opened windows are filed automatically.
+  `wingroup toggle-auto` flips it. `tidy` and `send` work either way.
+- **`follow`** — whether the daemon takes you *to* a window it has just filed.
+  `true` by default; see [Following a window you just
+  opened](#following-a-window-you-just-opened). A state file written before this
+  key existed has no `follow`, and its absence reads as `true`. No subcommand
+  sets it; edit the file.
+- **`catchall`** — a group name that windows with no resolvable project are
+  filed into instead of being left alone. `null` by default, and only the daemon
+  consults it — `tidy` never applies a catchall. No subcommand sets it; edit the
+  file.
+- **`groups[]`** — array order is the order of the waybar slots, the picker, and
+  `next`/`prev`.
+  - `name` — the Hyprland workspace name. Slugified at creation, stable
+    afterwards.
+  - `label` — what the bar and picker show. `wingroup rename` changes this.
+  - `projects` — directory names directly under `~/projects` that this group
+    owns. The group above owns three. If two groups list the same project, the
+    earlier one in this array wins.
+  - `monitor` — the monitor this group is pinned to, or `null`.
+- **`overrides`** — Hyprland window address to group name, written by
+  `wingroup send` and the picker. An override beats project resolution. The
+  daemon deletes a window's override when that window closes, and prunes
+  overrides for windows that no longer exist when it starts.
+
+The file is rewritten atomically (temp file plus rename), and a write that would
+not be valid JSON is refused with the old file left in place. If the file is
+found unparseable it is moved to `state.json.corrupt` and replaced with the
+empty default.
 
 ## How automatic assignment decides
 
-For each window, the daemon and `tidy` look at the *shell's* working
-directory (not the terminal emulator's): they find the terminal window's
-most recently spawned direct child process — assumed to be its shell, the
-same assumption Omarchy's own `omarchy-cmd-terminal-cwd` makes — and read
-`/proc/<pid>/cwd` for that process:
+For each window, the daemon and `tidy` look at the **shell's** working
+directory, not the terminal emulator's. They take the terminal window's pid,
+find its highest-numbered direct child — assumed to be its shell, the same
+assumption Omarchy's own `omarchy-cmd-terminal-cwd` makes — check that child's
+executable is listed in `/etc/shells`, and read `/proc/<pid>/cwd` for it.
 
-1. If the window's address has an **override** (`wingroup send` was used on
-   it), it goes to that group. Overrides always win.
-2. Otherwise, if the cwd is inside `~/projects/<project>`, the window is
-   filed into whichever group lists `<project>` in its `projects` array. A
-   cwd inside a Claude Code worktree
-   (`~/projects/<project>/.claude/worktrees/<name>`) still resolves to
-   `<project>` for this purpose — worktrees don't get their own groups.
-3. If the cwd is **outside `~/projects`** entirely (or the project isn't
-   owned by any group), the window is **left exactly where it is** — it is
-   never filed into some arbitrary or default workspace. The only exception
-   is if you've explicitly set `catchall` in `state.json` to a group name;
-   then such windows go there instead, since that's a deliberate choice
-   rather than an arbitrary one.
+Then, in order:
 
-New windows are resolved by the daemon as they open (`wingroup-daemon`,
-retrying briefly while the shell finishes spawning). `wingroup tidy` runs
-the same resolution over every currently open window in one pass, useful
-after moving things around by hand or when timing didn't work out.
+1. If the window's address has an **override**, it goes to that group.
+   Overrides always win.
+2. Otherwise, if the working directory is inside `~/projects/<project>`, the
+   window is filed into whichever group lists `<project>`. Only the first path
+   segment under `~/projects` counts, so anything deeper — including a Claude
+   Code worktree at `~/projects/<project>/.claude/worktrees/<branch>` — still
+   resolves to `<project>`. Worktrees do not get their own groups.
+3. If the working directory is **outside `~/projects`** entirely, or its project
+   is not owned by any group, **the window is left exactly where it is.** It is
+   never filed into some arbitrary or default workspace. The one exception is
+   `catchall` in `state.json`: set it to a group name and the daemon sends such
+   windows there instead. That is a deliberate choice rather than an arbitrary
+   one, which is why it is off by default and has no subcommand.
+
+Floating windows are never filed, at any stage.
+
+`wingroup-daemon` resolves a window as it opens, retrying for about a second
+while the shell finishes spawning, and files it at most once per window. It does
+not watch for `cd`: if you change directory in a terminal afterwards, the window
+stays where it is until the next `wingroup tidy`, which re-resolves every window
+from its current working directory.
+
+An **override is sticky against both**. A window you sent by hand is skipped by
+`tidy` and by the filing a new group does, and keeps its group until it closes.
 
 ## Following a window you just opened
 
-You open a terminal in `~/projects/everest-web`; it belongs on the `everest`
-workspace; you are on workspace 2. Filing it silently would leave you on
-workspace 2 looking at a terminal that never appeared — you asked for that
-window, so `wingroup` puts you on it. The daemon does this with a single
-`movetoworkspace` dispatch, which moves the window and switches to its
-workspace together.
+You open a terminal in `~/projects/alpha-web`; it belongs on the `alpha`
+workspace; you are on workspace 2. Filing it silently would leave you looking at
+workspace 2 while a window you deliberately asked for appears somewhere you
+cannot see. So the daemon uses a single `movetoworkspace` dispatch, which moves
+the window and switches to its workspace together.
 
-Bulk filing is the opposite case and stays silent, because being dragged
-across the desktop once per window is not something a dozen housekeeping
-moves should do to you:
+Bulk filing is the opposite case and stays silent, because being dragged across
+the desktop once per window is not what a dozen housekeeping moves should do:
 
-- `wingroup tidy` (and the filing `wingroup new` does for the windows its new
-  group claims) never follows — it is a batch by definition.
-- `wingroup-restore` respawns your login terminals. While it runs it creates
-  `$XDG_RUNTIME_DIR/wingroup-restoring`, which tells the daemon to keep
-  filing silently, and removes it when it finishes — including when the
-  restore script fails or is killed, so a bad restore cannot leave following
-  switched off for the session. Override the path with `WG_RESTORE_FLAG` if
-  you need to (both the daemon and `wingroup-restore` read it).
-- For the first **10 seconds** after the daemon starts, nothing is followed,
-  so a login burst is quiet even when something other than
-  `wingroup-restore` spawned it. Set `WG_FOLLOW_GRACE` (whole seconds, in the
-  daemon's environment) to change it; `0` disables the grace period.
-- Setting `"follow": false` in `state.json` turns following off entirely and
-  restores the old always-silent behaviour.
+- `wingroup tidy`, and the filing `wingroup new` does for the windows its group
+  claims, never follow — those are batches by definition.
+- `wingroup-restore` creates `$XDG_RUNTIME_DIR/wingroup-restoring` while it
+  runs, which tells the daemon to keep filing silently, and removes it however
+  the script ends — so a crashed or killed restore cannot leave following
+  switched off for the session.
+- For the first **10 seconds** after the daemon starts nothing is followed, so a
+  login burst is quiet even when something other than `wingroup-restore` spawned
+  it.
+- `"follow": false` in `state.json` turns following off entirely.
 
-Following changes *how* a window is moved, never *whether* it is. A floating
-window is still never touched, a window already on its group's workspace is
-still left alone, and `"auto": false` still switches automatic assignment off
-altogether.
+Following changes *how* a window is moved, never *whether* it is.
 
 ## Startup integration with `restore-claude.sh`
 
-If you use a `~/restore-claude.sh` script that respawns the Claude Code
-terminals that were open at shutdown (each via
-`xdg-terminal-exec --dir="$cwd"`), install adds `wingroup-restore` to
-Hyprland's autostart, right after the daemon:
+This part is optional and off unless you already have the script.
 
-```
-exec-once = wingroup-daemon
-exec-once = wingroup-restore
-```
-
-This is opt-in by having the script: install adds the `wingroup-restore`
-line **only** if the restore script -- `$HOME/restore-claude.sh`, or
-`$WG_RESTORE_SCRIPT` if you set it -- exists and is executable at the moment
-you run `./install.sh`. Otherwise you get the daemon line alone, and install
-says so. Respawning terminals at every login is not something a window
-grouper should sign you up for silently.
-
-To turn it on later, create the script, then either re-run `./install.sh`
-after `./uninstall.sh`, or just add the line yourself inside the wingroup
-block in `~/.config/hypr/autostart.conf`:
+If you keep a `~/restore-claude.sh` that respawns the terminals that were open
+at shutdown, `install.sh` adds a second autostart line for it:
 
 ```
 # >>> wingroup
@@ -379,134 +562,139 @@ exec-once = wingroup-restore
 # <<< wingroup
 ```
 
-`wingroup-restore` runs your restore script — with following suppressed for
-the duration, see **Following a window you just opened** — and then runs
-`wingroup tidy --yes`. The daemon already tries to file each terminal as it opens, but
-that's a race against the shell spawning — `wingroup-restore`'s `tidy` pass
-afterwards makes the outcome deterministic regardless of who wins.
+**Install adds the `wingroup-restore` line only if that script exists and is
+executable at the moment you run `./install.sh`.** Otherwise you get the daemon
+line alone, and install says so in its closing summary. Respawning terminals at
+every login is not something a window grouper should sign a stranger up for.
 
-Two environment variables control it:
+`wingroup-restore` runs your script with following suppressed, waits five
+seconds for the spawned shells to start (their working directory is not readable
+until they have), and then runs `wingroup tidy --yes`. The daemon is already
+filing each terminal as it opens, but that is a race against the shell spawning;
+the tidy pass afterwards makes the result the same whoever wins. Arguments are
+passed straight through, and `--dry-run` or `-n` skips the tidy.
 
-- **`WG_RESTORE_SCRIPT`** — path to your restore script. Defaults to
-  `$HOME/restore-claude.sh`. If it's missing or not executable,
-  `wingroup-restore` prints a note and exits 0 — not everyone has one.
-- **`WG_RESTORE_SETTLE`** — seconds to wait after the restore script
-  returns, before running `tidy`, so spawned shells have time to actually
-  start (their cwd isn't readable until they have). Defaults to `5`.
+If the script is missing or not executable, `wingroup-restore` prints a note and
+exits 0.
 
-Arguments are passed straight through to your restore script, so
-`wingroup-restore --dry-run` stays a dry run — nothing gets tidied.
+To turn it on after the fact, create the script and add the line yourself inside
+the existing wingroup block in `~/.config/hypr/autostart.conf`.
 
-## Install / uninstall
+## Environment variables
 
-```console
-$ ./install.sh
-```
+All optional; the defaults are what install and the autostart lines use.
 
-- Symlinks everything in `bin/` into `~/.local/bin`.
-- Adds 8 `custom/wingroup0`–`custom/wingroup7` modules to
-  `~/.config/waybar/config.jsonc` and wires them into `modules-left`.
-  `"hyprland/workspaces"` stays exactly where it was, so the bar reads left to
-  right: Omarchy menu icon, your numbered workspaces, then the group strip.
-- Adds `"ignore-workspaces": [".*[^0-9].*"]` to the `"hyprland/workspaces"`
-  object. A group *is* a named Hyprland workspace, and that module has no icon
-  for a name — it falls through to its `format-icons` `default` glyph and draws
-  an anonymous dot per group, right next to that group's own name in the strip.
-  Waybar matches these patterns against the *whole* workspace name, so the regex
-  reads "contains at least one non-digit": every group name matches, including
-  one that starts with a digit like `3dprint`, and your numbered workspaces 1–0
-  match nothing and stay. `uninstall.sh` takes the line back out. If the edit
-  cannot be made — `modules-left` is spread over several lines, or there is no
-  `"hyprland/workspaces": {` object to put the setting in — install says which
-  part failed and changes nothing.
-- Appends matching styles to `~/.config/waybar/style.css` — the four
-  highlighting states and the four steps of the idle ramp (see **The CSS
-  classes** above, which is also where to put your own overrides).
-- Adds the `SUPER+G` / `SUPER+CTRL+G` keybinds to
-  `~/.config/hypr/bindings.conf` (and unbinds native `SUPER+G`).
-- Adds the `exec-once = wingroup-daemon` autostart line to
-  `~/.config/hypr/autostart.conf`, plus `exec-once = wingroup-restore` if
-  you have an executable restore script (see above). The output tells you
-  which of the two it added.
-- Seeds `~/.local/state/omarchy/wingroup/state.json` if it doesn't exist
-  yet.
+| Variable | Default | Used by |
+| --- | --- | --- |
+| `WG_PROJECTS_DIR` | `~/projects` | Resolution |
+| `WG_STATE_DIR` | `~/.local/state/omarchy/wingroup` | Everything |
+| `WG_HYPRCTL` | `hyprctl` | Everything |
+| `WG_WALKER` | `walker` | Picker |
+| `WG_WALKER_LAUNCHER` | `~/.local/share/omarchy/bin/omarchy-launch-walker` | Picker |
+| `WG_RESOLVE_RETRIES` | `10` | Daemon |
+| `WG_RESOLVE_DELAY` | `0.1` | Daemon |
+| `WG_REFRESH_DEBOUNCE_MS` | `150` | Daemon |
+| `WG_FOLLOW_GRACE` | `10` (seconds; `0` disables) | Daemon |
+| `WG_RESTORE_FLAG` | `$XDG_RUNTIME_DIR/wingroup-restoring` | Daemon, restore |
+| `WG_RESTORE_SCRIPT` | `~/restore-claude.sh` | Restore, install |
+| `WG_RESTORE_SETTLE` | `5` (seconds) | Restore |
 
-Every config file it touches is backed up first (`<file>.bak.<timestamp>`),
-and install is idempotent — running it again is a no-op for anything
-already installed. Reload afterwards:
-
-```console
-$ hyprctl reload && pkill -SIGUSR2 waybar
-```
-
-```console
-$ ./uninstall.sh
-```
-
-Removes the symlinks and strips out exactly what install added from each
-config file — restoring the surrounding content **byte-for-byte**, right
-down to trailing newlines. Your groups are left alone: `state.json` is
-never touched, so uninstalling and reinstalling later picks up right where
-you left off.
-
-## Requirements
-
-All of these ship with Omarchy:
-
-- `hyprctl`, `waybar`, `walker` — the compositor, bar, and picker this tool
-  drives. The picker is opened through Omarchy's own
-  `omarchy-launch-walker` when that exists, so it starts the walker/elephant
-  services if they are not up and gets the same geometry as every other
-  Omarchy menu; without Omarchy, `walker` is called directly with the same
-  flags.
-- `jq` — every bit of `state.json` and window-table handling goes through
-  it.
-- `socat` — the daemon reads Hyprland's event socket through it.
-- `pkill` — signals waybar to redraw its custom modules after a change.
-- `notify-send` — how a picker action reports what it did, or why it could
-  not. There is no terminal behind `SUPER+G`. If it is missing, nothing breaks:
-  the same message still goes to stderr.
-- Standard base utilities the scripts and installer rely on: `flock` (the
-  daemon's and the picker's single-instance locks), `mktemp`, `readlink`,
-  `ps` (one walk of the process table per window-table build, to find each
-  terminal's shell), `awk`, `sed`, `cut`, `wc`, `date`, `truncate`.
+`install.sh` and `uninstall.sh` additionally honour `WG_BIN_DIR`,
+`WG_WAYBAR_CONFIG`, `WG_WAYBAR_STYLE`, `WG_HYPR_BINDINGS` and
+`WG_HYPR_AUTOSTART` if you keep those files somewhere non-standard.
 
 ## Troubleshooting
 
-**The bar isn't updating.** Two separate things have to be true: waybar
-needs to have been reloaded once since install
-(`pkill -SIGUSR2 waybar`) so it picks up the new modules, and
-`wingroup-daemon` needs to actually be running (it's what sends the reload
-signal waybar listens for afterwards). Check with
-`pgrep -fa wingroup-daemon`.
+**The bar is not updating.** The modules are `"interval": "once"`, so they only
+redraw when something signals waybar. Two things have to be true. Waybar must
+have been restarted once since install so it picks up the new modules
+(`pkill -SIGUSR2 waybar`), and `wingroup-daemon` must be running, because it is
+what sends the redraw signal afterwards:
 
-**A window isn't being filed into its group.** The most common cause is
-that its shell's working directory isn't under `~/projects` — see **How
-automatic assignment decides** above. A window opened before its shell
-finished starting, or one the daemon's retry window ran out on, will also
-sit ungrouped until the next `wingroup tidy`.
+```console
+$ pgrep -fa wingroup-daemon
+$ pkill -RTMIN+11 waybar     # force one redraw by hand
+```
 
-**I want to see what the resolver sees before it moves anything.** Run
-`wingroup tidy` (no `--yes`). It previews the moves it would make in the
-picker before applying anything, so you can confirm or cancel.
+The daemon is started by `exec-once` in `~/.config/hypr/autostart.conf`, so it
+comes up at login; `hyprctl reload` does not restart it. Only one can run at a
+time — a second exits immediately saying so.
+
+**A window is not being filed.** In rough order of likelihood: its shell's
+working directory is not under `~/projects`; the project is not listed in any
+group's `projects`; the window is floating; the window is not a terminal at all;
+its shell is not in `/etc/shells`; automatic assignment is off. A window that
+opened before its shell spawned, or whose retry window ran out, also sits
+ungrouped. Almost all of these are fixed by `wingroup tidy`.
+
+**Show me what the resolver sees.** Two ways. `wingroup menu` lists every open
+window under the separator with the group it resolves to, or `ungrouped`. And
+`wingroup tidy` without `--yes` counts the moves it would make and waits for you
+to confirm or cancel, so you can look before anything happens.
+
+**Turn automatic assignment off.** `wingroup toggle-auto`, or the
+`⏻ auto-assign` row in the picker, which also shows the current setting.
+`tidy`, `send` and `activate` keep working with it off; only the filing of newly
+opened windows stops.
+
+**Groups vanished.** Check for `state.json.corrupt` next to `state.json`: an
+unparseable state file is moved aside and replaced with the empty default. The
+`.corrupt` copy is the previous contents.
+
+**The bar shows a group with windows in it, but the workspace is empty.** Run
+`wingroup tidy`. Membership and location are separate facts, and something moved
+a window out from under the group.
 
 ## Known limitations
 
-- **Only the first 8 groups get a waybar slot.** Groups beyond the 8th
-  aren't shown as their own button, but they're still fully usable — reach
-  them from `wingroup menu`, and the 8th slot's tooltip lists how many more
-  there are and their names.
-
-## Future work (not in scope)
-
-- **Remote agents.** The existing remote agent setup could surface as its
-  own group whose "windows" are remote sessions rather than local ones.
-  That would need an entry source other than `hyprctl clients`, which the
-  current design doesn't have.
-- **A GTK layer-shell overlay** replacing the walker picker, with
-  drag-and-drop between groups. The backend is already CLI-shaped, so the
-  UI is replaceable without touching resolution, state, or the daemon.
+- **Eight waybar slots.** `WG_SLOTS` is 8 in both the module and the installer.
+  Groups past the eighth have no button of their own; they stay fully usable
+  from `wingroup menu` and the CLI, and the eighth slot's tooltip lists how many
+  more there are and their workspace names.
+- **Per-screen highlighting depends on waybar exporting `WAYBAR_OUTPUT_NAME`**
+  to the custom module's script. It has not been confirmed that every waybar
+  build and configuration does. Without it, every bar highlights the same group
+  as active — the behaviour the module has always had.
+- **Idle and busy are read out of the window title.** The glyphs are hardcoded:
+  `✳` for idle, `◐` and `◑` for busy. A terminal that does not propagate the
+  title, a Claude Code version that uses different glyphs, or another program
+  that happens to start its title with one of them will be counted wrongly.
+- **Finding the shell is a heuristic.** The window's pid, its highest-numbered
+  direct child, that child's `exe` matched against `/etc/shells`. A terminal
+  running a command directly rather than under a login shell, a `tmux` or
+  `screen` session (where the shell is a child of the server, not the terminal),
+  and an `ssh` session all fail to resolve — the window is left where it is.
+- **Projects are exactly one level under a single root.** `~/projects/foo` is a
+  project; `~/work/foo` and `~/projects/a/b` as a project in its own right are
+  not. `WG_PROJECTS_DIR` moves the root but there is only ever one.
+- **Assignment happens once, when the window opens.** The daemon does not watch
+  for `cd`, so a terminal that changes project mid-session keeps its workspace
+  until the next `wingroup tidy`.
+- **Overrides are keyed by Hyprland window address**, so they die with the
+  window. That is deliberate — an address is reused — but it does mean a manual
+  placement cannot survive a restart.
+- **No lock between the daemon and the CLI.** Both write `state.json`, and a
+  `wingroup new` racing a window closing can lose one of the two updates. The
+  daemon avoids the common case by not writing at all when there is nothing to
+  delete, but the race exists.
+- **`"ignore-workspaces"` hides every named workspace** from the numbered
+  indicator, not only wingroup's groups. If you keep named workspaces for other
+  reasons, they disappear from that module too.
+- **The waybar config edit is line-shaped.** `"modules-left"` on several lines,
+  or a `"hyprland/workspaces": {` that does not open on its own line, and
+  install refuses rather than guessing. Add the pieces by hand in that case.
+- **Each bar refresh runs the module once per slot.** Eight processes, each
+  querying `hyprctl clients`, walking the whole process table once with `ps`,
+  and reading `/proc/<pid>/cwd` for every window. Refreshes are debounced to
+  150 ms in the daemon, but a very busy desktop will feel it.
+- **A group is one workspace.** It cannot span two, and Hyprland binds a named
+  workspace to the monitor it was first created on — `wingroup monitor` is the
+  workaround, not a fix.
+- **`wingroup activate <n>` prefers the slot reading.** A group whose name is
+  all digits and shorter than the group count cannot be activated by name.
+- **Only local Hyprland windows exist.** Everything comes from `hyprctl
+  clients`; there is no other entry source.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
