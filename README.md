@@ -9,7 +9,7 @@ A strip of buttons in waybar shows every group, and — if the terminals are
 running Claude Code — how many sessions in each one have finished and are
 waiting on you.
 
-![Waybar strip: the numbered workspaces 1 to 5 and 0, then four group buttons — "plat" with a superscript four in bold red, "3dprint" plain and dimmed, "other" and "letuska" each with a superscript three in red-orange](docs/images/bar.png)
+![Waybar strip: the numbered workspaces, then five group buttons — "mail" plain and dimmed with no idle sessions, then "docs" with a superscript one in amber, "api" with a superscript two in orange, "web" with a superscript three in red-orange, and "infra" with a superscript five in bold red](docs/images/bar.png)
 
 ## The problem
 
@@ -95,7 +95,7 @@ Three details worth knowing before you run it:
   an anonymous `format-icons` default dot for every group, right next to that
   group's own name in the strip. The regex is matched against the whole
   workspace name and means "contains at least one non-digit", so every group
-  name is hidden — including one starting with a digit, like `3dprint` — and
+  name is hidden — including one starting with a digit, like `3d-assets` — and
   workspaces `1`–`10` are kept. Note that it hides *every* named workspace, not
   only wingroup's.
 - **The waybar edit is line-shaped.** `"modules-left"` must be a single line
@@ -123,8 +123,9 @@ what you want for the windows you already had open.
 ## Reading the bar
 
 Each group gets one button showing its label, and a superscript when it has idle
-sessions. In the screenshot above: `plat⁴` has four or more sessions finished
-and waiting, `3dprint` has none, `other³` and `letuska³` have three each. The
+sessions. In the screenshot above: `mail` has none, `docs¹` has one, `api²`
+two, `web³` three, and `infra⁵` five — which draws at the top step, since the
+ramp caps at four. The
 gaps between the labels are the gaps between separate waybar modules, not
 characters wingroup prints.
 
