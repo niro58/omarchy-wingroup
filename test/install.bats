@@ -46,10 +46,60 @@ teardown() { wg_teardown_tmp; }
 @test "install hides the named group workspaces from the numbered indicator" {
   "$WG_ROOT/install.sh"
   run bash -c "grep -A3 '\"hyprland/workspaces\": {' '$WG_WAYBAR_CONFIG'"
-  [[ "$output" == *'"ignore-workspaces": ["^[^0-9]"]'* ]]
+  [[ "$output" == *'"ignore-workspaces": [".*[^0-9].*"]'* ]]
   # inside the object it belongs to, not loose in the file
   run bash -c "grep -c 'ignore-workspaces' '$WG_WAYBAR_CONFIG'"
   [ "$output" -eq 1 ]
+}
+
+# The pattern, read back out of the config exactly as installed.
+installed_ignore_pattern() {
+  sed -n 's/.*"ignore-workspaces": \["\(.*\)"\].*/\1/p' "$WG_WAYBAR_CONFIG"
+}
+
+# Waybar matches an "ignore-workspaces" pattern against the *whole* workspace
+# name -- its own manual's example is a complete name -- so "hidden" means the
+# pattern consumes the entire name, not just a prefix of it. Checking
+# BASH_REMATCH covers both readings at once: a pattern that only matches under
+# search semantics matches here too, but leaves a partial BASH_REMATCH behind.
+pattern_hides() {
+  local pattern="$1" name="$2"
+  [[ $name =~ $pattern ]] || return 1
+  [[ ${BASH_REMATCH[0]} == "$name" ]]
+}
+
+# Asserting the line is present is what let two broken patterns ship. "^[^0-9]"
+# matches one character, so under whole-name matching it hid nothing at all;
+# "^[^0-9].*" then left the dot for a group named "3dprint". So assert what the
+# pattern does, on a name that starts with a digit as well as ones that do not.
+@test "the installed pattern hides every group name, digit-leading ones included" {
+  "$WG_ROOT/install.sh"
+  local pattern name
+  pattern="$(installed_ignore_pattern)"
+  [ -n "$pattern" ]
+  for name in plat mgmt template other 3dprint niro-3d-print; do
+    pattern_hides "$pattern" "$name" || {
+      printf 'pattern %s does not hide workspace %s\n' "$pattern" "$name" >&2
+      return 1
+    }
+  done
+}
+
+@test "the installed pattern leaves the numbered workspaces alone" {
+  "$WG_ROOT/install.sh"
+  local pattern name
+  pattern="$(installed_ignore_pattern)"
+  for name in 1 6 10 0; do
+    # Neither whole-name nor search matching may touch a purely numeric name.
+    ! pattern_hides "$pattern" "$name" || {
+      printf 'pattern %s wrongly hides workspace %s\n' "$pattern" "$name" >&2
+      return 1
+    }
+    ! [[ $name =~ $pattern ]] || {
+      printf 'pattern %s matches inside workspace %s\n' "$pattern" "$name" >&2
+      return 1
+    }
+  done
 }
 
 @test "uninstall takes the ignore-workspaces line back out" {

@@ -68,9 +68,16 @@ waybar_modules_block() {
 # thing, and the dot is the useless one.
 #
 # The numbers themselves stay: 1..10 are the user's own, nothing to do with
-# groups. "ignore-workspaces" holds regexes matched against the workspace name,
-# so "^[^0-9]" drops exactly the named ones. (Verified present in the waybar
-# 0.15.0 build this targets: strings on the binary matches "ignore-workspaces".)
+# groups. "ignore-workspaces" holds regexes matched against the *whole*
+# workspace name -- waybar's own manual gives a complete name as its example --
+# so the pattern has to describe the entire name, not a prefix of it.
+# ".*[^0-9].*" reads "contains at least one non-digit": it drops every named
+# workspace and keeps 1..10. Two earlier attempts were wrong and both showed up
+# as dots still on the bar: "^[^0-9]" matches a single character, so under
+# whole-name matching it matches nothing at all; "^[^0-9].*" then missed a group
+# whose name starts with a digit, like "3dprint". (Verified present in the
+# waybar 0.15.0 build this targets: strings on the binary matches
+# "ignore-workspaces".)
 #
 # The markers are the same pair uninstall.sh's strip_block already looks for,
 # and it strips every block it finds, so this one needs nothing new to reverse
@@ -78,7 +85,7 @@ waybar_modules_block() {
 # closing marker anywhere in the file is what strip_block reads.
 waybar_ignore_block() {
   printf '    // >>> wingroup\n'
-  printf '    "ignore-workspaces": ["^[^0-9]"],\n'
+  printf '    "ignore-workspaces": [".*[^0-9].*"],\n'
   printf '    // <<< wingroup\n'
 }
 
