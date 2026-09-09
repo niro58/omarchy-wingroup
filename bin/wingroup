@@ -196,7 +196,18 @@ cmd_toggle_auto() {
   wg_refresh
 }
 
+# SUPER+G with a picker already on screen must not open a second one. The bar's
+# right-click and the keybind reach the same command, and the picker used to
+# take long enough that pressing again looked like the only sane response.
+#
+# Same single-instance lock the daemon takes, and the same reason for -n: if it
+# is held, the picker the user wants is already in front of them, so exit
+# quietly rather than queue up behind it.
 cmd_menu() {
+  local lock="${XDG_RUNTIME_DIR:-/tmp}/wingroup-menu.lock"
+  exec 9>"$lock"
+  flock -n 9 || return 0
+
   local action
   # shellcheck disable=SC2119  # no args intended: build the menu for the current state
   action="$(wg_menu_build | wg_menu_run 'Groups')"

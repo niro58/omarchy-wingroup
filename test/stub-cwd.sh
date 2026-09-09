@@ -3,6 +3,12 @@
 # /proc. Sourced by bin/wingroup and bin/wingroup-waybar when WG_TEST_STUB_CWD
 # points here, and by test/helper.bash for tests that source the libs directly.
 
+# The process-table scan belongs to the /proc lookup this file replaces, so it
+# goes too: the fixture pids are not processes, and nothing here should read the
+# machine's real process list.
+wg_children_load() { WG_CHILDREN_LOADED=1; }
+WG_CHILDREN_LOADED=1
+
 wg_window_cwd() {
   local pid="$1" p c
   # Test-only: when $WG_CWD_LOG is set, record every lookup. One lookup is one

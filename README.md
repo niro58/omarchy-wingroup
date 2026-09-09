@@ -31,14 +31,18 @@ Each group gets a short button showing its label (each `·` above is just
 the gap between separate waybar modules, not a character wingroup prints).
 Reading the example above:
 
-- **`everest²`** — the group is busy: two of its windows have a Claude Code
-  session currently working (title starts with `◐` or `◑`). The small `²`
-  is the busy count, rendered as a Unicode superscript. A group with no busy
-  windows shows no superscript at all.
+- **`everest²`** — two of the group's Claude Code sessions are **idle**:
+  finished, waiting for input, ready for the next thing (title starts with
+  `✳`). The small `²` is that idle count, rendered as a Unicode superscript.
+  A group with nothing waiting on you shows no superscript at all. Hover the
+  button for the full breakdown — `everest — 3 windows · 2 idle · 1 busy`,
+  where a busy session is one currently working (`◐` or `◑`) and the
+  remainder are plain terminals with no session in them.
 - **Highlighting** — a group's button is dimmed (55% opacity) by default.
-  It goes to full opacity while busy, and to full opacity **and bold** when
-  its workspace is the one currently focused — focused beats busy if both
-  are true.
+  It goes to 85% when the group's workspace is on screen on a monitor that
+  does not have focus, to full opacity when one of its sessions is busy, and
+  to full opacity **and bold** when its workspace is the focused one. Being
+  looked at beats being on screen, which beats being busy.
 
 Left-click a button to switch to that group's workspace. Right-click any
 button to open the picker menu (`wingroup menu`).
@@ -140,9 +144,11 @@ affecting groups, overrides, or windows already placed.
 ```console
 $ wingroup menu
 ```
-Opens the walker picker: every group with its window/busy counts, every
-window with its status glyph and group, then `+ new group…`, `⟳ tidy`, and
-`⏻ auto-assign: on/off`. This is `SUPER+G`.
+Opens the walker picker: every group with its window, idle and busy counts,
+every window with its status glyph and group, then `+ new group…`, `⟳ tidy`,
+and `⏻ auto-assign: on/off`. This is `SUPER+G`. Opening it while a picker is
+already up does nothing — the second one would only stack on top of the
+first.
 
 ## `state.json`
 
@@ -297,14 +303,19 @@ you left off.
 All of these ship with Omarchy:
 
 - `hyprctl`, `waybar`, `walker` — the compositor, bar, and picker this tool
-  drives.
+  drives. The picker is opened through Omarchy's own
+  `omarchy-launch-walker` when that exists, so it starts the walker/elephant
+  services if they are not up and gets the same geometry as every other
+  Omarchy menu; without Omarchy, `walker` is called directly with the same
+  flags.
 - `jq` — every bit of `state.json` and window-table handling goes through
   it.
 - `socat` — the daemon reads Hyprland's event socket through it.
 - `pkill` — signals waybar to redraw its custom modules after a change.
 - Standard base utilities the scripts and installer rely on: `flock` (the
-  daemon's single-instance lock), `mktemp`, `readlink`, `pgrep`, `awk`,
-  `sed`, `cut`, `wc`, `date`, `truncate`.
+  daemon's and the picker's single-instance locks), `mktemp`, `readlink`,
+  `ps` (one walk of the process table per window-table build, to find each
+  terminal's shell), `awk`, `sed`, `cut`, `wc`, `date`, `truncate`.
 
 ## Troubleshooting
 

@@ -132,6 +132,28 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
   [ "$(dispatches)" = "workspace name:plat" ]
 }
 
+# SUPER+G pressed twice, or the keybind and the bar's right-click together,
+# must not stack two pickers on the screen.
+@test "menu does nothing, quietly, while another picker holds the lock" {
+  export WG_WALKER_PICK=1
+  exec 9>"$XDG_RUNTIME_DIR/wingroup-menu.lock"
+  flock -n 9
+  run wingroup menu
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+  exec 9>&-
+}
+
+@test "menu runs again once the first picker has let the lock go" {
+  export WG_WALKER_PICK=1
+  exec 9>"$XDG_RUNTIME_DIR/wingroup-menu.lock"
+  flock -n 9
+  exec 9>&-
+  wingroup menu
+  [ "$(dispatches)" = "workspace name:plat" ]
+}
+
 @test "menu focuses the window the picker returned" {
   export WG_WALKER_PICK=5
   wingroup menu

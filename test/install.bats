@@ -118,6 +118,22 @@ teardown() { wg_teardown_tmp; }
   [ "$status" -eq 0 ]
 }
 
+# A group can be on screen on a monitor that does not have focus. That is its
+# own state, between the dimmed default and the focused group, and it needs a
+# rule of its own or the class the bar emits styles nothing.
+@test "install styles all three of busy, visible and active" {
+  "$WG_ROOT/install.sh"
+  run bash -c "grep -c '#custom-wingroup0.busy' '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep -c '#custom-wingroup0.visible' '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep -c '#custom-wingroup0.active' '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+  # Dimmer than the focused group, brighter than a group that is out of sight.
+  run bash -c "grep -A1 'wingroup0.visible' '$WG_WAYBAR_STYLE' | head -n1"
+  [[ "$output" == *"opacity: 0.85"* ]]
+}
+
 @test "install backs up every file it edits" {
   "$WG_ROOT/install.sh"
   run bash -c "ls $WG_TMP/config.jsonc.bak.* | wc -l"

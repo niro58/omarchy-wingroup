@@ -1,3 +1,10 @@
 #!/usr/bin/env bash
-cat >/dev/null
+# Test-only stand-in for walker. Records the arguments it was given and the
+# entries it was handed, then prints the index $WG_WALKER_PICK selects.
+[[ -z ${WG_WALKER_ARGS_LOG:-} ]] || printf '%s\n' "$*" >>"$WG_WALKER_ARGS_LOG"
+if [[ -n ${WG_WALKER_STDIN_LOG:-} ]]; then
+  cat >>"$WG_WALKER_STDIN_LOG"
+else
+  cat >/dev/null
+fi
 printf '%s\n' "${WG_WALKER_PICK:-}"

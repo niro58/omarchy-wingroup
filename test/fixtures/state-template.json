@@ -1,0 +1,8 @@
+{
+  "auto": true,
+  "catchall": null,
+  "groups": [
+    {"name":"template","label":"template","projects":["everest-web","everest-rs"],"monitor":null}
+  ],
+  "overrides": {}
+}

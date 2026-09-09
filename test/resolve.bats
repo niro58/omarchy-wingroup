@@ -155,6 +155,54 @@ teardown() { wg_teardown_tmp; }
   [ "$output" = "1001" ]
 }
 
+# The picker took 1.6 seconds to appear on a 15-window desktop because
+# wg_window_table asked the state two questions per window through jq: an
+# override lookup and a project lookup, about thirty processes. Both maps are
+# now built once per table build, so the count is flat in the number of windows
+# -- three for the seven-window fixture set (state read, the maps, the client
+# list), where the old code spent sixteen.
+@test "a table build spawns a handful of jq processes, not two per window" {
+  wg_count_jq
+  wg_window_table >/dev/null
+  run jq_calls
+  [ "$output" -lt 8 ]
+}
+
+@test "the jq count does not grow with the number of windows" {
+  local one_client seven
+  one_client="$(jq '[.[0]]' "$WG_FIXTURES/clients.json")"
+  wg_count_jq
+  wg_window_table >/dev/null
+  seven="$(jq_calls)"
+  : >"$WG_JQ_LOG"
+  wg_window_table "$one_client" >/dev/null
+  [ "$seven" -eq "$(jq_calls)" ]
+}
+
+# One row is one cwd resolution, and one process-table walk for it -- not one
+# per window on screen.
+@test "a table build reads the process table once, not once per window" {
+  local calls
+  calls="$(WG_CHILDREN_LOADED=0
+    wg_children_load() { WG_CHILDREN_LOADED=1; printf 'walk\n' >>"$WG_TMP/ps.log"; }
+    : >"$WG_TMP/ps.log"
+    wg_window_table >/dev/null
+    wc -l <"$WG_TMP/ps.log")"
+  [ "$calls" -eq 1 ]
+}
+
+@test "wg_row_split keeps every column in place when interior columns are empty" {
+  wg_row_split "$(printf '0xaaa1\t1001\t1\tfalse\t\tplain\t\t\t✳ a\tb')"
+  [ "${WG_ROW[1]}" = "0xaaa1" ]
+  [ "${WG_ROW[4]}" = "false" ]
+  [ "${WG_ROW[5]}" = "" ]
+  [ "${WG_ROW[6]}" = "plain" ]
+  [ "${WG_ROW[7]}" = "" ]
+  [ "${WG_ROW[8]}" = "" ]
+  # Column 9 is the title, and it keeps whatever tabs it arrived with.
+  [ "${WG_ROW[9]}" = "$(printf '✳ a\tb')" ]
+}
+
 @test "wg_window_row for an unknown address resolves nothing at all" {
   export WG_CWD_LOG="$WG_TMP/cwd.log"
   : >"$WG_CWD_LOG"

@@ -35,7 +35,7 @@ wg_emit() {
 
 main() {
   local slot="${1:?usage: wingroup-waybar <slot>}"
-  local state name label projects active
+  local state name label projects
   local -a names=()
 
   state="$(wg_state_read)"
@@ -50,25 +50,44 @@ main() {
   label="$(wg_state_group_field "$name" label "$state")"
   [[ -n $label ]] || label="$name"
 
-  # Read each row whole and pull columns out with `cut` rather than a
-  # multi-variable `IFS=$'\t' read`: tab is IFS whitespace, so a read across
-  # an empty interior column (an ungrouped window's group is "") collapses
-  # and shifts status into $group -- group names are user-slugified, so a
-  # group literally named "busy" or "idle" would then corrupt these counts.
-  local total=0 busy=0 line group status
+  # wg_row_split, not a multi-variable `IFS=$'\t' read`: tab is IFS whitespace,
+  # so a read across an empty interior column (an ungrouped window's group is
+  # "") collapses and shifts status into $group -- group names are
+  # user-slugified, so a group literally named "busy" or "idle" would then
+  # corrupt these counts.
+  #
+  # A window is idle, busy, or neither: a plain terminal with no Claude session
+  # in it counts towards the total and towards nothing else.
+  local total=0 idle=0 busy=0 line
   while IFS= read -r line; do
-    group="$(cut -f5 <<<"$line")"
-    [[ $group == "$name" ]] || continue
-    status="$(cut -f6 <<<"$line")"
+    wg_row_split "$line"
+    [[ ${WG_ROW[5]} == "$name" ]] || continue
     total=$(( total + 1 ))
-    [[ $status == busy ]] && busy=$(( busy + 1 ))
+    case ${WG_ROW[6]} in
+      idle) idle=$(( idle + 1 )) ;;
+      busy) busy=$(( busy + 1 )) ;;
+    esac
   done < <(wg_window_table)
 
-  active="$(wg_hypr_query activeworkspace | jq -r '.name')"
+  # activeworkspace answers for the focused monitor only, which on a
+  # multi-monitor desktop is a lie by omission: a group can be on screen, in
+  # full view, on the monitor that does not have focus. Ask every monitor.
+  local -a monitor_ws=()
+  mapfile -t monitor_ws < <(wg_hypr_query monitors | jq -r '
+    [ first(.[] | select(.focused == true) | .activeWorkspace.name) // "" ]
+    + [ .[] | .activeWorkspace.name // empty ] | .[]')
+  local focused="${monitor_ws[0]:-}"
+
+  local onscreen=0 i
+  for (( i = 1; i < ${#monitor_ws[@]}; i++ )); do
+    if [[ ${monitor_ws[i]} == "$name" ]]; then onscreen=1; fi
+  done
 
   local class=""
-  if [[ $active == "$name" ]]; then
+  if [[ $focused == "$name" ]]; then
     class="active"
+  elif (( onscreen )); then
+    class="visible"
   elif (( busy > 0 )); then
     class="busy"
   fi
@@ -77,7 +96,7 @@ main() {
     'first(.groups[] | select(.name == $n) | .projects) | join(", ")' <<<"$state")"
 
   local tooltip
-  tooltip="$(printf '%s — %d windows, %d busy' "$label" "$total" "$busy")"
+  tooltip="$(printf '%s — %d windows · %d idle · %d busy' "$label" "$total" "$idle" "$busy")"
   [[ -n $projects ]] && tooltip+=$'\n'"Projects: $projects"
 
   if (( slot == WG_SLOTS - 1 && ${#names[@]} > WG_SLOTS )); then
@@ -87,7 +106,9 @@ main() {
     tooltip+=$'\n'"${#overflow[@]} more: ${joined%, }"
   fi
 
-  wg_emit "$label$(wg_superscript "$busy")" "$tooltip" "$class"
+  # The superscript counts idle sessions, not busy ones: the point of the bar is
+  # spotting a Claude session that has finished and can be given the next thing.
+  wg_emit "$label$(wg_superscript "$idle")" "$tooltip" "$class"
 }
 
 main "$@"

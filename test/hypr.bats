@@ -26,7 +26,15 @@ teardown() { wg_teardown_tmp; }
   [ "$(dispatches)" = "movetoworkspacesilent name:everest,address:0xaaa1" ]
 }
 
-@test "wg_hypr_query fails loudly on an unhandled query" {
+@test "wg_hypr_query lists every monitor and the workspace on it" {
   run wg_hypr_query monitors
+  [ "$status" -eq 0 ]
+  [ "$(jq 'length' <<<"$output")" -eq 2 ]
+  [ "$(jq -r 'map(.activeWorkspace.name) | join(",")' <<<"$output")" = "3,template" ]
+  [ "$(jq -r 'first(.[] | select(.focused) | .name)' <<<"$output")" = "DP-1" ]
+}
+
+@test "wg_hypr_query fails loudly on an unhandled query" {
+  run wg_hypr_query devices
   [ "$status" -ne 0 ]
 }

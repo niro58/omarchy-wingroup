@@ -22,11 +22,19 @@ teardown() { wg_teardown_tmp; }
   [ "$first" = "group:everest" ]
 }
 
-@test "a group entry shows its window and busy counts" {
+@test "a group entry shows its window, idle and busy counts" {
   display="$(wg_menu_build | head -n1 | cut -f2)"
   [[ "$display" == *"everest"* ]]
   [[ "$display" == *"2 windows"* ]]
+  [[ "$display" == *"1 idle"* ]]
   [[ "$display" == *"1 busy"* ]]
+}
+
+# A plain terminal is neither idle nor busy, but it is still a window.
+@test "a group entry counts a window with no Claude session as neither idle nor busy" {
+  wg_patch_state '.overrides["0xaaa6"] = "everest"'
+  display="$(wg_menu_build | head -n1 | cut -f2)"
+  [[ "$display" == *"3 windows · 1 idle · 1 busy"* ]]
 }
 
 @test "the menu lists every window" {
@@ -80,4 +88,53 @@ teardown() { wg_teardown_tmp; }
   export WG_WALKER_PICK=99
   action="$(wg_group_menu_build | wg_menu_run 'Group')"
   [ "$action" = "" ]
+}
+
+# Omarchy sizes its own walker and starts the elephant/walker services first;
+# the picker is a walker like any other and should look and behave like one.
+@test "off Omarchy the picker calls walker itself, with Omarchy's geometry" {
+  export WG_WALKER_ARGS_LOG="$WG_TMP/walker-args"
+  export WG_WALKER_LAUNCHER="$WG_TMP/no-such-launcher"
+  export WG_WALKER_PICK=1
+  action="$(wg_group_menu_build | wg_menu_run 'Group')"
+  [ "$action" = "group:plat" ]
+  run cat "$WG_WALKER_ARGS_LOG"
+  [ "$output" = "--width 644 --maxheight 300 --minheight 300 -d -i -p Group" ]
+}
+
+@test "on Omarchy the picker goes through omarchy-launch-walker, which starts the services" {
+  export WG_WALKER_ARGS_LOG="$WG_TMP/walker-args"
+  export WG_WALKER_LAUNCHER="$WG_ROOT/test/bin/walker-launcher-stub"
+  export WG_WALKER_PICK=1
+  # The default binary name, so the launcher is the one that has to be picked --
+  # with a stub of that name ahead of any real walker on PATH, in case it is not.
+  ln -sf "$WG_ROOT/test/bin/walker-stub" "$WG_TMP/walker"
+  export PATH="$WG_TMP:$PATH"
+  export WG_WALKER=walker
+
+  action="$(wg_group_menu_build | wg_menu_run 'Group')"
+  [ "$action" = "group:plat" ]
+  run grep -c '^launcher -d -i -p Group$' "$WG_WALKER_ARGS_LOG"
+  [ "$output" -eq 1 ]
+  run grep -c 'width 644' "$WG_WALKER_ARGS_LOG"
+  [ "$output" -eq 1 ]
+}
+
+@test "an explicitly chosen walker binary wins over the launcher" {
+  export WG_WALKER_ARGS_LOG="$WG_TMP/walker-args"
+  export WG_WALKER_LAUNCHER="$WG_ROOT/test/bin/walker-launcher-stub"
+  export WG_WALKER_PICK=1
+  action="$(wg_group_menu_build | wg_menu_run 'Group')"
+  [ "$action" = "group:plat" ]
+  run grep -c '^launcher' "$WG_WALKER_ARGS_LOG"
+  [ "$output" -eq 0 ]
+}
+
+@test "the picker still gets the entries on stdin, one per line" {
+  export WG_WALKER_STDIN_LOG="$WG_TMP/walker-stdin"
+  export WG_WALKER_PICK=0
+  wg_group_menu_build | wg_menu_run 'Group' >/dev/null
+  run cat "$WG_WALKER_STDIN_LOG"
+  [ "${lines[0]}" = "everest" ]
+  [ "${lines[3]}" = "+ new group…" ]
 }

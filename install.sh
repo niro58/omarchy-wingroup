@@ -120,17 +120,22 @@ install_waybar_style() {
 
   backup "$WG_WAYBAR_STYLE"
 
-  local i base="" busy="" active=""
+  local i base="" busy="" visible="" active=""
   for (( i = 0; i < WG_SLOTS; i++ )); do
     base+="${base:+, }#custom-wingroup$i"
     busy+="${busy:+, }#custom-wingroup$i.busy"
+    visible+="${visible:+, }#custom-wingroup$i.visible"
     active+="${active:+, }#custom-wingroup$i.active"
   done
 
+  # Three states, dimmest first, because a group can only be in one of them:
+  # "busy" is off screen with a session working, "visible" is on screen on a
+  # monitor that does not have focus, "active" is the one being looked at.
   {
     printf '\n/* >>> wingroup */\n'
     printf '%s { padding: 0 6px; opacity: 0.55; }\n' "$base"
     printf '%s { opacity: 1; }\n' "$busy"
+    printf '%s { opacity: 0.85; }\n' "$visible"
     printf '%s { opacity: 1; font-weight: bold; }\n' "$active"
     printf '/* <<< wingroup%s */\n' "$eof_flag"
   } >>"$WG_WAYBAR_STYLE"
