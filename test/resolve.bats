@@ -14,24 +14,24 @@ setup() {
 teardown() { wg_teardown_tmp; }
 
 @test "wg_cwd_project reads a plain project directory" {
-  run wg_cwd_project /home/niro/projects/everest-web
-  [ "$output" = "everest-web" ]
+  run wg_cwd_project /home/dev/projects/shop-web
+  [ "$output" = "shop-web" ]
 }
 
 @test "wg_cwd_project reads a subdirectory of a project" {
-  run wg_cwd_project /home/niro/projects/everest-web/src/lib
-  [ "$output" = "everest-web" ]
+  run wg_cwd_project /home/dev/projects/shop-web/src/lib
+  [ "$output" = "shop-web" ]
 }
 
 @test "wg_cwd_project collapses a claude worktree to its repo" {
-  run wg_cwd_project /home/niro/projects/niro-platform/.claude/worktrees/connectors-spec
-  [ "$output" = "niro-platform" ]
+  run wg_cwd_project /home/dev/projects/site-platform/.claude/worktrees/spec-draft
+  [ "$output" = "site-platform" ]
 }
 
 @test "wg_cwd_project returns empty for home, for the projects dir itself, and for outside paths" {
-  run wg_cwd_project /home/niro
+  run wg_cwd_project /home/dev
   [ "$output" = "" ]
-  run wg_cwd_project /home/niro/projects
+  run wg_cwd_project /home/dev/projects
   [ "$output" = "" ]
   run wg_cwd_project /etc
   [ "$output" = "" ]
@@ -40,23 +40,23 @@ teardown() { wg_teardown_tmp; }
 }
 
 @test "wg_cwd_worktree extracts the worktree name only when there is one" {
-  run wg_cwd_worktree /home/niro/projects/niro-platform/.claude/worktrees/connectors-spec
-  [ "$output" = "connectors-spec" ]
-  run wg_cwd_worktree /home/niro/projects/niro-platform/.claude/worktrees/connectors-spec/src
-  [ "$output" = "connectors-spec" ]
-  run wg_cwd_worktree /home/niro/projects/everest-web
+  run wg_cwd_worktree /home/dev/projects/site-platform/.claude/worktrees/spec-draft
+  [ "$output" = "spec-draft" ]
+  run wg_cwd_worktree /home/dev/projects/site-platform/.claude/worktrees/spec-draft/src
+  [ "$output" = "spec-draft" ]
+  run wg_cwd_worktree /home/dev/projects/shop-web
   [ "$output" = "" ]
 }
 
 @test "wg_project_group maps every project of a multi-project group" {
-  run wg_project_group everest-web
-  [ "$output" = "everest" ]
-  run wg_project_group everest-rs
-  [ "$output" = "everest" ]
-  run wg_project_group everest-api
-  [ "$output" = "everest" ]
-  run wg_project_group niro-platform
-  [ "$output" = "plat" ]
+  run wg_project_group shop-web
+  [ "$output" = "shop" ]
+  run wg_project_group shop-core
+  [ "$output" = "shop" ]
+  run wg_project_group shop-api
+  [ "$output" = "shop" ]
+  run wg_project_group site-platform
+  [ "$output" = "site" ]
 }
 
 @test "wg_project_group returns empty for an unmapped project" {
@@ -65,13 +65,13 @@ teardown() { wg_teardown_tmp; }
 }
 
 @test "wg_window_group prefers an override over project resolution" {
-  run wg_window_group 0xaaa3 everest-api
-  [ "$output" = "plat" ]
+  run wg_window_group 0xaaa3 shop-api
+  [ "$output" = "site" ]
 }
 
 @test "wg_window_group falls back to the project when there is no override" {
-  run wg_window_group 0xaaa1 everest-web
-  [ "$output" = "everest" ]
+  run wg_window_group 0xaaa1 shop-web
+  [ "$output" = "shop" ]
 }
 
 @test "wg_window_group returns empty with no override and no project" {
@@ -111,12 +111,12 @@ teardown() { wg_teardown_tmp; }
 
 @test "wg_window_table resolves a worktree window" {
   output="$(wg_window_table | awk -F'\t' '$1=="0xaaa2"{print $5, $6, $7, $8}')"
-  [ "$output" = "everest busy everest-rs odtah-price" ]
+  [ "$output" = "shop busy shop-core price-units" ]
 }
 
 @test "wg_window_table honours an override" {
   output="$(wg_window_table | awk -F'\t' '$1=="0xaaa3"{print $5, $7}')"
-  [ "$output" = "plat everest-api" ]
+  [ "$output" = "site shop-api" ]
 }
 
 @test "wg_window_table leaves a projectless window ungrouped" {

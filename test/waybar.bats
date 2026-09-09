@@ -20,25 +20,25 @@ wg_class_list() {
 @test "slot 0 renders the first group with its idle count as a superscript" {
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$status" -eq 0 ]
-  [ "$(jq -r '.text' <<<"$output")" = "everest¹" ]
+  [ "$(jq -r '.text' <<<"$output")" = "shop¹" ]
 }
 
 @test "slot 1 renders the second group" {
   run "$WG_ROOT/bin/wingroup-waybar" 1
-  [ "$(jq -r '.text' <<<"$output")" = "plat¹" ]
+  [ "$(jq -r '.text' <<<"$output")" = "site¹" ]
 }
 
 # The superscript is the idle count, not the busy one: what the bar is for is
 # spotting a session that has finished and can be given the next thing.
 @test "a group whose sessions are all busy gets no superscript" {
-  wg_patch_state '.groups[0].projects = ["everest-rs"]'
+  wg_patch_state '.groups[0].projects = ["shop-core"]'
   run "$WG_ROOT/bin/wingroup-waybar" 0
-  [ "$(jq -r '.text' <<<"$output")" = "everest" ]
+  [ "$(jq -r '.text' <<<"$output")" = "shop" ]
 }
 
 @test "a group with no windows at all gets no superscript" {
   run "$WG_ROOT/bin/wingroup-waybar" 2
-  [ "$(jq -r '.text' <<<"$output")" = "drivora" ]
+  [ "$(jq -r '.text' <<<"$output")" = "fleet" ]
   [ "$(jq -r '.class' <<<"$output")" = "" ]
 }
 
@@ -134,15 +134,15 @@ wg_class_list() {
 @test "the tooltip breaks the windows down into idle and busy, and lists the projects" {
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [[ "$(jq -r '.tooltip' <<<"$output")" == *"2 windows · 1 idle · 1 busy"* ]]
-  [[ "$(jq -r '.tooltip' <<<"$output")" == *"everest-web, everest-rs, everest-api"* ]]
+  [[ "$(jq -r '.tooltip' <<<"$output")" == *"shop-web, shop-core, shop-api"* ]]
 }
 
 # A plain terminal is a window of the group, but it is not a session waiting.
 @test "a window with no Claude session counts as neither idle nor busy" {
-  wg_patch_state '.overrides["0xaaa6"] = "everest"'
+  wg_patch_state '.overrides["0xaaa6"] = "shop"'
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [[ "$(jq -r '.tooltip' <<<"$output")" == *"3 windows · 1 idle · 1 busy"* ]]
-  [ "$(jq -r '.text' <<<"$output")" = "everest¹" ]
+  [ "$(jq -r '.text' <<<"$output")" = "shop¹" ]
 }
 
 @test "slot 7 lists overflow groups in its tooltip" {
@@ -194,48 +194,48 @@ wg_group_windows() {
 # Nothing waiting on you is the common case and has to look exactly as it
 # always did: no heat class, nothing for the ramp to style.
 @test "a group with no idle sessions emits no idle class at all" {
-  wg_group_windows everest 0 0
+  wg_group_windows shop 0 0
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$(jq -r '.class' <<<"$output")" = "" ]
 }
 
 @test "one idle session warms the group to the first step of the ramp" {
-  wg_group_windows everest 1
+  wg_group_windows shop 1
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$(wg_class_list <<<"$output")" = "idle1" ]
 }
 
 @test "two idle sessions step the ramp up" {
-  wg_group_windows everest 2
+  wg_group_windows shop 2
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$(wg_class_list <<<"$output")" = "idle2" ]
 }
 
 @test "three idle sessions step the ramp up again" {
-  wg_group_windows everest 3
+  wg_group_windows shop 3
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$(wg_class_list <<<"$output")" = "idle3" ]
 }
 
 # The ceiling is the class, not the count: the superscript still says five.
 @test "five idle sessions cap at the top step of the ramp" {
-  wg_group_windows everest 5
+  wg_group_windows shop 5
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$(wg_class_list <<<"$output")" = "idle4" ]
-  [ "$(jq -r '.text' <<<"$output")" = "everest⁵" ]
+  [ "$(jq -r '.text' <<<"$output")" = "shop⁵" ]
 }
 
 @test "a wildly idle group still caps at the top step" {
-  wg_group_windows everest 12
+  wg_group_windows shop 12
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$(wg_class_list <<<"$output")" = "idle4" ]
-  [ "$(jq -r '.text' <<<"$output")" = "everest¹²" ]
+  [ "$(jq -r '.text' <<<"$output")" = "shop¹²" ]
 }
 
 # The heat is a second class beside the state, never instead of it -- waybar
 # puts both on the widget, so #custom-wingroup0.busy.idle4 is a live selector.
 @test "the idle class rides alongside busy" {
-  wg_group_windows everest 5 1
+  wg_group_windows shop 5 1
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$(wg_class_list <<<"$output")" = "busy idle4" ]
 }
@@ -260,10 +260,10 @@ wg_group_windows() {
 # with a space in it becomes a single GTK class named "busy idle4", which no
 # selector matches. One class stays the string the module always emitted.
 @test "one class goes out as a string and several as the array waybar needs" {
-  wg_group_windows everest 1
+  wg_group_windows shop 1
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$(jq -r '.class | type' <<<"$output")" = "string" ]
-  wg_group_windows everest 5 1
+  wg_group_windows shop 5 1
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$(jq -r '.class | type' <<<"$output")" = "array" ]
   [ "$(jq -r '.class | length' <<<"$output")" = "2" ]

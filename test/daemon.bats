@@ -28,7 +28,7 @@ feed() {
 @test "a project window is moved to its group exactly once" {
   export WG_REFRESH_DEBOUNCE_MS=5000
   feed "$WG_FIXTURES/events.txt"
-  run bash -c "grep -c '^movetoworkspace name:everest,address:0xaaa1$' '$WG_DISPATCH_LOG'"
+  run bash -c "grep -c '^movetoworkspace name:shop,address:0xaaa1$' '$WG_DISPATCH_LOG'"
   [ "$output" -eq 1 ]
 }
 
@@ -39,7 +39,7 @@ feed() {
 @test "a window the user just opened is moved and followed" {
   wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
   run dispatches
-  [ "$output" = "movetoworkspace name:everest,address:0xaaa1" ]
+  [ "$output" = "movetoworkspace name:shop,address:0xaaa1" ]
 }
 
 # The seeded fixture has no "follow" key at all, which is what every state file
@@ -49,14 +49,14 @@ feed() {
   [ "$status" -ne 0 ]
   wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
   run dispatches
-  [ "$output" = "movetoworkspace name:everest,address:0xaaa1" ]
+  [ "$output" = "movetoworkspace name:shop,address:0xaaa1" ]
 }
 
 @test "follow=false keeps the silent move" {
   wg_patch_state '.follow = false'
   wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
   run dispatches
-  [ "$output" = "movetoworkspacesilent name:everest,address:0xaaa1" ]
+  [ "$output" = "movetoworkspacesilent name:shop,address:0xaaa1" ]
 }
 
 # Login opens a dozen terminals at once. Following each of them would throw the
@@ -65,7 +65,7 @@ feed() {
   export WG_FOLLOW_GRACE=10
   wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
   run dispatches
-  [ "$output" = "movetoworkspacesilent name:everest,address:0xaaa1" ]
+  [ "$output" = "movetoworkspacesilent name:shop,address:0xaaa1" ]
 }
 
 @test "the grace period ends and following resumes" {
@@ -73,7 +73,7 @@ feed() {
   WG_START_MS=$(( $(wg_now_ms) - 11000 ))
   wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
   run dispatches
-  [ "$output" = "movetoworkspace name:everest,address:0xaaa1" ]
+  [ "$output" = "movetoworkspace name:shop,address:0xaaa1" ]
 }
 
 # wingroup-restore respawns fourteen terminals; the flag is how it says so. The
@@ -83,7 +83,7 @@ feed() {
   : >"$XDG_RUNTIME_DIR/wingroup-restoring"
   wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
   run dispatches
-  [ "$output" = "movetoworkspacesilent name:everest,address:0xaaa1" ]
+  [ "$output" = "movetoworkspacesilent name:shop,address:0xaaa1" ]
 }
 
 @test "following resumes once the restore flag is cleared" {
@@ -91,7 +91,7 @@ feed() {
   rm -f "$XDG_RUNTIME_DIR/wingroup-restoring"
   wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
   run dispatches
-  [ "$output" = "movetoworkspace name:everest,address:0xaaa1" ]
+  [ "$output" = "movetoworkspace name:shop,address:0xaaa1" ]
 }
 
 @test "no other window is moved" {
@@ -207,5 +207,5 @@ feed() {
   wg_daemon_handle_line "closewindow>>aaa6"
   after="$(stat -c '%i %y' "$WG_STATE_DIR/state.json")"
   [ "$before" = "$after" ]
-  [ "$(jq -r '.overrides["0xaaa3"]' "$WG_STATE_DIR/state.json")" = "plat" ]
+  [ "$(jq -r '.overrides["0xaaa3"]' "$WG_STATE_DIR/state.json")" = "site" ]
 }

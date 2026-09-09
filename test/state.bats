@@ -31,8 +31,8 @@ teardown() { wg_teardown_tmp; }
 @test "wg_state_read returns the seeded fixture" {
   wg_seed_state
   run wg_state_read
-  [ "$(jq -r '.groups[0].name' <<<"$output")" = "everest" ]
-  [ "$(jq -r '.overrides["0xaaa3"]' <<<"$output")" = "plat" ]
+  [ "$(jq -r '.groups[0].name' <<<"$output")" = "shop" ]
+  [ "$(jq -r '.overrides["0xaaa3"]' <<<"$output")" = "site" ]
 }
 
 @test "wg_state_read recovers from a corrupt file and preserves it" {
@@ -116,9 +116,9 @@ teardown() { wg_teardown_tmp; }
 @test "wg_state_update applies its filter and commits the result" {
   wg_seed_state
   # shellcheck disable=SC2016
-  wg_state_update '.overrides[$a] = $g' --arg a 0xbeef --arg g everest
-  [ "$(jq -r '.overrides["0xbeef"]' "$WG_STATE_DIR/state.json")" = "everest" ]
-  [ "$(jq -r '.overrides["0xaaa3"]' "$WG_STATE_DIR/state.json")" = "plat" ]
+  wg_state_update '.overrides[$a] = $g' --arg a 0xbeef --arg g shop
+  [ "$(jq -r '.overrides["0xbeef"]' "$WG_STATE_DIR/state.json")" = "shop" ]
+  [ "$(jq -r '.overrides["0xaaa3"]' "$WG_STATE_DIR/state.json")" = "site" ]
 }
 
 @test "wg_state_update leaves the state alone when the filter fails" {
@@ -148,8 +148,8 @@ teardown() { wg_teardown_tmp; }
   wg_seed_state
   export WG_STATE_LOCK_WAIT=2
   wg_state_update '.auto = false'
-  wg_state_update '.catchall = "everest"'
-  [ "$(jq -r '.catchall' "$WG_STATE_DIR/state.json")" = "everest" ]
+  wg_state_update '.catchall = "shop"'
+  [ "$(jq -r '.catchall' "$WG_STATE_DIR/state.json")" = "shop" ]
 }
 
 # Holds the lock in a background process until wg_release_lock, leaving its pid
@@ -193,7 +193,7 @@ wg_release_lock() {
   run timeout 3 bash -c "source '$WG_ROOT/lib/state.sh'; wg_state_read"
   wg_release_lock
   [ "$status" -eq 0 ]
-  [ "$(jq -r '.groups[0].name' <<<"$output")" = "everest" ]
+  [ "$(jq -r '.groups[0].name' <<<"$output")" = "shop" ]
 }
 
 @test "wg_state_update waits for a held lock and gives up rather than hanging" {
@@ -224,14 +224,14 @@ wg_release_lock() {
 @test "wg_state_group_names lists groups in order" {
   wg_seed_state
   run wg_state_group_names
-  [ "${lines[0]}" = "everest" ]
-  [ "${lines[1]}" = "plat" ]
+  [ "${lines[0]}" = "shop" ]
+  [ "${lines[1]}" = "site" ]
 }
 
 @test "wg_state_group_field reads a scalar and a missing group" {
   wg_seed_state
-  run wg_state_group_field everest label
-  [ "$output" = "everest" ]
+  run wg_state_group_field shop label
+  [ "$output" = "shop" ]
   run wg_state_group_field nosuch label
   [ "$output" = "" ]
 }
@@ -247,5 +247,5 @@ wg_release_lock() {
 @test "wg_state_prune_overrides keeps addresses that are still live" {
   wg_seed_state
   printf '0xaaa3\n' | wg_state_prune_overrides
-  [ "$(jq -r '.overrides["0xaaa3"]' "$WG_STATE_DIR/state.json")" = "plat" ]
+  [ "$(jq -r '.overrides["0xaaa3"]' "$WG_STATE_DIR/state.json")" = "site" ]
 }

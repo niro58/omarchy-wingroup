@@ -22,8 +22,8 @@ teardown() { wg_teardown_tmp; }
 }
 
 @test "wg_hypr_dispatch records the dispatch instead of running it" {
-  wg_hypr_dispatch movetoworkspacesilent "name:everest,address:0xaaa1"
-  [ "$(dispatches)" = "movetoworkspacesilent name:everest,address:0xaaa1" ]
+  wg_hypr_dispatch movetoworkspacesilent "name:shop,address:0xaaa1"
+  [ "$(dispatches)" = "movetoworkspacesilent name:shop,address:0xaaa1" ]
 }
 
 @test "wg_hypr_query lists every monitor and the workspace on it" {

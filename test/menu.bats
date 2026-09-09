@@ -19,12 +19,12 @@ teardown() { wg_teardown_tmp; }
   count="$(wg_menu_build | grep -c '^group:')"
   [ "$count" -eq 3 ]
   first="$(wg_menu_build | head -n1 | cut -f1)"
-  [ "$first" = "group:everest" ]
+  [ "$first" = "group:shop" ]
 }
 
 @test "a group entry shows its window, idle and busy counts" {
   display="$(wg_menu_build | head -n1 | cut -f2)"
-  [[ "$display" == *"everest"* ]]
+  [[ "$display" == *"shop"* ]]
   [[ "$display" == *"2 windows"* ]]
   [[ "$display" == *"1 idle"* ]]
   [[ "$display" == *"1 busy"* ]]
@@ -32,7 +32,7 @@ teardown() { wg_teardown_tmp; }
 
 # A plain terminal is neither idle nor busy, but it is still a window.
 @test "a group entry counts a window with no Claude session as neither idle nor busy" {
-  wg_patch_state '.overrides["0xaaa6"] = "everest"'
+  wg_patch_state '.overrides["0xaaa6"] = "shop"'
   display="$(wg_menu_build | head -n1 | cut -f2)"
   [[ "$display" == *"3 windows · 1 idle · 1 busy"* ]]
 }
@@ -46,23 +46,23 @@ teardown() { wg_teardown_tmp; }
   display="$(wg_menu_build | grep '^window:0xaaa1' | cut -f2)"
   [[ "$display" == *"Everest-web full redesign"* ]]
   [[ "$display" != *"✳ ✳"* ]]
-  [[ "$display" == *"everest"* ]]
+  [[ "$display" == *"shop"* ]]
 }
 
 # Column 8 of the window table has held the worktree name since the first
 # version and nothing displayed it. Two windows in different worktrees of the
 # same repo resolve to the same project and so to the same group -- which is
 # what filing them wants and no help at all in a list of rows all reading
-# "plat".
+# "site".
 @test "a window sitting in a worktree names it next to its group" {
   display="$(wg_menu_build | grep '^window:0xaaa2' | cut -f2)"
-  [[ "$display" == *"everest:odtah-price"* ]]
+  [[ "$display" == *"shop:price-units"* ]]
 }
 
 @test "a window that is not in a worktree says nothing extra" {
   display="$(wg_menu_build | grep '^window:0xaaa1' | cut -f2)"
-  [[ "$display" == *"everest"* ]]
-  [[ "$display" != *"everest:"* ]]
+  [[ "$display" == *"shop"* ]]
+  [[ "$display" != *"shop:"* ]]
 }
 
 # The whole point of the column: same repo, same project, same group, two rows
@@ -70,20 +70,20 @@ teardown() { wg_teardown_tmp; }
 @test "two windows in different worktrees of one repo are told apart" {
   wg_window_cwd() {
     case "$1" in
-      1001) printf '%s\n' "$WG_PROJECTS_DIR/everest-web/.claude/worktrees/odtah-price" ;;
-      1005) printf '%s\n' "$WG_PROJECTS_DIR/everest-web/.claude/worktrees/vat-rounding" ;;
+      1001) printf '%s\n' "$WG_PROJECTS_DIR/shop-web/.claude/worktrees/price-units" ;;
+      1005) printf '%s\n' "$WG_PROJECTS_DIR/shop-web/.claude/worktrees/vat-rounding" ;;
       *) return 0 ;;
     esac
   }
-  [[ "$(wg_menu_build | grep '^window:0xaaa1' | cut -f2)" == *"everest:odtah-price"* ]]
-  [[ "$(wg_menu_build | grep '^window:0xaaa5' | cut -f2)" == *"everest:vat-rounding"* ]]
+  [[ "$(wg_menu_build | grep '^window:0xaaa1' | cut -f2)" == *"shop:price-units"* ]]
+  [[ "$(wg_menu_build | grep '^window:0xaaa5' | cut -f2)" == *"shop:vat-rounding"* ]]
 }
 
 @test "wg_menu_where joins the group and the worktree, and falls back to ungrouped" {
-  wg_menu_where plat connectors-spec
-  [ "$WG_WHERE" = "plat:connectors-spec" ]
-  wg_menu_where plat ""
-  [ "$WG_WHERE" = "plat" ]
+  wg_menu_where site spec-draft
+  [ "$WG_WHERE" = "site:spec-draft" ]
+  wg_menu_where site ""
+  [ "$WG_WHERE" = "site" ]
   wg_menu_where "" ""
   [ "$WG_WHERE" = "ungrouped" ]
 }
@@ -92,11 +92,11 @@ teardown() { wg_teardown_tmp; }
 # is the last column of a row whose other columns are padded to fixed widths, so
 # an unbounded field here is the one thing that can push the layout around.
 @test "a long worktree name is cut down rather than allowed to stretch the row" {
-  wg_menu_where plat "feat-connectors-spec-second-pass"
-  [ "$WG_WHERE" = "plat:feat-connectors…" ]
+  wg_menu_where site "feat-spec-draft-second-pass"
+  [ "$WG_WHERE" = "site:feat-spec-draft…" ]
   # Exactly at the limit, nothing is cut.
-  wg_menu_where plat "sixteen-chars-ab"
-  [ "$WG_WHERE" = "plat:sixteen-chars-ab" ]
+  wg_menu_where site "sixteen-chars-ab"
+  [ "$WG_WHERE" = "site:sixteen-chars-ab" ]
 }
 
 @test "an ungrouped window says so" {
@@ -135,12 +135,12 @@ teardown() { wg_teardown_tmp; }
 # nothing ever read it; a pin nobody can see is a pin nobody trusts.
 @test "a group pinned to a monitor says so in its entry" {
   wg_patch_state '.groups[1].monitor = "DP-1"'
-  display="$(wg_menu_build | grep '^group:plat' | cut -f2)"
+  display="$(wg_menu_build | grep '^group:site' | cut -f2)"
   [[ "$display" == *"on DP-1"* ]]
 }
 
 @test "a group with no pin says nothing about monitors" {
-  display="$(wg_menu_build | grep '^group:plat' | cut -f2)"
+  display="$(wg_menu_build | grep '^group:site' | cut -f2)"
   [[ "$display" != *" on "* ]]
 }
 
@@ -157,8 +157,8 @@ teardown() { wg_teardown_tmp; }
 @test "wg_menu_input trims what was typed, so spaces alone are nothing" {
   export WG_WALKER_INPUT="   "
   [ "$(wg_menu_input 'New group')" = "" ]
-  export WG_WALKER_INPUT="  plat  "
-  [ "$(wg_menu_input 'New group')" = "plat" ]
+  export WG_WALKER_INPUT="  site  "
+  [ "$(wg_menu_input 'New group')" = "site" ]
 }
 
 # Input-only mode is still dmenu mode, and it gets the same sizing and the same
@@ -193,30 +193,30 @@ teardown() { wg_teardown_tmp; }
 
 @test "wg_group_menu_build offers only groups and a way to make a new one" {
   groups="$(wg_group_menu_build | cut -f1 | tr '\n' ' ')"
-  [ "$groups" = "group:everest group:plat group:drivora new " ]
+  [ "$groups" = "group:shop group:site group:fleet new " ]
 }
 
 # The chooser for removing a group: no "+ new group…" on it -- offering to make
 # one there is noise, and one entry off is the wrong group gone.
 @test "wg_group_list_build offers the groups and nothing else" {
   groups="$(wg_group_list_build | cut -f1 | tr '\n' ' ')"
-  [ "$groups" = "group:everest group:plat group:drivora " ]
+  [ "$groups" = "group:shop group:site group:fleet " ]
 }
 
 # Nothing is under the cursor by accident: the entry at index 0 is the one that
 # does nothing.
 @test "the delete confirmation puts cancel first and names the group" {
   run bash -c "cd '$WG_ROOT' && source lib/hypr.sh && source lib/state.sh \
-    && source lib/resolve.sh && source lib/menu.sh && wg_delete_confirm_build plat plat"
+    && source lib/resolve.sh && source lib/menu.sh && wg_delete_confirm_build site site"
   [ "${lines[0]}" = "$(printf 'noop\tCancel')" ]
-  [[ "${lines[1]}" == "delete:plat"*"Remove group plat"* ]]
+  [[ "${lines[1]}" == "delete:site"*"Remove group site"* ]]
   [[ "${lines[1]}" == *"windows stay where they are"* ]]
 }
 
 @test "wg_menu_run returns the action at the index walker chose" {
   export WG_WALKER_PICK=1
   action="$(wg_group_menu_build | wg_menu_run 'Group')"
-  [ "$action" = "group:plat" ]
+  [ "$action" = "group:site" ]
 }
 
 @test "wg_menu_run returns nothing when walker is cancelled" {
@@ -238,7 +238,7 @@ teardown() { wg_teardown_tmp; }
   export WG_WALKER_LAUNCHER="$WG_TMP/no-such-launcher"
   export WG_WALKER_PICK=1
   action="$(wg_group_menu_build | wg_menu_run 'Group')"
-  [ "$action" = "group:plat" ]
+  [ "$action" = "group:site" ]
   run cat "$WG_WALKER_ARGS_LOG"
   [ "$output" = "--width 644 --maxheight 300 --minheight 300 -d -i -p Group" ]
 }
@@ -254,7 +254,7 @@ teardown() { wg_teardown_tmp; }
   export WG_WALKER=walker
 
   action="$(wg_group_menu_build | wg_menu_run 'Group')"
-  [ "$action" = "group:plat" ]
+  [ "$action" = "group:site" ]
   run grep -c '^launcher -d -i -p Group$' "$WG_WALKER_ARGS_LOG"
   [ "$output" -eq 1 ]
   run grep -c 'width 644' "$WG_WALKER_ARGS_LOG"
@@ -266,7 +266,7 @@ teardown() { wg_teardown_tmp; }
   export WG_WALKER_LAUNCHER="$WG_ROOT/test/bin/walker-launcher-stub"
   export WG_WALKER_PICK=1
   action="$(wg_group_menu_build | wg_menu_run 'Group')"
-  [ "$action" = "group:plat" ]
+  [ "$action" = "group:site" ]
   run grep -c '^launcher' "$WG_WALKER_ARGS_LOG"
   [ "$output" -eq 0 ]
 }
@@ -276,6 +276,6 @@ teardown() { wg_teardown_tmp; }
   export WG_WALKER_PICK=0
   wg_group_menu_build | wg_menu_run 'Group' >/dev/null
   run cat "$WG_WALKER_STDIN_LOG"
-  [ "${lines[0]}" = "everest" ]
+  [ "${lines[0]}" = "shop" ]
   [ "${lines[3]}" = "+ new group…" ]
 }
