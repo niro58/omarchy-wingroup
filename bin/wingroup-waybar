@@ -17,6 +17,11 @@ fi
 
 WG_SLOTS=8
 
+# Top step of the idle heat ramp: idle4 means "four idle sessions or more".
+# A ceiling, because past a handful the exact number stops changing what you
+# do about it -- and every step needs a rule of its own in style.css.
+WG_IDLE_HEAT_MAX=4
+
 wg_superscript() {
   local n="$1" out="" i
   local sup=("⁰" "¹" "²" "³" "⁴" "⁵" "⁶" "⁷" "⁸" "⁹")
@@ -28,9 +33,25 @@ wg_superscript() {
   printf '%s\n' "$out"
 }
 
+# $1 text, $2 tooltip, then zero or more CSS classes.
+#
+# waybar takes a custom module's "class" as either a string or an array of
+# strings (waybar-custom(5): "The class parameter also accepts an array of
+# strings"), and only the array form puts more than one class on the widget --
+# a string with a space in it becomes one GTK class literally named "busy
+# idle1", which no selector matches. So: one class stays the plain string this
+# module has always emitted, several go out as the array, and a selector like
+# #custom-wingroup0.active.idle3 matches both of the classes it names.
 wg_emit() {
-  jq -cn --arg text "$1" --arg tooltip "$2" --arg class "$3" \
-    '{text: $text, tooltip: $tooltip, class: $class}'
+  local text="$1" tooltip="$2"
+  shift 2
+  if (( $# > 1 )); then
+    jq -cn --arg text "$text" --arg tooltip "$tooltip" --args \
+      '{text: $text, tooltip: $tooltip, class: $ARGS.positional}' "$@"
+  else
+    jq -cn --arg text "$text" --arg tooltip "$tooltip" --arg class "${1-}" \
+      '{text: $text, tooltip: $tooltip, class: $class}'
+  fi
 }
 
 main() {
@@ -103,6 +124,22 @@ main() {
     class="busy"
   fi
 
+  # The state above is one of four and says where the group is. Idle heat is a
+  # separate fact about the same group -- how much finished work is sitting in
+  # it waiting to be picked up -- so it is a second class next to the first,
+  # never instead of it: a group can be the one you are looking at *and* have
+  # three sessions waiting in it. Zero idle sessions emit no idle class at all,
+  # so a group with nothing waiting looks exactly as it always has.
+  local -a classes=()
+  [[ -z $class ]] || classes+=("$class")
+  if (( idle > 0 )); then
+    local heat="$idle"
+    if (( heat > WG_IDLE_HEAT_MAX )); then
+      heat="$WG_IDLE_HEAT_MAX"
+    fi
+    classes+=("idle$heat")
+  fi
+
   projects="$(jq -r --arg n "$name" \
     'first(.groups[] | select(.name == $n) | .projects) | join(", ")' <<<"$state")"
 
@@ -119,7 +156,7 @@ main() {
 
   # The superscript counts idle sessions, not busy ones: the point of the bar is
   # spotting a Claude session that has finished and can be given the next thing.
-  wg_emit "$label$(wg_superscript "$idle")" "$tooltip" "$class"
+  wg_emit "$label$(wg_superscript "$idle")" "$tooltip" ${classes[@]+"${classes[@]}"}
 }
 
 main "$@"

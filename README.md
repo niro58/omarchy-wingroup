@@ -43,6 +43,14 @@ Reading the example above:
   does not have focus, to full opacity when one of its sessions is busy, and
   to full opacity **and bold** when its workspace is the focused one. Being
   looked at beats being on screen, which beats being busy.
+- **Idle heat** — an idle session is capacity you are not using, so a group's
+  label warms up as they pile up: amber at one, orange at two, red-orange at
+  three, and bright red at four or more, with the label getting brighter and
+  heavier as it goes. It is a fact about the group separate from the
+  highlighting above, so the two combine: the group you are looking at can also
+  be the one holding four finished sessions, and it stays bold and bright while
+  taking the red. A group with nothing idle is not coloured at all and looks
+  exactly as it always has.
 - **Per-screen highlighting** — with more than one monitor, "active" is a
   fact about *this* screen: the bar on the external monitor draws the group
   filling that monitor as active, while the laptop's bar draws the same group
@@ -55,6 +63,34 @@ Reading the example above:
 
 Left-click a button to switch to that group's workspace. Right-click any
 button to open the picker menu (`wingroup menu`).
+
+### The CSS classes, and recolouring the idle ramp
+
+The module hands waybar a class per state — none for a dimmed group, then
+`busy`, `visible`, `active` — plus, when the group has idle sessions, one of
+`idle1`, `idle2`, `idle3`, `idle4`, where `idle4` means *four or more*. Both go
+on the widget at once (waybar takes a module's `class` as an array), so
+`#custom-wingroup0.active.idle3` is a selector that matches a group you are
+looking at with three sessions waiting in it.
+
+`install.sh` writes the ramp into the `/* >>> wingroup */` block in
+`~/.config/waybar/style.css`, before the state rules so that `active` keeps the
+last word on opacity and weight. To change it, add your own rules **after** that
+block rather than editing inside it — the block is what `uninstall.sh` removes,
+and rules of equal specificity are won by the last one:
+
+```css
+/* >>> wingroup */
+/* ... installed rules ... */
+/* <<< wingroup */
+
+/* your ramp: keep the theme's colour, say what is waiting with weight alone */
+#custom-wingroup0.idle1, #custom-wingroup1.idle1 { color: @foreground; opacity: 0.8; }
+#custom-wingroup0.idle4, #custom-wingroup1.idle4 { color: #ff8ac6; font-weight: bold; }
+```
+
+Each installed rule is one line with one selector list — one line per step,
+naming all 8 slots — so a step you do not restate keeps the shipped colour.
 
 Only the first 8 groups get a button — see **Known limitations** below.
 
@@ -383,7 +419,9 @@ $ ./install.sh
   cannot be made — `modules-left` is spread over several lines, or there is no
   `"hyprland/workspaces": {` object to put the setting in — install says which
   part failed and changes nothing.
-- Appends matching styles to `~/.config/waybar/style.css`.
+- Appends matching styles to `~/.config/waybar/style.css` — the four
+  highlighting states and the four steps of the idle ramp (see **The CSS
+  classes** above, which is also where to put your own overrides).
 - Adds the `SUPER+G` / `SUPER+CTRL+G` keybinds to
   `~/.config/hypr/bindings.conf` (and unbinds native `SUPER+G`).
 - Adds the `exec-once = wingroup-daemon` autostart line to

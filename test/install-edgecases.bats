@@ -40,6 +40,29 @@ wg_ends_with_newline() {
   [ "$status" -ne 0 ]
 }
 
+# The idle ramp is more lines in the same marked block, and the block is what
+# carries the " no-eof-nl" flag that reverses a file whose last byte was not a
+# newline. Ramp in, ramp out, same bytes -- checked on the fussiest file.
+@test "install/uninstall round-trips the idle ramp in a style with no trailing newline" {
+  cp "$WG_FIXTURES/waybar-config.jsonc" "$WG_WAYBAR_CONFIG"
+  cp "$WG_FIXTURES/waybar-style-no-eof-nl.css" "$WG_WAYBAR_STYLE"
+  printf '# my bindings\n' >"$WG_HYPR_BINDINGS"
+  printf '# my autostart\n' >"$WG_HYPR_AUTOSTART"
+  cp "$WG_WAYBAR_STYLE" "$WG_TMP/style.orig"
+
+  "$WG_ROOT/install.sh"
+  run bash -c "grep -c '#custom-wingroup0.idle4' '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep -c '<<< wingroup no-eof-nl' '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+
+  "$WG_ROOT/uninstall.sh"
+  run diff "$WG_TMP/style.orig" "$WG_WAYBAR_STYLE"
+  [ "$status" -eq 0 ]
+  run wg_ends_with_newline "$WG_WAYBAR_STYLE"
+  [ "$status" -ne 0 ]
+}
+
 @test "install/uninstall round-trips a waybar style with no trailing newline" {
   cp "$WG_FIXTURES/waybar-config.jsonc" "$WG_WAYBAR_CONFIG"
   cp "$WG_FIXTURES/waybar-style-no-eof-nl.css" "$WG_WAYBAR_STYLE"

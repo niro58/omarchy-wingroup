@@ -215,6 +215,57 @@ pattern_hides() {
   [[ "$output" == *"opacity: 0.85"* ]]
 }
 
+# Idle sessions are unused capacity, so the button warms up as they pile up.
+# Every step the module can emit needs a rule, or a group four sessions deep
+# carries a class that styles nothing.
+@test "install writes the idle heat ramp, one rule per step" {
+  "$WG_ROOT/install.sh"
+  local step
+  for step in 1 2 3 4; do
+    run bash -c "grep -c '#custom-wingroup0.idle$step' '$WG_WAYBAR_STYLE'"
+    [ "$output" -eq 1 ]
+    run bash -c "grep -c '#custom-wingroup7.idle$step' '$WG_WAYBAR_STYLE'"
+    [ "$output" -eq 1 ]
+  done
+}
+
+# Warm at one, unmistakably red and bright at the ceiling.
+@test "the ramp runs from warm to bright red across its four steps" {
+  "$WG_ROOT/install.sh"
+  run bash -c "grep '#custom-wingroup0.idle1' '$WG_WAYBAR_STYLE'"
+  [[ "$output" == *"#e0a458"* ]]
+  [[ "$output" == *"opacity: 0.75"* ]]
+  run bash -c "grep '#custom-wingroup0.idle4' '$WG_WAYBAR_STYLE'"
+  [[ "$output" == *"#ff3b30"* ]]
+  [[ "$output" == *"opacity: 1"* ]]
+  [[ "$output" == *"font-weight: bold"* ]]
+}
+
+# A group can be the one you are looking at *and* have four sessions waiting in
+# it. Both selectors are one id plus one class, so the later rule wins whatever
+# they share: the ramp has to come first, or it would dim and un-bold the
+# active group -- the one thing it must never do.
+@test "the ramp is written before the state rules so active keeps its opacity and bold" {
+  "$WG_ROOT/install.sh"
+  local heat active
+  heat="$(grep -n '#custom-wingroup0.idle4' "$WG_WAYBAR_STYLE" | cut -d: -f1)"
+  active="$(grep -n '#custom-wingroup0.active' "$WG_WAYBAR_STYLE" | cut -d: -f1)"
+  [ "$heat" -lt "$active" ]
+}
+
+# The ramp is inside the marked block like everything else install writes, so
+# uninstall takes it back out with the rest and the file is what it was.
+@test "uninstall takes the idle ramp back out" {
+  "$WG_ROOT/install.sh"
+  run bash -c "grep -c 'idle4' '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+  "$WG_ROOT/uninstall.sh"
+  run bash -c "grep -c 'idle' '$WG_WAYBAR_STYLE'"
+  [ "$status" -ne 0 ]
+  run diff "$WG_TMP/style.orig" "$WG_WAYBAR_STYLE"
+  [ "$status" -eq 0 ]
+}
+
 @test "install backs up every file it edits" {
   "$WG_ROOT/install.sh"
   run bash -c "ls $WG_TMP/config.jsonc.bak.* | wc -l"

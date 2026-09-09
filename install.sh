@@ -14,6 +14,25 @@ WG_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 WG_SLOTS=8
 WG_SIGNAL=11
 
+# Steps in the idle heat ramp, one CSS rule each. Must match
+# WG_IDLE_HEAT_MAX in bin/wingroup-waybar: that is the top class the module
+# ever emits ("idle4" means four idle sessions or more), and a step the module
+# emits with no rule here would style nothing.
+WG_IDLE_HEAT_MAX=4
+
+# The ramp itself, one declaration block per step, dimmest first: amber at one
+# idle session, orange, red-orange, and a bright pure red at four-or-more, with
+# opacity and weight climbing alongside the hue so a group full of finished
+# sessions reads at a glance on a dark bar rather than only up close. Literal
+# colours rather than the theme's @foreground: leaving the palette the rest of
+# the bar sits in is the point. As many entries as WG_IDLE_HEAT_MAX.
+WG_IDLE_HEAT_RAMP=(
+  'color: #e0a458; opacity: 0.75;'
+  'color: #ef8354; opacity: 0.85;'
+  'color: #f45d48; opacity: 0.95; font-weight: 600;'
+  'color: #ff3b30; opacity: 1; font-weight: bold;'
+)
+
 # What install_autostart actually wrote, for the closing summary: "both",
 # "daemon", or empty when the block was already there.
 WG_AUTOSTART_ADDED=""
@@ -175,19 +194,46 @@ install_waybar_style() {
   backup "$WG_WAYBAR_STYLE"
 
   local i base="" busy="" visible="" active=""
+  local -a heat=()
   for (( i = 0; i < WG_SLOTS; i++ )); do
     base+="${base:+, }#custom-wingroup$i"
     busy+="${busy:+, }#custom-wingroup$i.busy"
     visible+="${visible:+, }#custom-wingroup$i.visible"
     active+="${active:+, }#custom-wingroup$i.active"
   done
+  # One selector list per step of the ramp, in step order: heat[0] is .idle1.
+  local step sel
+  for (( step = 1; step <= WG_IDLE_HEAT_MAX; step++ )); do
+    sel=""
+    for (( i = 0; i < WG_SLOTS; i++ )); do
+      sel+="${sel:+, }#custom-wingroup$i.idle$step"
+    done
+    heat+=("$sel")
+  done
 
   # Three states, dimmest first, because a group can only be in one of them:
   # "busy" is off screen with a session working, "visible" is on screen on a
   # monitor that does not have focus, "active" is the one being looked at.
+  #
+  # The idle ramp sits *between* the base rule and the three states, and that
+  # ordering is the whole trick. A group carries a state class and an idle
+  # class at once, and both selectors are one id plus one class -- equal
+  # specificity, so the later rule wins each property they share. Coming
+  # before the states, the ramp lifts the dimmed default for a group that has
+  # work waiting in it, while "active" keeps the last word on opacity and
+  # weight: an active group stays fully bright and bold, and merely takes the
+  # ramp's colour with it. Coming after, it would dim the group you are
+  # looking at -- the one thing the ramp must never do.
+  #
+  # Every rule here is one line with one selector list, so a user who wants a
+  # different ramp restates the step they want *after* this block -- last rule
+  # of equal specificity wins -- and never has to edit inside the markers.
   {
     printf '\n/* >>> wingroup */\n'
     printf '%s { padding: 0 6px; opacity: 0.55; }\n' "$base"
+    for (( step = 0; step < WG_IDLE_HEAT_MAX; step++ )); do
+      printf '%s { %s }\n' "${heat[step]}" "${WG_IDLE_HEAT_RAMP[step]}"
+    done
     printf '%s { opacity: 1; }\n' "$busy"
     printf '%s { opacity: 0.85; }\n' "$visible"
     printf '%s { opacity: 1; font-weight: bold; }\n' "$active"
