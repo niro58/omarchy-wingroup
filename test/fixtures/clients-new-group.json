@@ -4,6 +4,6 @@
   {"address":"0xaaa3","pid":1003,"class":"Alacritty","title":"◑ Sentry errors review","floating":false,"workspace":{"id":3,"name":"3"}},
   {"address":"0xaaa4","pid":1004,"class":"Alacritty","title":"✳ Connectors spec","floating":false,"workspace":{"id":1,"name":"1"}},
   {"address":"0xaaa5","pid":1005,"class":"Alacritty","title":"◐ CMS preview 503 error","floating":false,"workspace":{"id":1,"name":"1"}},
-  {"address":"0xaaa6","pid":1006,"class":"Alacritty","title":"niro@niro:~","floating":false,"workspace":{"id":1,"name":"1"}},
+  {"address":"0xaaa6","pid":1006,"class":"Alacritty","title":"dev@host:~","floating":false,"workspace":{"id":1,"name":"1"}},
   {"address":"0xaaa8","pid":1001,"class":"org.gnome.Nautilus","title":"shop-web","floating":true,"workspace":{"id":1,"name":"1"}}
 ]

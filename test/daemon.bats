@@ -109,7 +109,7 @@ feed() {
 }
 
 @test "a window with no project is left alone under the default catchall" {
-  wg_daemon_handle_line "openwindow>>aaa6,1,Alacritty,niro@niro:~"
+  wg_daemon_handle_line "openwindow>>aaa6,1,Alacritty,dev@host:~"
   [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
@@ -180,7 +180,7 @@ feed() {
   export WG_RESOLVE_RETRIES=3
   export WG_HYPRCTL_LOG="$WG_TMP/hyprctl.log"
   : >"$WG_HYPRCTL_LOG"
-  wg_daemon_handle_line "openwindow>>aaa6,1,Alacritty,niro@niro:~"
+  wg_daemon_handle_line "openwindow>>aaa6,1,Alacritty,dev@host:~"
   # One fetch for floating/workspace/group, then WG_RESOLVE_RETRIES more.
   run bash -c "grep -c '^-j clients$' '$WG_HYPRCTL_LOG'"
   [ "$output" -eq 4 ]

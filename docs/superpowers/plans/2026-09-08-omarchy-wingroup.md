@@ -40,7 +40,7 @@ Everything downstream is tested against these fixtures, and every compositor cal
 - Create: `test/bin/hyprctl-stub`
 - Create: `test/fixtures/clients.json`
 - Create: `test/fixtures/activeworkspace.json`
-- Create: `test/fixtures/activeworkspace-everest.json`
+- Create: `test/fixtures/activeworkspace-shop.json`
 - Create: `test/fixtures/state.json`
 - Create: `test/fixtures/cwd.map`
 - Create: `test/fixtures/events.txt`
@@ -71,7 +71,7 @@ git checkout -b feat/wingroup-implementation
   {"address":"0xaaa3","pid":1003,"class":"Alacritty","title":"◑ Sentry errors review","floating":false,"workspace":{"id":3,"name":"3"}},
   {"address":"0xaaa4","pid":1004,"class":"Alacritty","title":"✳ Connectors spec","floating":false,"workspace":{"id":1,"name":"1"}},
   {"address":"0xaaa5","pid":1005,"class":"Alacritty","title":"◐ CMS preview 503 error","floating":false,"workspace":{"id":1,"name":"1"}},
-  {"address":"0xaaa6","pid":1006,"class":"Alacritty","title":"niro@niro:~","floating":false,"workspace":{"id":1,"name":"1"}},
+  {"address":"0xaaa6","pid":1006,"class":"Alacritty","title":"dev@host:~","floating":false,"workspace":{"id":1,"name":"1"}},
   {"address":"0xaaa7","pid":1007,"class":"org.gnome.Nautilus","title":"Home","floating":true,"workspace":{"id":1,"name":"1"}}
 ]
 ```
@@ -79,32 +79,32 @@ git checkout -b feat/wingroup-implementation
 `test/fixtures/cwd.map` — pid to working directory, tab-separated. Backs the `wg_window_cwd` stub so no test reads `/proc`.
 
 ```
-1001	/home/niro/projects/everest-web
-1002	/home/niro/projects/everest-rs/.claude/worktrees/odtah-price
-1003	/home/niro/projects/everest-api
-1004	/home/niro/projects/niro-platform/.claude/worktrees/connectors-spec
-1005	/home/niro/projects/niro-platform
-1006	/home/niro
-1007	/home/niro
+1001	/home/dev/projects/shop-web
+1002	/home/dev/projects/shop-core/.claude/worktrees/price-units
+1003	/home/dev/projects/shop-api
+1004	/home/dev/projects/site-platform/.claude/worktrees/spec-draft
+1005	/home/dev/projects/site-platform
+1006	/home/dev
+1007	/home/dev
 ```
 
-`test/fixtures/state.json` — two groups, one of which owns three projects, plus one override that deliberately contradicts project resolution (`0xaaa3` is in `everest-api` but overridden to `plat`).
+`test/fixtures/state.json` — two groups, one of which owns three projects, plus one override that deliberately contradicts project resolution (`0xaaa3` is in `shop-api` but overridden to `site`).
 
 ```json
 {
   "auto": true,
   "catchall": null,
   "groups": [
-    {"name":"everest","label":"everest","projects":["everest-web","everest-rs","everest-api"],"monitor":null},
-    {"name":"plat","label":"plat","projects":["niro-platform"],"monitor":null},
-    {"name":"drivora","label":"drivora","projects":["driver-hub"],"monitor":null}
+    {"name":"shop","label":"shop","projects":["shop-web","shop-core","shop-api"],"monitor":null},
+    {"name":"site","label":"site","projects":["site-platform"],"monitor":null},
+    {"name":"fleet","label":"fleet","projects":["fleet-hub"],"monitor":null}
   ],
-  "overrides": {"0xaaa3":"plat"}
+  "overrides": {"0xaaa3":"site"}
 }
 ```
 
-This fixture set yields: `everest` = 2 windows (1 busy), `plat` = 3 windows (2 busy),
-`drivora` = 0 windows (its project `driver-hub` has no window open, which is what
+This fixture set yields: `shop` = 2 windows (1 busy), `site` = 3 windows (2 busy),
+`fleet` = 0 windows (its project `fleet-hub` has no window open, which is what
 exercises the empty-count rendering), and 2 windows ungrouped.
 
 `test/fixtures/activeworkspace.json`:
@@ -113,10 +113,10 @@ exercises the empty-count rendering), and 2 windows ungrouped.
 {"id":1,"name":"1"}
 ```
 
-`test/fixtures/activeworkspace-everest.json`:
+`test/fixtures/activeworkspace-shop.json`:
 
 ```json
-{"id":-99,"name":"everest"}
+{"id":-99,"name":"shop"}
 ```
 
 `test/fixtures/events.txt` — recorded Hyprland event lines. Note that addresses on the event socket carry **no** `0x` prefix.
@@ -124,7 +124,7 @@ exercises the empty-count rendering), and 2 windows ungrouped.
 ```
 openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign
 openwindow>>aaa7,1,org.gnome.Nautilus,Home
-openwindow>>aaa6,1,Alacritty,niro@niro:~
+openwindow>>aaa6,1,Alacritty,dev@host:~
 openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign
 windowtitle>>aaa1
 windowtitle>>aaa2
@@ -168,7 +168,7 @@ WG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export WG_ROOT
 export WG_FIXTURES="$WG_ROOT/test/fixtures"
 export WG_HYPRCTL="$WG_ROOT/test/bin/hyprctl-stub"
-export WG_PROJECTS_DIR="/home/niro/projects"
+export WG_PROJECTS_DIR="/home/dev/projects"
 export WG_LIB_DIR="$WG_ROOT/lib"
 
 wg_setup_tmp() {
@@ -235,8 +235,8 @@ teardown() { wg_teardown_tmp; }
 }
 
 @test "wg_hypr_dispatch records the dispatch instead of running it" {
-  wg_hypr_dispatch movetoworkspacesilent "name:everest,address:0xaaa1"
-  [ "$(dispatches)" = "movetoworkspacesilent name:everest,address:0xaaa1" ]
+  wg_hypr_dispatch movetoworkspacesilent "name:shop,address:0xaaa1"
+  [ "$(dispatches)" = "movetoworkspacesilent name:shop,address:0xaaa1" ]
 }
 
 @test "wg_hypr_query fails loudly on an unhandled query" {
@@ -352,8 +352,8 @@ teardown() { wg_teardown_tmp; }
 @test "wg_state_read returns the seeded fixture" {
   wg_seed_state
   run wg_state_read
-  [ "$(jq -r '.groups[0].name' <<<"$output")" = "everest" ]
-  [ "$(jq -r '.overrides["0xaaa3"]' <<<"$output")" = "plat" ]
+  [ "$(jq -r '.groups[0].name' <<<"$output")" = "shop" ]
+  [ "$(jq -r '.overrides["0xaaa3"]' <<<"$output")" = "site" ]
 }
 
 @test "wg_state_read recovers from a corrupt file and preserves it" {
@@ -377,14 +377,14 @@ teardown() { wg_teardown_tmp; }
 @test "wg_state_group_names lists groups in order" {
   wg_seed_state
   run wg_state_group_names
-  [ "${lines[0]}" = "everest" ]
-  [ "${lines[1]}" = "plat" ]
+  [ "${lines[0]}" = "shop" ]
+  [ "${lines[1]}" = "site" ]
 }
 
 @test "wg_state_group_field reads a scalar and a missing group" {
   wg_seed_state
-  run wg_state_group_field everest label
-  [ "$output" = "everest" ]
+  run wg_state_group_field shop label
+  [ "$output" = "shop" ]
   run wg_state_group_field nosuch label
   [ "$output" = "" ]
 }
@@ -398,7 +398,7 @@ teardown() { wg_teardown_tmp; }
 @test "wg_state_prune_overrides keeps addresses that are still live" {
   wg_seed_state
   run bash -c "printf '0xaaa3\n' | { source '$WG_ROOT/lib/state.sh'; wg_state_prune_overrides; }"
-  [ "$(jq -r '.overrides["0xaaa3"]' <<<"$output")" = "plat" ]
+  [ "$(jq -r '.overrides["0xaaa3"]' <<<"$output")" = "site" ]
 }
 ```
 
@@ -517,24 +517,24 @@ setup() {
 teardown() { wg_teardown_tmp; }
 
 @test "wg_cwd_project reads a plain project directory" {
-  run wg_cwd_project /home/niro/projects/everest-web
-  [ "$output" = "everest-web" ]
+  run wg_cwd_project /home/dev/projects/shop-web
+  [ "$output" = "shop-web" ]
 }
 
 @test "wg_cwd_project reads a subdirectory of a project" {
-  run wg_cwd_project /home/niro/projects/everest-web/src/lib
-  [ "$output" = "everest-web" ]
+  run wg_cwd_project /home/dev/projects/shop-web/src/lib
+  [ "$output" = "shop-web" ]
 }
 
 @test "wg_cwd_project collapses a claude worktree to its repo" {
-  run wg_cwd_project /home/niro/projects/niro-platform/.claude/worktrees/connectors-spec
-  [ "$output" = "niro-platform" ]
+  run wg_cwd_project /home/dev/projects/site-platform/.claude/worktrees/spec-draft
+  [ "$output" = "site-platform" ]
 }
 
 @test "wg_cwd_project returns empty for home, for the projects dir itself, and for outside paths" {
-  run wg_cwd_project /home/niro
+  run wg_cwd_project /home/dev
   [ "$output" = "" ]
-  run wg_cwd_project /home/niro/projects
+  run wg_cwd_project /home/dev/projects
   [ "$output" = "" ]
   run wg_cwd_project /etc
   [ "$output" = "" ]
@@ -543,23 +543,23 @@ teardown() { wg_teardown_tmp; }
 }
 
 @test "wg_cwd_worktree extracts the worktree name only when there is one" {
-  run wg_cwd_worktree /home/niro/projects/niro-platform/.claude/worktrees/connectors-spec
-  [ "$output" = "connectors-spec" ]
-  run wg_cwd_worktree /home/niro/projects/niro-platform/.claude/worktrees/connectors-spec/src
-  [ "$output" = "connectors-spec" ]
-  run wg_cwd_worktree /home/niro/projects/everest-web
+  run wg_cwd_worktree /home/dev/projects/site-platform/.claude/worktrees/spec-draft
+  [ "$output" = "spec-draft" ]
+  run wg_cwd_worktree /home/dev/projects/site-platform/.claude/worktrees/spec-draft/src
+  [ "$output" = "spec-draft" ]
+  run wg_cwd_worktree /home/dev/projects/shop-web
   [ "$output" = "" ]
 }
 
 @test "wg_project_group maps every project of a multi-project group" {
-  run wg_project_group everest-web
-  [ "$output" = "everest" ]
-  run wg_project_group everest-rs
-  [ "$output" = "everest" ]
-  run wg_project_group everest-api
-  [ "$output" = "everest" ]
-  run wg_project_group niro-platform
-  [ "$output" = "plat" ]
+  run wg_project_group shop-web
+  [ "$output" = "shop" ]
+  run wg_project_group shop-core
+  [ "$output" = "shop" ]
+  run wg_project_group shop-api
+  [ "$output" = "shop" ]
+  run wg_project_group site-platform
+  [ "$output" = "site" ]
 }
 
 @test "wg_project_group returns empty for an unmapped project" {
@@ -568,13 +568,13 @@ teardown() { wg_teardown_tmp; }
 }
 
 @test "wg_window_group prefers an override over project resolution" {
-  run wg_window_group 0xaaa3 everest-api
-  [ "$output" = "plat" ]
+  run wg_window_group 0xaaa3 shop-api
+  [ "$output" = "site" ]
 }
 
 @test "wg_window_group falls back to the project when there is no override" {
-  run wg_window_group 0xaaa1 everest-web
-  [ "$output" = "everest" ]
+  run wg_window_group 0xaaa1 shop-web
+  [ "$output" = "shop" ]
 }
 
 @test "wg_window_group returns empty with no override and no project" {
@@ -592,7 +592,7 @@ teardown() { wg_teardown_tmp; }
 }
 
 @test "wg_title_status degrades unknown and absent glyphs to plain" {
-  run wg_title_status "niro@niro:~"
+  run wg_title_status "dev@host:~"
   [ "$output" = "plain" ]
   run wg_title_status "⏳ some future glyph"
   [ "$output" = "plain" ]
@@ -603,8 +603,8 @@ teardown() { wg_teardown_tmp; }
 @test "wg_title_text strips the status glyph but leaves plain titles alone" {
   run wg_title_text "✳ Everest-web full redesign"
   [ "$output" = "Everest-web full redesign" ]
-  run wg_title_text "niro@niro:~"
-  [ "$output" = "niro@niro:~" ]
+  run wg_title_text "dev@host:~"
+  [ "$output" = "dev@host:~" ]
 }
 
 @test "wg_window_table emits one row per window" {
@@ -614,12 +614,12 @@ teardown() { wg_teardown_tmp; }
 
 @test "wg_window_table resolves a worktree window" {
   run bash -c "wg_window_table | awk -F'\t' '\$1==\"0xaaa2\"{print \$5, \$6, \$7, \$8}'"
-  [ "$output" = "everest busy everest-rs odtah-price" ]
+  [ "$output" = "shop busy shop-core price-units" ]
 }
 
 @test "wg_window_table honours an override" {
   run bash -c "wg_window_table | awk -F'\t' '\$1==\"0xaaa3\"{print \$5, \$7}'"
-  [ "$output" = "plat everest-api" ]
+  [ "$output" = "site shop-api" ]
 }
 
 @test "wg_window_table leaves a projectless window ungrouped" {
@@ -825,7 +825,7 @@ teardown() { wg_teardown_tmp; }
 @test "slot 0 renders the first group with its busy count as a superscript" {
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$status" -eq 0 ]
-  [ "$(jq -r '.text' <<<"$output")" = "everest¹" ]
+  [ "$(jq -r '.text' <<<"$output")" = "shop¹" ]
 }
 
 @test "slot 1 renders the second group" {
@@ -835,7 +835,7 @@ teardown() { wg_teardown_tmp; }
 
 @test "a group with no busy windows gets no superscript" {
   run "$WG_ROOT/bin/wingroup-waybar" 2
-  [ "$(jq -r '.text' <<<"$output")" = "drivora" ]
+  [ "$(jq -r '.text' <<<"$output")" = "fleet" ]
   [ "$(jq -r '.class' <<<"$output")" = "" ]
 }
 
@@ -851,7 +851,7 @@ teardown() { wg_teardown_tmp; }
 }
 
 @test "the focused group gets the active class, which beats busy" {
-  export WG_FIXTURE_ACTIVEWS="$WG_FIXTURES/activeworkspace-everest.json"
+  export WG_FIXTURE_ACTIVEWS="$WG_FIXTURES/activeworkspace-shop.json"
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$(jq -r '.class' <<<"$output")" = "active" ]
 }
@@ -859,7 +859,7 @@ teardown() { wg_teardown_tmp; }
 @test "the tooltip reports counts and the group's projects" {
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [[ "$(jq -r '.tooltip' <<<"$output")" == *"2 windows, 1 busy"* ]]
-  [[ "$(jq -r '.tooltip' <<<"$output")" == *"everest-web, everest-rs, everest-api"* ]]
+  [[ "$(jq -r '.tooltip' <<<"$output")" == *"shop-web, shop-core, shop-api"* ]]
 }
 
 @test "slot 7 lists overflow groups in its tooltip" {
@@ -1068,7 +1068,7 @@ feed() {
 @test "a project window is moved to its group exactly once" {
   export WG_REFRESH_DEBOUNCE_MS=5000
   feed "$WG_FIXTURES/events.txt"
-  run bash -c "grep -c 'movetoworkspacesilent name:everest,address:0xaaa1' '$WG_DISPATCH_LOG'"
+  run bash -c "grep -c 'movetoworkspacesilent name:shop,address:0xaaa1' '$WG_DISPATCH_LOG'"
   [ "$output" -eq 1 ]
 }
 
@@ -1085,7 +1085,7 @@ feed() {
 }
 
 @test "a window with no project is left alone under the default catchall" {
-  wg_daemon_handle_line "openwindow>>aaa6,1,Alacritty,niro@niro:~"
+  wg_daemon_handle_line "openwindow>>aaa6,1,Alacritty,dev@host:~"
   [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
@@ -1352,12 +1352,12 @@ teardown() { wg_teardown_tmp; }
   run bash -c "wg_menu_build | grep -c '^group:'"
   [ "$output" -eq 3 ]
   run bash -c "wg_menu_build | head -n1 | cut -f1"
-  [ "$output" = "group:everest" ]
+  [ "$output" = "group:shop" ]
 }
 
 @test "a group entry shows its window and busy counts" {
   run bash -c "wg_menu_build | head -n1 | cut -f2"
-  [[ "$output" == *"everest"* ]]
+  [[ "$output" == *"shop"* ]]
   [[ "$output" == *"2 windows"* ]]
   [[ "$output" == *"1 busy"* ]]
 }
@@ -1371,7 +1371,7 @@ teardown() { wg_teardown_tmp; }
   run bash -c "wg_menu_build | grep '^window:0xaaa1' | cut -f2"
   [[ "$output" == *"Everest-web full redesign"* ]]
   [[ "$output" != *"✳ ✳"* ]]
-  [[ "$output" == *"everest"* ]]
+  [[ "$output" == *"shop"* ]]
 }
 
 @test "an ungrouped window says so" {
@@ -1394,13 +1394,13 @@ teardown() { wg_teardown_tmp; }
 
 @test "wg_group_menu_build offers only groups and a way to make a new one" {
   run bash -c "wg_group_menu_build | cut -f1 | tr '\n' ' '"
-  [ "$output" = "group:everest group:plat group:drivora new " ]
+  [ "$output" = "group:shop group:site group:fleet new " ]
 }
 
 @test "wg_menu_run returns the action at the index walker chose" {
   export WG_WALKER_PICK=1
   run bash -c "wg_group_menu_build | wg_menu_run 'Group'"
-  [ "$output" = "group:plat" ]
+  [ "$output" = "group:site" ]
 }
 
 @test "wg_menu_run returns nothing when walker is cancelled" {
@@ -1547,13 +1547,13 @@ teardown() { wg_teardown_tmp; }
 wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 
 @test "activate by name switches to the group workspace" {
-  wingroup activate everest
-  [ "$(dispatches)" = "workspace name:everest" ]
+  wingroup activate shop
+  [ "$(dispatches)" = "workspace name:shop" ]
 }
 
 @test "activate by slot index switches to that group" {
   wingroup activate 1
-  [ "$(dispatches)" = "workspace name:plat" ]
+  [ "$(dispatches)" = "workspace name:site" ]
 }
 
 @test "activate rejects an unknown group without dispatching" {
@@ -1564,56 +1564,56 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 
 @test "next moves to the first group when the focus is not on a group" {
   wingroup next
-  [ "$(dispatches)" = "workspace name:everest" ]
+  [ "$(dispatches)" = "workspace name:shop" ]
 }
 
 @test "next advances from the focused group" {
-  export WG_FIXTURE_ACTIVEWS="$WG_FIXTURES/activeworkspace-everest.json"
+  export WG_FIXTURE_ACTIVEWS="$WG_FIXTURES/activeworkspace-shop.json"
   wingroup next
-  [ "$(dispatches)" = "workspace name:plat" ]
+  [ "$(dispatches)" = "workspace name:site" ]
 }
 
 @test "prev wraps around from the first group to the last" {
-  export WG_FIXTURE_ACTIVEWS="$WG_FIXTURES/activeworkspace-everest.json"
+  export WG_FIXTURE_ACTIVEWS="$WG_FIXTURES/activeworkspace-shop.json"
   wingroup prev
-  [ "$(dispatches)" = "workspace name:drivora" ]
+  [ "$(dispatches)" = "workspace name:fleet" ]
 }
 
 @test "new creates a group with a slugified name and the given projects" {
-  wingroup new "Niro 3D Print" niro-3dprint-app niro-3dprint-web
+  wingroup new "Niro 3D Print" acme-3d-app acme-3d-web
   run bash -c "jq -r '.groups[-1].name' '$WG_STATE_DIR/state.json'"
   [ "$output" = "niro-3d-print" ]
   run bash -c "jq -r '.groups[-1].label' '$WG_STATE_DIR/state.json'"
   [ "$output" = "Niro 3D Print" ]
   run bash -c "jq -r '.groups[-1].projects | join(\",\")' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "niro-3dprint-app,niro-3dprint-web" ]
+  [ "$output" = "acme-3d-app,acme-3d-web" ]
 }
 
 @test "new refuses a duplicate group name" {
-  run wingroup new everest
+  run wingroup new shop
   [ "$status" -ne 0 ]
 }
 
 @test "rename changes the label and leaves the workspace name alone" {
-  wingroup rename everest "EV stack"
+  wingroup rename shop "EV stack"
   run bash -c "jq -r '.groups[0].label' '$WG_STATE_DIR/state.json'"
   [ "$output" = "EV stack" ]
   run bash -c "jq -r '.groups[0].name' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "everest" ]
+  [ "$output" = "shop" ]
 }
 
 @test "dissolve removes the group and never touches a window" {
-  wingroup dissolve plat
+  wingroup dissolve site
   run bash -c "jq -r '[.groups[].name] | join(\",\")' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "everest,drivora" ]
+  [ "$output" = "shop,fleet" ]
   [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
 @test "send writes an override and moves the window" {
-  wingroup send --address 0xaaa1 --group plat
+  wingroup send --address 0xaaa1 --group site
   run bash -c "jq -r '.overrides[\"0xaaa1\"]' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "plat" ]
-  [ "$(dispatches)" = "movetoworkspacesilent name:plat,address:0xaaa1" ]
+  [ "$output" = "site" ]
+  [ "$(dispatches)" = "movetoworkspacesilent name:site,address:0xaaa1" ]
 }
 
 @test "send refuses an unknown group" {
@@ -1650,7 +1650,7 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 @test "menu activates the group the picker returned" {
   export WG_WALKER_PICK=1
   wingroup menu
-  [ "$(dispatches)" = "workspace name:plat" ]
+  [ "$(dispatches)" = "workspace name:site" ]
 }
 
 @test "menu focuses the window the picker returned" {
@@ -2225,7 +2225,7 @@ install_autostart
 seed_state
 
 printf 'wingroup installed. Reload with: hyprctl reload && pkill -SIGUSR2 waybar\n'
-printf 'Then create your first group, e.g.: wingroup new everest everest-web everest-rs\n'
+printf 'Then create your first group, e.g.: wingroup new shop shop-web shop-core\n'
 printf 'and file the windows you already have open: wingroup tidy\n'
 ```
 
@@ -2480,7 +2480,7 @@ gh pr create --title "Project-based window grouping for Omarchy" --fill
 
 The suite never touches the live compositor, so these are done by hand once, after `./install.sh` and `hyprctl reload && pkill -SIGUSR2 waybar`:
 
-1. `wingroup new everest everest-web everest-rs everest-api` — the strip gains an `everest` button.
+1. `wingroup new shop shop-web shop-core shop-api` — the strip gains an `shop` button.
    Look at the numbered workspace indicators at the same time. The spec flags this as an
    open question: waybar's `hyprland/workspaces` module may now render the named group
    workspace as an anonymous icon next to `1 2 3`, because the Omarchy config maps
@@ -2488,10 +2488,10 @@ The suite never touches the live compositor, so these are done by hand once, aft
    add `"ignore-workspaces": ["^[^0-9]"]` to that module in `~/.config/waybar/config.jsonc`.
    Confirm what waybar 0.15.0 actually does before changing anything — do not add the
    option pre-emptively.
-2. `wingroup tidy` — preview lists the everest windows; confirm; they move to the `everest` workspace.
-3. Click the `everest` button — the workspace activates.
+2. `wingroup tidy` — preview lists the shop windows; confirm; they move to the `shop` workspace.
+3. Click the `shop` button — the workspace activates.
 4. `SUPER+G` — the picker lists groups and windows with correct busy counts.
-5. Open a new terminal inside `~/projects/everest-web` — it lands on the `everest` workspace by itself.
+5. Open a new terminal inside `~/projects/shop-web` — it lands on the `shop` workspace by itself.
 6. `SUPER+CTRL+G` on that window, pick another group — it moves, and stays put on subsequent events.
 7. Give a Claude session a task and watch its group's superscript busy count go up, then back down when it finishes.
 
