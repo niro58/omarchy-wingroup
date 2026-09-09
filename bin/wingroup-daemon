@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WG_LIB_DIR="${WG_LIB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib" && pwd)}"
+# shellcheck source=lib/hypr.sh
+source "$WG_LIB_DIR/hypr.sh"
+# shellcheck source=lib/state.sh
+source "$WG_LIB_DIR/state.sh"
+# shellcheck source=lib/resolve.sh
+source "$WG_LIB_DIR/resolve.sh"
+
+: "${WG_RESOLVE_RETRIES:=10}"
+: "${WG_RESOLVE_DELAY:=0.1}"
+: "${WG_REFRESH_DEBOUNCE_MS:=150}"
+# Seconds after the daemon starts during which a filed window is moved silently.
+# Login opens a dozen terminals at once; following each of them in turn would
+# throw the user around the desktop before they have touched anything.
+: "${WG_FOLLOW_GRACE:=10}"
+# wingroup-restore creates this file while it is respawning terminals, for the
+# same reason. It is a file rather than a signal because the two are separate
+# processes with no handle on each other.
+: "${WG_RESTORE_FLAG:=${XDG_RUNTIME_DIR:-/tmp}/wingroup-restoring}"
+
+declare -A WG_SEEN=()
+WG_LAST_REFRESH_MS=0
+
+wg_now_ms() {
+  local t="${EPOCHREALTIME/,/.}"
+  printf '%s\n' "$(( ${t%.*} * 1000 + 10#${t#*.} / 1000 ))"
+}
+
+# The grace period is measured from when this process came up, which is here:
+# the daemon is started by Hyprland's autostart, in the same burst as the
+# terminals whose arrival the grace period is there to cover.
+WG_START_MS="$(wg_now_ms)"
+
+wg_refresh_bar() {
+  if [[ -n ${WG_REFRESH_CMD:-} ]]; then
+    "$WG_REFRESH_CMD"
+  else
+    pkill -RTMIN+11 waybar || true
+  fi
+}
+
+wg_daemon_request_refresh() {
+  local now
+  now="$(wg_now_ms)"
+  if (( now - WG_LAST_REFRESH_MS < WG_REFRESH_DEBOUNCE_MS )); then
+    return 0
+  fi
+  WG_LAST_REFRESH_MS="$now"
+  wg_refresh_bar
+}
+
+# The compositor announces a window before its shell has spawned, so cwd
+# resolution has to be retried for a moment before giving up.
+wg_daemon_resolve_group() {
+  local address="$1" attempt=0 row group
+  while (( attempt < WG_RESOLVE_RETRIES )); do
+    row="$(wg_window_row "$address")"
+    if [[ -n $row ]]; then
+      group="$(cut -f5 <<<"$row")"
+      [[ -n $group ]] && { printf '%s\n' "$group"; return 0; }
+    fi
+    (( ++attempt < WG_RESOLVE_RETRIES )) || break
+    [[ $WG_RESOLVE_DELAY == 0 ]] || sleep "$WG_RESOLVE_DELAY"
+  done
+  return 0
+}
+
+# A window the user has just opened themselves should be shown to them -- that
+# is the whole point of having asked for it. A window filed as part of a burst
+# should not: bulk moves are housekeeping, and yanking focus through a dozen of
+# them is how a deliberately opened terminal ends up somewhere the user never
+# sees. $1 is the already-read state document.
+wg_daemon_should_follow() {
+  local state="$1" now
+  # A state file written before `follow` existed has no such key, and its
+  # absence has to read as "on" -- the default -- not as "off".
+  [[ "$(jq -r '.follow' <<<"$state")" != "false" ]] || return 1
+  [[ ! -e $WG_RESTORE_FLAG ]] || return 1
+  now="$(wg_now_ms)"
+  (( now - WG_START_MS >= WG_FOLLOW_GRACE * 1000 )) || return 1
+  return 0
+}
+
+wg_daemon_open_window() {
+  local address="$1" state row floating workspace group catchall
+
+  state="$(wg_state_read)"
+  [[ "$(jq -r '.auto' <<<"$state")" == "true" ]] || return 0
+  [[ -z ${WG_SEEN[$address]:-} ]] || return 0
+  WG_SEEN[$address]=1
+
+  # One fetch, three columns. Building the row again just to read the group off
+  # it doubled the work on the common path, where the cwd is already resolvable.
+  row="$(wg_window_row "$address")"
+  [[ -n $row ]] || return 0
+  floating="$(cut -f4 <<<"$row")"
+  [[ $floating == "true" ]] && return 0
+  workspace="$(cut -f3 <<<"$row")"
+  group="$(cut -f5 <<<"$row")"
+
+  # Only when the shell had not spawned yet is it worth waiting and asking again.
+  [[ -n $group ]] || group="$(wg_daemon_resolve_group "$address")"
+  if [[ -z $group ]]; then
+    catchall="$(jq -r '.catchall // empty' <<<"$state")"
+    [[ -n $catchall ]] || return 0
+    group="$catchall"
+  fi
+
+  [[ $workspace == "$group" ]] && return 0
+  # movetoworkspace moves the window and switches to the workspace in one
+  # dispatch; movetoworkspacesilent moves it and leaves the user behind.
+  if wg_daemon_should_follow "$state"; then
+    wg_hypr_dispatch movetoworkspace "name:$group,address:$address"
+  else
+    wg_hypr_dispatch movetoworkspacesilent "name:$group,address:$address"
+  fi
+  wg_daemon_request_refresh
+}
+
+wg_daemon_prune() {
+  wg_hypr_query clients | jq -r '.[].address' | wg_state_prune_overrides
+}
+
+wg_daemon_handle_line() {
+  local line="$1" event payload address state
+  event="${line%%>>*}"
+  payload="${line#*>>}"
+
+  case $event in
+    openwindow)
+      address="0x${payload%%,*}"
+      wg_daemon_open_window "$address"
+      ;;
+    closewindow)
+      address="0x${payload}"
+      unset "WG_SEEN[$address]"
+      # Targeted deletion, not a prune: the closing window is still listed by
+      # hyprctl at this instant, so a live-address prune would keep its override.
+      #
+      # And only when there is something to delete, which is the uncommon case.
+      # The read here is outside the lock on purpose: it decides whether there
+      # is any work, not what the work is. wg_state_update re-reads under the
+      # lock, so a `wingroup new` landing in between is still not lost -- the
+      # cheap read only saves taking the lock at all on the common path.
+      state="$(wg_state_read)"
+      if [[ -n "$(jq -r --arg a "$address" '.overrides[$a] // empty' <<<"$state")" ]]; then
+        # shellcheck disable=SC2016  # $a is a jq variable, not a shell one
+        wg_state_update 'del(.overrides[$a])' --arg a "$address"
+      fi
+      wg_daemon_request_refresh
+      ;;
+    windowtitle | windowtitlev2 | workspace | workspacev2 | activewindow | activewindowv2 | movewindow | movewindowv2)
+      wg_daemon_request_refresh
+      ;;
+    *) : ;;
+  esac
+  return 0
+}
+
+wg_daemon_main() {
+  local lock="${XDG_RUNTIME_DIR:-/tmp}/wingroup-daemon.lock"
+  exec 9>"$lock"
+  if ! flock -n 9; then
+    printf 'wingroup-daemon: already running\n' >&2
+    exit 0
+  fi
+
+  # Overrides belonging to windows from a previous session are dead weight.
+  wg_daemon_prune
+
+  local sock="${XDG_RUNTIME_DIR}/hypr/${HYPRLAND_INSTANCE_SIGNATURE}/.socket2.sock"
+  [[ -S $sock ]] || { printf 'wingroup-daemon: no event socket at %s\n' "$sock" >&2; exit 1; }
+
+  local line
+  while IFS= read -r line; do
+    wg_daemon_handle_line "$line" || true
+  done < <(socat -U - "UNIX-CONNECT:$sock")
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" && -z ${WG_DAEMON_NO_MAIN:-} ]]; then
+  wg_daemon_main
+fi

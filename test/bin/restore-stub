@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+printf 'restore %s\n' "$*" >>"$WG_RESTORE_LOG"
+# The daemon reads this file to know it should file windows silently. Recording
+# it in a log of its own -- not in $WG_RESTORE_LOG, whose exact contents the
+# argument-passthrough test asserts -- is how a test sees that the suppression
+# was in place *while* the terminals were being spawned.
+if [[ -e ${WG_RESTORE_FLAG:-$XDG_RUNTIME_DIR/wingroup-restoring} ]]; then
+  printf 'flag present\n' >>"$WG_RESTORE_LOG.flag"
+fi
+exit 0

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Test-only stand-in for walker. Records the arguments it was given and the
+# entries it was handed, then answers the way the mode it was asked for does:
+# dmenu-with-index (-i) prints the index $WG_WALKER_PICK selects, input-only
+# (-I) prints the text $WG_WALKER_INPUT stands in for someone typing.
+[[ -z ${WG_WALKER_ARGS_LOG:-} ]] || printf '%s\n' "$*" >>"$WG_WALKER_ARGS_LOG"
+if [[ -n ${WG_WALKER_STDIN_LOG:-} ]]; then
+  cat >>"$WG_WALKER_STDIN_LOG"
+else
+  cat >/dev/null
+fi
+for arg in "$@"; do
+  if [[ $arg == -I || $arg == --inputonly ]]; then
+    printf '%s\n' "${WG_WALKER_INPUT:-}"
+    exit 0
+  fi
+done
+# A flow with more than one picker in it -- choose a group, then confirm --
+# needs a different answer each time, so $WG_WALKER_PICKS is a space-separated
+# list consumed one entry per invocation. Running past the end answers nothing,
+# which is what cancelling looks like.
+if [[ -n ${WG_WALKER_PICKS:-} ]]; then
+  counter="${WG_WALKER_PICKS_STATE:-${WG_TMP:-/tmp}/walker-picks.n}"
+  n=0
+  [[ -f $counter ]] && n="$(cat "$counter")"
+  printf '%s' "$(( n + 1 ))" >"$counter"
+  read -r -a picks <<<"$WG_WALKER_PICKS"
+  printf '%s\n' "${picks[n]:-}"
+  exit 0
+fi
+printf '%s\n' "${WG_WALKER_PICK:-}"

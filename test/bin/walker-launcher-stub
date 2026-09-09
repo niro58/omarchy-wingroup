@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Test-only stand-in for omarchy-launch-walker: the same contract, minus the
+# services it starts and the real walker it execs -- it records that it was the
+# one called, and hands off to the walker stub.
+printf 'launcher %s\n' "$*" >>"${WG_WALKER_ARGS_LOG:-/dev/null}"
+exec "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/walker-stub" --width 644 --maxheight 300 --minheight 300 "$@"

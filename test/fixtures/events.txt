@@ -1,0 +1,7 @@
+openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign
+openwindow>>aaa7,1,org.gnome.Nautilus,Home
+openwindow>>aaa6,1,Alacritty,niro@niro:~
+openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign
+windowtitle>>aaa1
+windowtitle>>aaa2
+windowtitle>>aaa3

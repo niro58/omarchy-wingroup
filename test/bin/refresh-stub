@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'refresh\n' >>"$WG_REFRESH_LOG"

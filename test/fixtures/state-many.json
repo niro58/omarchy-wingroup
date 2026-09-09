@@ -1,0 +1,17 @@
+{
+  "auto": true,
+  "catchall": null,
+  "groups": [
+    {"name":"g0","label":"g0","projects":[],"monitor":null},
+    {"name":"g1","label":"g1","projects":[],"monitor":null},
+    {"name":"g2","label":"g2","projects":[],"monitor":null},
+    {"name":"g3","label":"g3","projects":[],"monitor":null},
+    {"name":"g4","label":"g4","projects":[],"monitor":null},
+    {"name":"g5","label":"g5","projects":[],"monitor":null},
+    {"name":"g6","label":"g6","projects":[],"monitor":null},
+    {"name":"g7","label":"g7","projects":[],"monitor":null},
+    {"name":"g8","label":"g8","projects":[],"monitor":null},
+    {"name":"g9","label":"g9","projects":[],"monitor":null}
+  ],
+  "overrides": {}
+}

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Test-only: when $WG_HYPRCTL_LOG is set, record every invocation so a test can
+# assert how much work a code path asks of the compositor.
+if [[ -n ${WG_HYPRCTL_LOG:-} ]]; then
+  printf '%s\n' "$*" >>"$WG_HYPRCTL_LOG"
+fi
+
+if [[ ${1:-} == dispatch ]]; then
+  shift
+  printf '%s\n' "$*" >>"$WG_DISPATCH_LOG"
+  exit 0
+fi
+
+if [[ ${1:-} == -j ]]; then
+  case ${2:-} in
+    clients) cat "${WG_FIXTURE_CLIENTS:-$WG_FIXTURES/clients.json}" ;;
+    activeworkspace) cat "${WG_FIXTURE_ACTIVEWS:-$WG_FIXTURES/activeworkspace.json}" ;;
+    monitors) cat "${WG_FIXTURE_MONITORS:-$WG_FIXTURES/monitors.json}" ;;
+    workspaces) cat "${WG_FIXTURE_WORKSPACES:-$WG_FIXTURES/workspaces.json}" ;;
+    activewindow) cat "${WG_FIXTURE_ACTIVEWINDOW:-$WG_FIXTURES/activewindow.json}" ;;
+    *) printf 'hyprctl-stub: unhandled query %s\n' "${2:-}" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
+printf 'hyprctl-stub: unhandled invocation %s\n' "$*" >&2
+exit 1
