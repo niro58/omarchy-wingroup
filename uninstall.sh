@@ -3,14 +3,17 @@ set -euo pipefail
 
 WG_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
+# WG_SLOTS, from the one file that defines it: the slots stripped out of
+# "modules-left" here are exactly the ones install.sh appended to it.
+# shellcheck source=lib/constants.sh
+source "$WG_ROOT/lib/constants.sh"
+
 : "${WG_BIN_DIR:=$HOME/.local/bin}"
 : "${WG_WAYBAR_CONFIG:=$HOME/.config/waybar/config.jsonc}"
 : "${WG_WAYBAR_STYLE:=$HOME/.config/waybar/style.css}"
 : "${WG_HYPR_BINDINGS:=$HOME/.config/hypr/bindings.conf}"
 : "${WG_HYPR_AUTOSTART:=$HOME/.config/hypr/autostart.conf}"
 : "${WG_STATE_DIR:=$HOME/.local/state/omarchy/wingroup}"
-
-WG_SLOTS=8
 
 unlink_binaries() {
   local f

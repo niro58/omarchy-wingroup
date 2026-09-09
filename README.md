@@ -236,7 +236,7 @@ window below a separator:
 ⏻ auto-assign: on
 ──────────────────────────────
   ✳ ready for review                             alpha
-  ◐ running the test suite                       alpha
+  ◐ running the test suite                       alpha:vat-rounding
   ✳ migration written                            beta
   · user@host:~                                  ungrouped
 ```
@@ -245,6 +245,15 @@ Picking a group switches to its workspace. Picking a window focuses it. The
 group rows show the monitor a group is pinned to, if it has one. The window rows
 show each window's status glyph — `✳` idle, `◐` busy, `·` plain — its title with
 the glyph stripped, and the group it resolves to, or `ungrouped`.
+
+A window whose shell is sitting in a Claude worktree —
+`~/projects/<project>/.claude/worktrees/<branch>` — shows that worktree's name
+after the group, as `group:worktree`. Worktrees deliberately do not get groups
+of their own: every worktree of a repo resolves to the same project and so onto
+the same workspace, which is what you want for filing them and no help at all
+when three rows of the picker all read `alpha`. A worktree name longer than 16
+characters is cut short with `…` — that column ends the row, and a branch name
+has no upper bound. A window that is not in a worktree shows nothing extra.
 
 The four actions sit directly under the groups rather than at the bottom, so
 they stay a few rows in no matter how many windows are open:
@@ -280,7 +289,7 @@ content **byte for byte** — including any blank line install prepended to a
 block, and including whether the file originally ended in a newline (install
 records that on the closing marker so uninstall can put it back).
 
-**Your groups are kept.** `~/.local/state/omarchy/wingroup/state.json` is never
+**Your groups are kept.** `~/.local/state/omarchy/wingroup/` is never
 touched, so uninstalling and reinstalling later picks up where you left off. To
 throw the groups away too, delete that directory by hand.
 
@@ -489,6 +498,17 @@ not be valid JSON is refused with the old file left in place. If the file is
 found unparseable it is moved to `state.json.corrupt` and replaced with the
 empty default.
 
+Anything that reads the file, changes it and writes it back — every subcommand
+that touches a group or an override, and the daemon — holds an exclusive
+`flock` on `.state.lock`, next to `state.json`, across all three steps. Without
+it the second writer commits a document built from a copy taken before the
+first writer's change, and that change is silently gone: a `wingroup new`
+landing inside the daemon's handling of a window closing used to lose the
+group, with no error printed anywhere. Reading alone — the bar, the picker, the
+resolver — never takes the lock and never waits for one. The lock is held on an
+open file descriptor, so a process that dies holding it releases it; a waiter
+gives up after five seconds and says so rather than hanging.
+
 ## How automatic assignment decides
 
 For each window, the daemon and `tidy` look at the **shell's** working
@@ -647,7 +667,8 @@ a window out from under the group.
 
 ## Known limitations
 
-- **Eight waybar slots.** `WG_SLOTS` is 8 in both the module and the installer.
+- **Eight waybar slots.** `WG_SLOTS` is 8, defined once in `lib/constants.sh`
+  and read by both the module and the installer.
   Groups past the eighth have no button of their own; they stay fully usable
   from `wingroup menu` and the CLI, and the eighth slot's tooltip lists how many
   more there are and their workspace names.
@@ -673,10 +694,6 @@ a window out from under the group.
 - **Overrides are keyed by Hyprland window address**, so they die with the
   window. That is deliberate — an address is reused — but it does mean a manual
   placement cannot survive a restart.
-- **No lock between the daemon and the CLI.** Both write `state.json`, and a
-  `wingroup new` racing a window closing can lose one of the two updates. The
-  daemon avoids the common case by not writing at all when there is nothing to
-  delete, but the race exists.
 - **`"ignore-workspaces"` hides every named workspace** from the numbered
   indicator, not only wingroup's groups. If you keep named workspaces for other
   reasons, they disappear from that module too.

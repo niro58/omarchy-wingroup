@@ -121,12 +121,7 @@ wg_daemon_open_window() {
 }
 
 wg_daemon_prune() {
-  local live
-  live="$(wg_hypr_query clients | jq -r '.[].address')"
-  # wg_state_prune_overrides reads live addresses from stdin, not $1; it takes
-  # no positional argument here by design.
-  # shellcheck disable=SC2119
-  wg_state_write "$(printf '%s\n' "$live" | wg_state_prune_overrides)"
+  wg_hypr_query clients | jq -r '.[].address' | wg_state_prune_overrides
 }
 
 wg_daemon_handle_line() {
@@ -146,13 +141,14 @@ wg_daemon_handle_line() {
       # hyprctl at this instant, so a live-address prune would keep its override.
       #
       # And only when there is something to delete, which is the uncommon case.
-      # There is no lock between the daemon and bin/wingroup, so every state
-      # write is an opportunity to lose an update -- a `wingroup new` racing a
-      # window close could be silently discarded. Not writing at all on the
-      # common path removes essentially all of those races.
+      # The read here is outside the lock on purpose: it decides whether there
+      # is any work, not what the work is. wg_state_update re-reads under the
+      # lock, so a `wingroup new` landing in between is still not lost -- the
+      # cheap read only saves taking the lock at all on the common path.
       state="$(wg_state_read)"
       if [[ -n "$(jq -r --arg a "$address" '.overrides[$a] // empty' <<<"$state")" ]]; then
-        wg_state_write "$(jq --arg a "$address" 'del(.overrides[$a])' <<<"$state")"
+        # shellcheck disable=SC2016  # $a is a jq variable, not a shell one
+        wg_state_update 'del(.overrides[$a])' --arg a "$address"
       fi
       wg_daemon_request_refresh
       ;;

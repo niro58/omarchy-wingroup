@@ -119,8 +119,8 @@ cmd_monitor() {
   wg_group_exists "$name" "$state" || wg_die "no such group: $name"
 
   if [[ $monitor == - ]]; then
-    wg_state_write "$(jq --arg n "$name" \
-      '(.groups[] | select(.name == $n) | .monitor) = null' <<<"$state")"
+    # shellcheck disable=SC2016  # $n is a jq variable, not a shell one
+    wg_state_update '(.groups[] | select(.name == $n) | .monitor) = null' --arg n "$name"
     wg_refresh
     return 0
   fi
@@ -134,8 +134,9 @@ cmd_monitor() {
   done
   (( found )) || wg_die "no such monitor: $monitor (available: ${available:-none})"
 
-  wg_state_write "$(jq --arg n "$name" --arg m "$monitor" \
-    '(.groups[] | select(.name == $n) | .monitor) = $m' <<<"$state")"
+  # shellcheck disable=SC2016  # $n and $m are jq variables, not shell ones
+  wg_state_update '(.groups[] | select(.name == $n) | .monitor) = $m' \
+    --arg n "$name" --arg m "$monitor"
   wg_refresh
 }
 
@@ -173,8 +174,13 @@ cmd_new() {
   [[ -n $name ]] || wg_die "label produces an empty group name"
   wg_group_exists "$name" "$state" && wg_die "group already exists: $name"
   projects="$(printf '%s\n' ${@+"$@"} | jq -R -s 'split("\n") | map(select(length > 0))')"
-  wg_state_write "$(jq --arg n "$name" --arg l "$label" --argjson p "$projects" \
-    '.groups += [{name: $n, label: $l, projects: $p, monitor: null}]' <<<"$state")"
+  # The duplicate check above reads a copy taken before the lock, so it stays a
+  # message rather than a guarantee; the filter itself refuses to add a second
+  # group of the same name, which is the half that has to hold under a race.
+  # shellcheck disable=SC2016  # $n, $l and $p are jq variables, not shell ones
+  wg_state_update 'if any(.groups[]; .name == $n) then . else
+      .groups += [{name: $n, label: $l, projects: $p, monitor: null}] end' \
+    --arg n "$name" --arg l "$label" --argjson p "$projects"
   WG_NEW_NAME="$name"
 
   # A group that owns no project cannot own a window yet -- an override names a
@@ -274,8 +280,9 @@ cmd_rename() {
   local name="${1:?}" label="${2:?}" state
   state="$(wg_state_read)"
   wg_group_exists "$name" "$state" || wg_die "no such group: $name"
-  wg_state_write "$(jq --arg n "$name" --arg l "$label" \
-    '(.groups[] | select(.name == $n) | .label) = $l' <<<"$state")"
+  # shellcheck disable=SC2016  # $n and $l are jq variables, not shell ones
+  wg_state_update '(.groups[] | select(.name == $n) | .label) = $l' \
+    --arg n "$name" --arg l "$label"
   wg_refresh
 }
 
@@ -283,8 +290,10 @@ cmd_dissolve() {
   local name="${1:?}" state
   state="$(wg_state_read)"
   wg_group_exists "$name" "$state" || wg_die "no such group: $name"
-  wg_state_write "$(jq --arg n "$name" \
-    '.groups |= map(select(.name != $n)) | .overrides |= with_entries(select(.value != $n))' <<<"$state")"
+  # shellcheck disable=SC2016  # $n is a jq variable, not a shell one
+  wg_state_update \
+    '.groups |= map(select(.name != $n)) | .overrides |= with_entries(select(.value != $n))' \
+    --arg n "$name"
   wg_refresh
 }
 
@@ -320,7 +329,8 @@ cmd_send() {
 
   state="$(wg_state_read)"
   wg_group_exists "$group" "$state" || wg_die "no such group: $group"
-  wg_state_write "$(jq --arg a "$address" --arg g "$group" '.overrides[$a] = $g' <<<"$state")"
+  # shellcheck disable=SC2016  # $a and $g are jq variables, not shell ones
+  wg_state_update '.overrides[$a] = $g' --arg a "$address" --arg g "$group"
   wg_hypr_dispatch movetoworkspacesilent "name:$group,address:$address"
   wg_refresh
 }
@@ -401,9 +411,7 @@ cmd_tidy() {
 }
 
 cmd_toggle_auto() {
-  local state
-  state="$(wg_state_read)"
-  wg_state_write "$(jq '.auto = (.auto | not)' <<<"$state")"
+  wg_state_update '.auto = (.auto | not)'
   wg_refresh
 }
 

@@ -8,19 +8,14 @@ source "$WG_LIB_DIR/hypr.sh"
 source "$WG_LIB_DIR/state.sh"
 # shellcheck source=lib/resolve.sh
 source "$WG_LIB_DIR/resolve.sh"
+# shellcheck source=lib/constants.sh
+source "$WG_LIB_DIR/constants.sh"
 
 # Tests point this at a stub that replaces /proc lookups with a fixture map.
 if [[ -n ${WG_TEST_STUB_CWD:-} ]]; then
   # shellcheck source=test/stub-cwd.sh
   source "$WG_TEST_STUB_CWD"
 fi
-
-WG_SLOTS=8
-
-# Top step of the idle heat ramp: idle4 means "four idle sessions or more".
-# A ceiling, because past a handful the exact number stops changing what you
-# do about it -- and every step needs a rule of its own in style.css.
-WG_IDLE_HEAT_MAX=4
 
 wg_superscript() {
   local n="$1" out="" i

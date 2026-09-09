@@ -3,6 +3,13 @@ set -euo pipefail
 
 WG_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
+# WG_SLOTS and WG_IDLE_HEAT_MAX: the same file bin/wingroup-waybar reads them
+# from, so the bar it writes and the module that fills it cannot drift apart.
+# WG_ROOT is resolved from this script's own path, so this works whatever
+# directory install.sh is run from.
+# shellcheck source=lib/constants.sh
+source "$WG_ROOT/lib/constants.sh"
+
 : "${WG_BIN_DIR:=$HOME/.local/bin}"
 : "${WG_WAYBAR_CONFIG:=$HOME/.config/waybar/config.jsonc}"
 : "${WG_WAYBAR_STYLE:=$HOME/.config/waybar/style.css}"
@@ -11,14 +18,7 @@ WG_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 : "${WG_STATE_DIR:=$HOME/.local/state/omarchy/wingroup}"
 : "${WG_RESTORE_SCRIPT:=$HOME/restore-claude.sh}"
 
-WG_SLOTS=8
 WG_SIGNAL=11
-
-# Steps in the idle heat ramp, one CSS rule each. Must match
-# WG_IDLE_HEAT_MAX in bin/wingroup-waybar: that is the top class the module
-# ever emits ("idle4" means four idle sessions or more), and a step the module
-# emits with no rule here would style nothing.
-WG_IDLE_HEAT_MAX=4
 
 # The ramp itself, one declaration block per step, dimmest first: amber at one
 # idle session, orange, red-orange, and a bright pure red at four-or-more, with
@@ -32,6 +32,15 @@ WG_IDLE_HEAT_RAMP=(
   'color: #f45d48; opacity: 0.95; font-weight: 600;'
   'color: #ff3b30; opacity: 1; font-weight: bold;'
 )
+
+# One declaration per step, or the module emits a class this script writes no
+# rule for. The two numbers now come from the same file, so this can only fire
+# if someone edits the ramp without editing lib/constants.sh.
+if (( ${#WG_IDLE_HEAT_RAMP[@]} != WG_IDLE_HEAT_MAX )); then
+  printf 'install.sh: WG_IDLE_HEAT_RAMP has %d entries but WG_IDLE_HEAT_MAX is %d\n' \
+    "${#WG_IDLE_HEAT_RAMP[@]}" "$WG_IDLE_HEAT_MAX" >&2
+  exit 1
+fi
 
 # What install_autostart actually wrote, for the closing summary: "both",
 # "daemon", or empty when the block was already there.

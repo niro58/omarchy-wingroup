@@ -12,6 +12,33 @@ wg_status_glyph() {
   esac
 }
 
+# A window row's last column: the group the window belongs to, and -- when the
+# window is sitting in a Claude worktree -- which worktree, as "group:worktree".
+#
+# Column 8 of the window table has carried the worktree name since the first
+# version and nothing read it. It exists because two windows in different
+# worktrees of the same repo resolve to the same project and therefore the same
+# group, which is what you want for filing them and useless for telling them
+# apart in a list: three rows reading "plat" and no way to know which is which.
+#
+# Truncated, because a worktree is named after a branch and a branch name has no
+# upper bound. This is the row's last column and the one before it is padded to
+# a fixed width, so an unbounded field here is the one thing that can push the
+# layout around. The result is left in WG_WHERE rather than printed: this runs
+# once per open window, and a command substitution per row is a fork per row.
+WG_MENU_WORKTREE_MAX=16
+WG_WHERE=""
+
+wg_menu_where() {
+  local group="$1" worktree="${2:-}"
+  WG_WHERE="${group:-ungrouped}"
+  [[ -n $worktree ]] || return 0
+  if (( ${#worktree} > WG_MENU_WORKTREE_MAX )); then
+    worktree="${worktree:0:WG_MENU_WORKTREE_MAX - 1}…"
+  fi
+  WG_WHERE+=":$worktree"
+}
+
 wg_menu_build() {
   local state="${1:-$(wg_state_read)}" table line
   table="$(wg_window_table)"
@@ -72,14 +99,15 @@ wg_menu_build() {
 
   printf 'noop\t%s\n' "──────────────────────────────"
 
-  local glyph shown where
+  local glyph shown
   while IFS= read -r line; do
     [[ -n $line ]] || continue
     wg_row_split "$line"
     glyph="$(wg_status_glyph "${WG_ROW[6]}")"
     shown="$(wg_title_text "${WG_ROW[9]}")"
-    where="${WG_ROW[5]:-ungrouped}"
-    printf 'window:%s\t  %s %-44s %s\n' "${WG_ROW[1]}" "$glyph" "$shown" "$where"
+    # Column 5 is the group, column 8 the worktree.
+    wg_menu_where "${WG_ROW[5]}" "${WG_ROW[8]}"
+    printf 'window:%s\t  %s %-44s %s\n' "${WG_ROW[1]}" "$glyph" "$shown" "$WG_WHERE"
   done <<<"$table"
 }
 

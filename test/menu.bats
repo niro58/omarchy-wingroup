@@ -49,6 +49,56 @@ teardown() { wg_teardown_tmp; }
   [[ "$display" == *"everest"* ]]
 }
 
+# Column 8 of the window table has held the worktree name since the first
+# version and nothing displayed it. Two windows in different worktrees of the
+# same repo resolve to the same project and so to the same group -- which is
+# what filing them wants and no help at all in a list of rows all reading
+# "plat".
+@test "a window sitting in a worktree names it next to its group" {
+  display="$(wg_menu_build | grep '^window:0xaaa2' | cut -f2)"
+  [[ "$display" == *"everest:odtah-price"* ]]
+}
+
+@test "a window that is not in a worktree says nothing extra" {
+  display="$(wg_menu_build | grep '^window:0xaaa1' | cut -f2)"
+  [[ "$display" == *"everest"* ]]
+  [[ "$display" != *"everest:"* ]]
+}
+
+# The whole point of the column: same repo, same project, same group, two rows
+# that used to be indistinguishable.
+@test "two windows in different worktrees of one repo are told apart" {
+  wg_window_cwd() {
+    case "$1" in
+      1001) printf '%s\n' "$WG_PROJECTS_DIR/everest-web/.claude/worktrees/odtah-price" ;;
+      1005) printf '%s\n' "$WG_PROJECTS_DIR/everest-web/.claude/worktrees/vat-rounding" ;;
+      *) return 0 ;;
+    esac
+  }
+  [[ "$(wg_menu_build | grep '^window:0xaaa1' | cut -f2)" == *"everest:odtah-price"* ]]
+  [[ "$(wg_menu_build | grep '^window:0xaaa5' | cut -f2)" == *"everest:vat-rounding"* ]]
+}
+
+@test "wg_menu_where joins the group and the worktree, and falls back to ungrouped" {
+  wg_menu_where plat connectors-spec
+  [ "$WG_WHERE" = "plat:connectors-spec" ]
+  wg_menu_where plat ""
+  [ "$WG_WHERE" = "plat" ]
+  wg_menu_where "" ""
+  [ "$WG_WHERE" = "ungrouped" ]
+}
+
+# A worktree is named after a branch and a branch name has no upper bound. This
+# is the last column of a row whose other columns are padded to fixed widths, so
+# an unbounded field here is the one thing that can push the layout around.
+@test "a long worktree name is cut down rather than allowed to stretch the row" {
+  wg_menu_where plat "feat-connectors-spec-second-pass"
+  [ "$WG_WHERE" = "plat:feat-connectors…" ]
+  # Exactly at the limit, nothing is cut.
+  wg_menu_where plat "sixteen-chars-ab"
+  [ "$WG_WHERE" = "plat:sixteen-chars-ab" ]
+}
+
 @test "an ungrouped window says so" {
   display="$(wg_menu_build | grep '^window:0xaaa6' | cut -f2)"
   [[ "$display" == *"ungrouped"* ]]
