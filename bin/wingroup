@@ -17,7 +17,33 @@ if [[ -n ${WG_TEST_STUB_CWD:-} ]]; then
   source "$WG_TEST_STUB_CWD"
 fi
 
-wg_die() { printf 'wingroup: %s\n' "$1" >&2; exit 1; }
+# Where a user-facing failure has to show up.
+#
+# A picker action reached from SUPER+G has no terminal behind it: writing to
+# stderr there means nobody ever sees it, and the entry looks like it did
+# nothing. So a failure with no tty on either standard stream is also sent to
+# the notification daemon. A genuine CLI invocation has a terminal and keeps
+# plain stderr -- desktop notifications for something already printed in front
+# of the user would be noise.
+wg_notify() {
+  local summary="$1" body="${2:-}"
+  if [[ -n ${WG_NOTIFY_CMD:-} ]]; then
+    "$WG_NOTIFY_CMD" "$summary" "$body" || true
+    return 0
+  fi
+  command -v notify-send >/dev/null 2>&1 || return 0
+  notify-send "$summary" "$body" || true
+}
+
+wg_has_tty() {
+  [[ -t 1 || -t 2 ]]
+}
+
+wg_die() {
+  printf 'wingroup: %s\n' "$1" >&2
+  wg_has_tty || wg_notify "wingroup" "$1"
+  exit 1
+}
 
 wg_usage() {
   cat >&2 <<'USAGE'
@@ -30,7 +56,8 @@ usage: wingroup <command>
   tidy [--yes]                  file every window by its project
   new <label> [project...]      create a group
   rename <name> <label>         change a group's displayed label
-  dissolve <name>                remove a group, leaving its windows alone
+  dissolve <name>               remove a group, leaving its windows alone
+  monitor <group> <name|->      pin a group to a monitor, or clear the pin
   toggle-auto                   turn automatic assignment on or off
 USAGE
   exit 1
@@ -54,7 +81,7 @@ wg_refresh() {
 }
 
 cmd_activate() {
-  local target="${1:?}" state
+  local target="${1:?}" state monitor lives_on
   local -a names=()
   state="$(wg_state_read)"
   mapfile -t names < <(wg_state_group_names "$state")
@@ -63,7 +90,53 @@ cmd_activate() {
     target="${names[target]}"
   fi
   wg_group_exists "$target" "$state" || wg_die "no such group: $target"
+
+  # A group with no pin is switched to exactly as it always was.
+  monitor="$(wg_state_group_field "$target" monitor "$state")"
+  if [[ -n $monitor ]]; then
+    # Hyprland creates a named workspace on whichever monitor has focus at the
+    # time, and it stays bound there. A group first opened from the laptop
+    # therefore lives on the laptop for good -- so focusing the pinned monitor
+    # is not enough on its own, the workspace has to be dragged over to it.
+    # That move is the whole feature.
+    wg_hypr_dispatch focusmonitor "$monitor"
+    lives_on="$(wg_hypr_query workspaces \
+      | jq -r --arg w "$target" 'first(.[] | select(.name == $w) | .monitor) // empty')"
+    if [[ -n $lives_on && $lives_on != "$monitor" ]]; then
+      wg_hypr_dispatch moveworkspacetomonitor "name:$target $monitor"
+    fi
+  fi
+
   wg_hypr_dispatch workspace "name:$target"
+}
+
+# monitor <group> <monitor-name> pins; monitor <group> - clears the pin.
+cmd_monitor() {
+  local name="${1:?usage: wingroup monitor <group> <monitor-name|->}"
+  local monitor="${2:?usage: wingroup monitor <group> <monitor-name|->}"
+  local state
+  state="$(wg_state_read)"
+  wg_group_exists "$name" "$state" || wg_die "no such group: $name"
+
+  if [[ $monitor == - ]]; then
+    wg_state_write "$(jq --arg n "$name" \
+      '(.groups[] | select(.name == $n) | .monitor) = null' <<<"$state")"
+    wg_refresh
+    return 0
+  fi
+
+  local -a monitors=()
+  local m found=0 available=""
+  mapfile -t monitors < <(wg_hypr_query monitors | jq -r '.[].name')
+  for m in ${monitors[@]+"${monitors[@]}"}; do
+    available+="${available:+, }$m"
+    if [[ $m == "$monitor" ]]; then found=1; fi
+  done
+  (( found )) || wg_die "no such monitor: $monitor (available: ${available:-none})"
+
+  wg_state_write "$(jq --arg n "$name" --arg m "$monitor" \
+    '(.groups[] | select(.name == $n) | .monitor) = $m' <<<"$state")"
+  wg_refresh
 }
 
 cmd_cycle() {
@@ -95,6 +168,48 @@ cmd_new() {
   wg_state_write "$(jq --arg n "$name" --arg l "$label" --argjson p "$projects" \
     '.groups += [{name: $n, label: $l, projects: $p, monitor: null}]' <<<"$state")"
   wg_refresh
+}
+
+# The picker's "+ new group…".
+#
+# Prompting is the whole reason this used to be a dead entry: dmenu mode returns
+# a choice, not typed text. walker's -I/--inputonly is dmenu mode with nothing
+# but the input box, which is the missing half.
+#
+# Creation goes through cmd_new, so slugification and the duplicate check are
+# the ones `wingroup new` has. A group with no projects is inert, though, so if
+# the window the user is looking at sits in a project no group has claimed, that
+# project seeds the new group -- which is the case where someone reaches for
+# this entry in the first place.
+cmd_new_interactive() {
+  local label project="" owner="" address row state
+
+  label="$(wg_menu_input 'New group')"
+  [[ -n $label ]] || return 0
+
+  address="$(wg_hypr_query activewindow | jq -r '.address // empty')"
+  if [[ -n $address && $address != null ]]; then
+    row="$(wg_window_row "$address")"
+    # Column 7 is the project; a row is nine tab-separated columns and several
+    # of them are routinely empty, so cut, never a multi-variable read.
+    [[ -z $row ]] || project="$(cut -f7 <<<"$row")"
+  fi
+
+  state="$(wg_state_read)"
+  if [[ -n $project ]]; then
+    owner="$(wg_project_group "$project" "$state")"
+  fi
+
+  if [[ -n $project && -z $owner ]]; then
+    cmd_new "$label" "$project"
+    wg_notify "wingroup" "Created group $label with project $project."
+  elif [[ -n $owner ]]; then
+    cmd_new "$label"
+    wg_notify "wingroup" "Created group $label with no projects: $project already belongs to $owner."
+  else
+    cmd_new "$label"
+    wg_notify "wingroup" "Created group $label with no projects: the focused window is not in a project."
+  fi
 }
 
 cmd_rename() {
@@ -215,7 +330,7 @@ cmd_menu() {
     "")            return 0 ;;
     group:*)       cmd_activate "${action#group:}" ;;
     window:*)      wg_hypr_dispatch focuswindow "address:${action#window:}" ;;
-    new)           wg_die "create a group from the terminal: wingroup new <label> [project...]" ;;
+    new)           cmd_new_interactive ;;
     tidy)          cmd_tidy ;;
     toggle-auto)   cmd_toggle_auto ;;
   esac
@@ -235,6 +350,7 @@ main() {
     new)         cmd_new "$@" ;;
     rename)      cmd_rename "$@" ;;
     dissolve)    cmd_dissolve "$@" ;;
+    monitor)     cmd_monitor "$@" ;;
     toggle-auto) cmd_toggle_auto ;;
     *)           wg_usage ;;
   esac

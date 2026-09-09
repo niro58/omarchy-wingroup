@@ -154,10 +154,186 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
   [ "$(dispatches)" = "workspace name:plat" ]
 }
 
+# Three groups, then new/tidy/toggle-auto, then the separator: the first window
+# is index 7 now that the actions no longer sit at the bottom of the list.
 @test "menu focuses the window the picker returned" {
-  export WG_WALKER_PICK=5
+  export WG_WALKER_PICK=7
   wingroup menu
   [[ "$(dispatches)" == focuswindow* ]]
+}
+
+# --- the picker's "+ new group…", which used to be a dead entry ---
+
+@test "the picker's new-group entry creates the group from what was typed" {
+  export WG_WALKER_PICK=3
+  export WG_WALKER_INPUT="Niro 3D Print"
+  wingroup menu
+  run bash -c "jq -r '.groups[-1].name' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "niro-3d-print" ]
+  run bash -c "jq -r '.groups[-1].label' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "Niro 3D Print" ]
+}
+
+# A group with no projects files nothing, so the entry would still leave the
+# user with work to do. The window in front of them is the obvious first
+# project, and wanting a group for it is why they reached for the entry.
+@test "the new group picks up the focused window's project when nothing owns it" {
+  wg_patch_state '.groups[0].projects = ["everest-rs", "everest-api"]'
+  export WG_WALKER_PICK=3
+  export WG_WALKER_INPUT="Web"
+  wingroup menu
+  run bash -c "jq -r '.groups[-1].projects | join(\",\")' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "everest-web" ]
+  [[ "$(notifications)" == *"everest-web"* ]]
+}
+
+@test "the new group takes no project when another group already owns it" {
+  export WG_WALKER_PICK=3
+  export WG_WALKER_INPUT="Web"
+  wingroup menu
+  run bash -c "jq -r '.groups[-1].projects | length' '$WG_STATE_DIR/state.json'"
+  [ "$output" -eq 0 ]
+  [[ "$(notifications)" == *"already belongs to everest"* ]]
+}
+
+@test "the new group takes no project when the focused window is in none" {
+  export WG_FIXTURE_ACTIVEWINDOW="$WG_FIXTURES/activewindow-ungrouped.json"
+  export WG_WALKER_PICK=3
+  export WG_WALKER_INPUT="Scratch"
+  wingroup menu
+  run bash -c "jq -r '.groups[-1].name' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "scratch" ]
+  run bash -c "jq -r '.groups[-1].projects | length' '$WG_STATE_DIR/state.json'"
+  [ "$output" -eq 0 ]
+  [[ "$(notifications)" == *"not in a project"* ]]
+}
+
+@test "the new group is created with no projects when there is no focused window" {
+  export WG_FIXTURE_ACTIVEWINDOW="$WG_FIXTURES/activewindow-none.json"
+  export WG_WALKER_PICK=3
+  export WG_WALKER_INPUT="Scratch"
+  wingroup menu
+  run bash -c "jq -r '.groups[-1].projects | length' '$WG_STATE_DIR/state.json'"
+  [ "$output" -eq 0 ]
+}
+
+@test "cancelling the new-group prompt creates nothing and says nothing" {
+  export WG_WALKER_PICK=3
+  export WG_WALKER_INPUT=""
+  run wingroup menu
+  [ "$status" -eq 0 ]
+  run bash -c "jq -r '.groups | length' '$WG_STATE_DIR/state.json'"
+  [ "$output" -eq 3 ]
+  [ ! -s "$WG_NOTIFY_LOG" ]
+}
+
+@test "the new-group entry rejects a duplicate exactly as wingroup new does" {
+  export WG_WALKER_PICK=3
+  export WG_WALKER_INPUT="everest"
+  run wingroup menu
+  [ "$status" -ne 0 ]
+  run bash -c "jq -r '.groups | length' '$WG_STATE_DIR/state.json'"
+  [ "$output" -eq 3 ]
+}
+
+# --- failures from a keybind-launched picker have to be visible ---
+
+# stderr goes nowhere when SUPER+G is what started the process, so a failure
+# there used to look exactly like an entry that did nothing.
+@test "a failure with no terminal is sent to the notification daemon as well as stderr" {
+  run wingroup activate nosuch
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no such group: nosuch"* ]]
+  [[ "$(notifications)" == *"no such group: nosuch"* ]]
+}
+
+@test "the picker's own failures reach the notification daemon" {
+  export WG_WALKER_PICK=3
+  export WG_WALKER_INPUT="everest"
+  run wingroup menu
+  [ "$status" -ne 0 ]
+  [[ "$(notifications)" == *"group already exists: everest"* ]]
+}
+
+# At a terminal the message is already in front of the user; a desktop
+# notification on top of it is noise.
+@test "a failure at a terminal stays on stderr and notifies nobody" {
+  command -v script >/dev/null 2>&1 || skip "util-linux script is not installed"
+  run script -qec "'$WG_ROOT/bin/wingroup' activate nosuch" /dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no such group: nosuch"* ]]
+  [ ! -s "$WG_NOTIFY_LOG" ]
+}
+
+# --- pinning a group to a monitor ---
+
+@test "monitor pins a group to a monitor that exists" {
+  wingroup monitor everest DP-1
+  run bash -c "jq -r '.groups[0].monitor' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "DP-1" ]
+}
+
+@test "monitor - clears the pin" {
+  wingroup monitor everest DP-1
+  wingroup monitor everest -
+  run bash -c "jq -r '.groups[0].monitor' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "null" ]
+}
+
+@test "monitor refuses a monitor that does not exist, and lists the ones that do" {
+  run wingroup monitor everest HDMI-9
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"HDMI-9"* ]]
+  [[ "$output" == *"eDP-2, DP-1"* ]]
+  run bash -c "jq -r '.groups[0].monitor' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "null" ]
+}
+
+@test "monitor refuses an unknown group" {
+  run wingroup monitor nosuch DP-1
+  [ "$status" -ne 0 ]
+}
+
+# Hyprland binds a named workspace to whichever monitor was focused when it was
+# first created, and leaves it there. Focusing the pinned monitor is therefore
+# not enough on its own -- without the move, a group first opened on the laptop
+# stays on the laptop forever, and the pin does nothing at all.
+@test "activate on a pinned group focuses the monitor and drags the workspace over" {
+  wg_patch_state '.groups[0].monitor = "DP-1"'
+  wingroup activate everest
+  run dispatches
+  [ "${lines[0]}" = "focusmonitor DP-1" ]
+  [ "${lines[1]}" = "moveworkspacetomonitor name:everest DP-1" ]
+  [ "${lines[2]}" = "workspace name:everest" ]
+  [ "${#lines[@]}" -eq 3 ]
+}
+
+@test "activate does not move a workspace that is already on its pinned monitor" {
+  wg_patch_state '.groups[1].monitor = "DP-1"'
+  wingroup activate plat
+  run dispatches
+  [ "${lines[0]}" = "focusmonitor DP-1" ]
+  [ "${lines[1]}" = "workspace name:plat" ]
+  [ "${#lines[@]}" -eq 2 ]
+  run bash -c "grep -c moveworkspacetomonitor '$WG_DISPATCH_LOG' || true"
+  [ "$output" -eq 0 ]
+}
+
+# A workspace that has never existed has no monitor to be moved off, and gets
+# created on the monitor that was just focused.
+@test "activate on a pinned group whose workspace does not exist yet only focuses and switches" {
+  wg_patch_state '.groups[2].monitor = "DP-1"'
+  wingroup activate drivora
+  run dispatches
+  [ "${lines[0]}" = "focusmonitor DP-1" ]
+  [ "${lines[1]}" = "workspace name:drivora" ]
+  [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "activate on an unpinned group touches no monitor, even beside a pinned one" {
+  wg_patch_state '.groups[1].monitor = "DP-1"'
+  wingroup activate everest
+  [ "$(dispatches)" = "workspace name:everest" ]
 }
 
 @test "an unknown subcommand exits non-zero with usage" {

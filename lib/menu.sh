@@ -34,17 +34,36 @@ wg_menu_build() {
     esac
   done <<<"$table"
 
-  # Name and label together, NUL-delimited, in one jq: a label is free text and
-  # could hold a tab or a newline.
-  local name label
-  while IFS= read -r -d '' name && IFS= read -r -d '' label; do
+  # Groups first: switching to one is what the picker gets opened for.
+  #
+  # Name, label and pinned monitor together, NUL-delimited, in one jq: a label
+  # is free text and could hold a tab or a newline.
+  local name label monitor entry
+  while IFS= read -r -d '' name && IFS= read -r -d '' label && IFS= read -r -d '' monitor; do
     [[ -n $name ]] || continue
-    printf 'group:%s\t▸ %-18s %d windows · %d idle · %d busy\n' \
-      "$name" "$label" "${wins[g:$name]:-0}" "${idles[g:$name]:-0}" "${busies[g:$name]:-0}"
+    entry="$(printf '▸ %-18s %d windows · %d idle · %d busy' \
+      "$label" "${wins[g:$name]:-0}" "${idles[g:$name]:-0}" "${busies[g:$name]:-0}")"
+    # A group pinned to a monitor always opens there; say which, so the pin is
+    # visible somewhere other than state.json.
+    if [[ -n $monitor ]]; then
+      entry+=" · on $monitor"
+    fi
+    printf 'group:%s\t%s\n' "$name" "$entry"
   done < <(jq -j '.groups[]?
     | (.name | tostring) as $n
-    | $n, "\u0000", (if (.label // "") == "" then $n else (.label | tostring) end), "\u0000"' \
+    | $n, "\u0000",
+      (if (.label // "") == "" then $n else (.label | tostring) end), "\u0000",
+      (if (.monitor // "") == "" then "" else (.monitor | tostring) end), "\u0000"' \
     <<<"$state")
+
+  # Then the three actions, above the window list rather than below it. With
+  # fifteen windows open they used to land some twenty rows down -- far enough
+  # that "+ new group…" read as something the picker did not have.
+  local auto
+  auto="$(jq -r 'if .auto then "on" else "off" end' <<<"$state")"
+  printf 'new\t%s\n' "+ new group…"
+  printf 'tidy\t%s\n' "⟳ tidy — file every window by its project"
+  printf 'toggle-auto\t%s\n' "⏻ auto-assign: $auto"
 
   printf 'noop\t%s\n' "──────────────────────────────"
 
@@ -57,12 +76,6 @@ wg_menu_build() {
     where="${WG_ROW[5]:-ungrouped}"
     printf 'window:%s\t  %s %-44s %s\n' "${WG_ROW[1]}" "$glyph" "$shown" "$where"
   done <<<"$table"
-
-  local auto
-  auto="$(jq -r 'if .auto then "on" else "off" end' <<<"$state")"
-  printf 'new\t%s\n' "+ new group…"
-  printf 'tidy\t%s\n' "⟳ tidy — file every window by its project"
-  printf 'toggle-auto\t%s\n' "⏻ auto-assign: $auto"
 }
 
 wg_group_menu_build() {
@@ -76,6 +89,24 @@ wg_group_menu_build() {
   printf 'new\t%s\n' "+ new group…"
 }
 
+# The command that puts walker on the screen, left in WG_PICKER.
+#
+# Omarchy's own launcher starts elephant and the walker service if they are not
+# up yet -- without them the first walker of the session is slow, or does not
+# come up at all -- and applies the house geometry. Use it when it is there, and
+# when nobody has named a specific walker binary: $WG_WALKER pointing anywhere
+# else is a deliberate override (the tests do exactly that), and it has to win.
+# Off Omarchy there is no launcher, so pass the same geometry to walker directly.
+declare -ga WG_PICKER=()
+
+wg_menu_picker() {
+  if [[ $WG_WALKER == walker && -x $WG_WALKER_LAUNCHER ]]; then
+    WG_PICKER=("$WG_WALKER_LAUNCHER")
+  else
+    WG_PICKER=("$WG_WALKER" --width 644 --maxheight 300 --minheight 300)
+  fi
+}
+
 # Reads action<TAB>display on stdin, shows walker, prints the chosen action.
 wg_menu_run() {
   local prompt="${1:-}" index
@@ -87,23 +118,26 @@ wg_menu_run() {
     displays+=("$display")
   done
 
-  # Omarchy's own launcher starts elephant and the walker service if they are
-  # not up yet -- without them the first walker of the session is slow, or does
-  # not come up at all -- and applies the house geometry. Use it when it is
-  # there, and when nobody has named a specific walker binary: $WG_WALKER
-  # pointing anywhere else is a deliberate override (the tests do exactly that),
-  # and it has to win. Off Omarchy there is no launcher, so pass the same
-  # geometry to walker directly.
-  local -a picker=()
-  if [[ $WG_WALKER == walker && -x $WG_WALKER_LAUNCHER ]]; then
-    picker=("$WG_WALKER_LAUNCHER")
-  else
-    picker=("$WG_WALKER" --width 644 --maxheight 300 --minheight 300)
-  fi
-
-  index="$(printf '%s\n' "${displays[@]}" | "${picker[@]}" -d -i -p "$prompt" || true)"
+  wg_menu_picker
+  index="$(printf '%s\n' "${displays[@]}" | "${WG_PICKER[@]}" -d -i -p "$prompt" || true)"
   [[ $index =~ ^[0-9]+$ ]] || return 0
   (( index < ${#actions[@]} )) || return 0
   [[ ${actions[index]} == noop ]] && return 0
   printf '%s\n' "${actions[index]}"
+}
+
+# Asks for one line of text and prints it, trimmed.
+#
+# walker's -I/--inputonly is dmenu mode showing nothing but the input box, so
+# there are no entries to feed it and stdin stays shut. Cancelling and typing
+# nothing both print nothing: the caller cannot tell those apart, and has no
+# reason to.
+wg_menu_input() {
+  local prompt="${1:-}" text
+  wg_menu_picker
+  text="$("${WG_PICKER[@]}" -d -I -p "$prompt" </dev/null || true)"
+  text="${text%%$'\n'*}"
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  printf '%s\n' "$text"
 }

@@ -54,9 +54,75 @@ teardown() { wg_teardown_tmp; }
   [[ "$display" == *"ungrouped"* ]]
 }
 
-@test "the menu ends with the three action entries" {
-  actions="$(wg_menu_build | tail -n3 | cut -f1 | tr '\n' ' ')"
-  [ "$actions" = "new tidy toggle-auto " ]
+# Order matters more than it looks. The three actions used to sit below every
+# window, which on a working desktop is some twenty rows down: far enough that
+# "+ new group…" read as an entry the picker did not have. Groups stay first --
+# switching to one is what SUPER+G is for -- and the actions come next.
+@test "the picker lists groups, then the three actions, then the windows" {
+  actions="$(wg_menu_build | cut -f1 | sed 's/:.*//' | tr '\n' ' ')"
+  [ "$actions" = "group group group new tidy toggle-auto noop window window window window window window window " ]
+}
+
+# The index walker returns is a position in this list, so the layout is a
+# contract, not a presentation detail.
+@test "the action entries follow the last group, at indices 3, 4 and 5" {
+  [ "$(wg_menu_build | sed -n '4p' | cut -f1)" = "new" ]
+  [ "$(wg_menu_build | sed -n '5p' | cut -f1)" = "tidy" ]
+  [ "$(wg_menu_build | sed -n '6p' | cut -f1)" = "toggle-auto" ]
+  [ "$(wg_menu_build | sed -n '7p' | cut -f1)" = "noop" ]
+  [ "$(wg_menu_build | sed -n '8p' | cut -f1)" = "window:0xaaa1" ]
+}
+
+# state.json has carried a per-group monitor since the first version and
+# nothing ever read it; a pin nobody can see is a pin nobody trusts.
+@test "a group pinned to a monitor says so in its entry" {
+  wg_patch_state '.groups[1].monitor = "DP-1"'
+  display="$(wg_menu_build | grep '^group:plat' | cut -f2)"
+  [[ "$display" == *"on DP-1"* ]]
+}
+
+@test "a group with no pin says nothing about monitors" {
+  display="$(wg_menu_build | grep '^group:plat' | cut -f2)"
+  [[ "$display" != *" on "* ]]
+}
+
+@test "wg_menu_input returns what was typed" {
+  export WG_WALKER_INPUT="Niro 3D Print"
+  [ "$(wg_menu_input 'New group')" = "Niro 3D Print" ]
+}
+
+@test "wg_menu_input returns nothing when the prompt is cancelled" {
+  export WG_WALKER_INPUT=""
+  [ "$(wg_menu_input 'New group')" = "" ]
+}
+
+@test "wg_menu_input trims what was typed, so spaces alone are nothing" {
+  export WG_WALKER_INPUT="   "
+  [ "$(wg_menu_input 'New group')" = "" ]
+  export WG_WALKER_INPUT="  plat  "
+  [ "$(wg_menu_input 'New group')" = "plat" ]
+}
+
+# Input-only mode is still dmenu mode, and it gets the same sizing and the same
+# launcher treatment as the picker it is opened from.
+@test "wg_menu_input asks walker for input-only dmenu mode, with the picker geometry" {
+  export WG_WALKER_ARGS_LOG="$WG_TMP/walker-args"
+  export WG_WALKER_INPUT="x"
+  wg_menu_input 'New group' >/dev/null
+  run cat "$WG_WALKER_ARGS_LOG"
+  [ "$output" = "--width 644 --maxheight 300 --minheight 300 -d -I -p New group" ]
+}
+
+@test "on Omarchy the input prompt goes through omarchy-launch-walker too" {
+  export WG_WALKER_ARGS_LOG="$WG_TMP/walker-args"
+  export WG_WALKER_LAUNCHER="$WG_ROOT/test/bin/walker-launcher-stub"
+  export WG_WALKER_INPUT="x"
+  ln -sf "$WG_ROOT/test/bin/walker-stub" "$WG_TMP/walker"
+  export PATH="$WG_TMP:$PATH"
+  export WG_WALKER=walker
+  [ "$(wg_menu_input 'New group')" = "x" ]
+  run grep -c '^launcher -d -I -p New group$' "$WG_WALKER_ARGS_LOG"
+  [ "$output" -eq 1 ]
 }
 
 @test "the auto entry reflects the current setting" {

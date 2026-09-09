@@ -18,6 +18,8 @@ if [[ ${1:-} == -j ]]; then
     clients) cat "$WG_FIXTURES/clients.json" ;;
     activeworkspace) cat "${WG_FIXTURE_ACTIVEWS:-$WG_FIXTURES/activeworkspace.json}" ;;
     monitors) cat "${WG_FIXTURE_MONITORS:-$WG_FIXTURES/monitors.json}" ;;
+    workspaces) cat "${WG_FIXTURE_WORKSPACES:-$WG_FIXTURES/workspaces.json}" ;;
+    activewindow) cat "${WG_FIXTURE_ACTIVEWINDOW:-$WG_FIXTURES/activewindow.json}" ;;
     *) printf 'hyprctl-stub: unhandled query %s\n' "${2:-}" >&2; exit 1 ;;
   esac
   exit 0

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Test-only stand-in for notify-send: records the notification instead of
+# putting one on the user's screen.
+printf '%s\t%s\n' "${1:-}" "${2:-}" >>"$WG_NOTIFY_LOG"

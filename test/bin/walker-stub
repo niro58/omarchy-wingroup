@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 # Test-only stand-in for walker. Records the arguments it was given and the
-# entries it was handed, then prints the index $WG_WALKER_PICK selects.
+# entries it was handed, then answers the way the mode it was asked for does:
+# dmenu-with-index (-i) prints the index $WG_WALKER_PICK selects, input-only
+# (-I) prints the text $WG_WALKER_INPUT stands in for someone typing.
 [[ -z ${WG_WALKER_ARGS_LOG:-} ]] || printf '%s\n' "$*" >>"$WG_WALKER_ARGS_LOG"
 if [[ -n ${WG_WALKER_STDIN_LOG:-} ]]; then
   cat >>"$WG_WALKER_STDIN_LOG"
 else
   cat >/dev/null
 fi
+for arg in "$@"; do
+  if [[ $arg == -I || $arg == --inputonly ]]; then
+    printf '%s\n' "${WG_WALKER_INPUT:-}"
+    exit 0
+  fi
+done
 printf '%s\n' "${WG_WALKER_PICK:-}"

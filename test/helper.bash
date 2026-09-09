@@ -23,6 +23,11 @@ wg_setup_tmp() {
   export WG_REFRESH_CMD="$WG_ROOT/test/bin/refresh-stub"
   export WG_REFRESH_LOG="$WG_TMP/refresh.log"
   : >"$WG_REFRESH_LOG"
+  # Never the real notify-send: a failing test must not push a notification
+  # onto the user's actual desktop.
+  export WG_NOTIFY_CMD="$WG_ROOT/test/bin/notify-stub"
+  export WG_NOTIFY_LOG="$WG_TMP/notify.log"
+  : >"$WG_NOTIFY_LOG"
 }
 
 wg_teardown_tmp() {
@@ -45,6 +50,10 @@ wg_stub_cwd() {
 
 dispatches() {
   cat "$WG_DISPATCH_LOG"
+}
+
+notifications() {
+  cat "$WG_NOTIFY_LOG"
 }
 
 # Puts a counting `jq` ahead of the real one on PATH, so a test can assert how
