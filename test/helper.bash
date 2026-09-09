@@ -12,6 +12,10 @@ export WG_LIB_DIR="$WG_ROOT/lib"
 export WG_WALKER_LAUNCHER="$WG_ROOT/test/bin/no-such-launcher"
 
 wg_setup_tmp() {
+  # The bar tells a custom module which monitor it is drawn on through this.
+  # Inherited from a real desktop session it would make the class tests depend
+  # on which screen the terminal running them happens to be on.
+  unset WAYBAR_OUTPUT_NAME
   WG_TMP="$(mktemp -d)"
   export WG_TMP
   # The picker's single-instance lock lives here; keep it out of the real one.

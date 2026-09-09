@@ -72,21 +72,32 @@ main() {
   # activeworkspace answers for the focused monitor only, which on a
   # multi-monitor desktop is a lie by omission: a group can be on screen, in
   # full view, on the monitor that does not have focus. Ask every monitor.
+  #
+  # And "active" is a per-screen fact, not a global one. Waybar exports
+  # WAYBAR_OUTPUT_NAME to a custom module's script, naming the monitor the bar
+  # running this copy of the module is drawn on; with it, the group active on
+  # the other screen is drawn as visible here instead of active on both bars.
+  # Without it -- and it has not been confirmed that every waybar build and
+  # config exports it -- the reference monitor is the focused one, which is
+  # exactly the behaviour this module has always had.
+  #
+  # Two lines out of one jq: the reference monitor's active workspace, then how
+  # many *other* monitors have this group's workspace active.
   local -a monitor_ws=()
-  mapfile -t monitor_ws < <(wg_hypr_query monitors | jq -r '
-    [ first(.[] | select(.focused == true) | .activeWorkspace.name) // "" ]
-    + [ .[] | .activeWorkspace.name // empty ] | .[]')
-  local focused="${monitor_ws[0]:-}"
-
-  local onscreen=0 i
-  for (( i = 1; i < ${#monitor_ws[@]}; i++ )); do
-    if [[ ${monitor_ws[i]} == "$name" ]]; then onscreen=1; fi
-  done
+  mapfile -t monitor_ws < <(wg_hypr_query monitors | jq -r \
+    --arg out "${WAYBAR_OUTPUT_NAME:-}" --arg n "$name" '
+      (if $out == "" then first(.[] | select(.focused == true))
+       else first(.[] | select(.name == $out)) end // null) as $self
+      | ($self.activeWorkspace.name // ""),
+        ([ .[]
+           | select(.name != ($self.name // ""))
+           | select(.activeWorkspace.name == $n) ] | length)')
+  local here="${monitor_ws[0]:-}" elsewhere="${monitor_ws[1]:-0}"
 
   local class=""
-  if [[ $focused == "$name" ]]; then
+  if [[ $here == "$name" ]]; then
     class="active"
-  elif (( onscreen )); then
+  elif (( elsewhere > 0 )); then
     class="visible"
   elif (( busy > 0 )); then
     class="busy"

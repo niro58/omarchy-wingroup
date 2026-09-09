@@ -43,6 +43,16 @@ Reading the example above:
   does not have focus, to full opacity when one of its sessions is busy, and
   to full opacity **and bold** when its workspace is the focused one. Being
   looked at beats being on screen, which beats being busy.
+- **Per-screen highlighting** — with more than one monitor, "active" is a
+  fact about *this* screen: the bar on the external monitor draws the group
+  filling that monitor as active, while the laptop's bar draws the same group
+  as merely visible. This depends on waybar exporting `WAYBAR_OUTPUT_NAME` to
+  the module's script, which names the monitor the bar is drawn on. If your
+  waybar does not export it, the module falls back to what it has always
+  done — highlighting relative to the globally focused monitor, so every bar
+  marks the same group active. Nothing breaks either way; only which bar
+  bolds which button changes.
+
 Left-click a button to switch to that group's workspace. Right-click any
 button to open the picker menu (`wingroup menu`).
 

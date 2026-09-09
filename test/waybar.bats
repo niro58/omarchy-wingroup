@@ -67,6 +67,52 @@ teardown() { wg_teardown_tmp; }
   [ "$(jq -r '.class' <<<"$output")" = "" ]
 }
 
+# The bug: both bars asked which monitor had *focus*, so a group active on the
+# external screen was drawn as active on the laptop bar too. Waybar names the
+# monitor a bar is drawn on in WAYBAR_OUTPUT_NAME.
+@test "with WAYBAR_OUTPUT_NAME a group is active only on its own screen" {
+  cp "$WG_FIXTURES/state-template.json" "$WG_STATE_DIR/state.json"
+  export WAYBAR_OUTPUT_NAME=DP-1
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$(jq -r '.class' <<<"$output")" = "active" ]
+}
+
+@test "with WAYBAR_OUTPUT_NAME the other screen's bar calls it visible, not active" {
+  cp "$WG_FIXTURES/state-template.json" "$WG_STATE_DIR/state.json"
+  export WAYBAR_OUTPUT_NAME=eDP-2
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$(jq -r '.class' <<<"$output")" = "visible" ]
+}
+
+@test "with WAYBAR_OUTPUT_NAME a group on no screen at all still has no class" {
+  export WAYBAR_OUTPUT_NAME=eDP-2
+  run "$WG_ROOT/bin/wingroup-waybar" 2
+  [ "$(jq -r '.class' <<<"$output")" = "" ]
+}
+
+# It has not been confirmed that every waybar build and config exports the
+# variable, so the path without it has to stay exactly as it was: the reference
+# monitor is the focused one, wherever this copy of the module is drawn.
+@test "without WAYBAR_OUTPUT_NAME the focused monitor still decides" {
+  cp "$WG_FIXTURES/state-template.json" "$WG_STATE_DIR/state.json"
+  unset WAYBAR_OUTPUT_NAME
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$(jq -r '.class' <<<"$output")" = "active" ]
+  export WG_FIXTURE_MONITORS="$WG_FIXTURES/monitors-laptop-focused.json"
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$(jq -r '.class' <<<"$output")" = "visible" ]
+}
+
+# A bar on an output the compositor does not list -- a monitor unplugged between
+# the two questions -- must still say something sensible rather than nothing.
+@test "an unknown WAYBAR_OUTPUT_NAME falls back to on-screen-somewhere" {
+  cp "$WG_FIXTURES/state-template.json" "$WG_STATE_DIR/state.json"
+  export WAYBAR_OUTPUT_NAME=HDMI-A-9
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.class' <<<"$output")" = "visible" ]
+}
+
 @test "on a single monitor the focused group is still active" {
   cp "$WG_FIXTURES/state-template.json" "$WG_STATE_DIR/state.json"
   export WG_FIXTURE_MONITORS="$WG_FIXTURES/monitors-single.json"
