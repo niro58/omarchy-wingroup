@@ -110,7 +110,7 @@ teardown() { wg_teardown_tmp; }
 # switching to one is what SUPER+G is for -- and the actions come next.
 @test "the picker lists groups, then the actions, then the windows" {
   actions="$(wg_menu_build | cut -f1 | sed 's/:.*//' | tr '\n' ' ')"
-  [ "$actions" = "group group group new delete tidy toggle-auto noop window window window window window window window " ]
+  [ "$actions" = "group group group new delete tidy toggle-auto noop window window window window window window window noop " ]
 }
 
 # The index walker returns is a position in this list, so the layout is a
@@ -122,6 +122,70 @@ teardown() { wg_teardown_tmp; }
   [ "$(wg_menu_build | sed -n '7p' | cut -f1)" = "toggle-auto" ]
   [ "$(wg_menu_build | sed -n '8p' | cut -f1)" = "noop" ]
   [ "$(wg_menu_build | sed -n '9p' | cut -f1)" = "window:0xaaa1" ]
+}
+
+# The question that asked for this row: every group entry says how much is
+# waiting in that group, and nothing said how much was running at all.
+@test "the last entry totals the Claude sessions across the whole desktop" {
+  last="$(wg_menu_build | tail -n1)"
+  [ "$(cut -f1 <<<"$last")" = "noop" ]
+  [ "$(cut -f2 <<<"$last")" = "── 5 Claude sessions · 2 idle · 3 busy" ]
+}
+
+# Adding it at the bottom is what keeps the layout above it a contract: walker
+# hands back a position in this list.
+@test "the footer sits after the last window and moves no entry above it" {
+  entries="$(wg_menu_build)"
+  [ "$(wc -l <<<"$entries")" -eq 16 ]
+  [ "$(sed -n '15p' <<<"$entries" | cut -f1)" = "window:0xaaa7" ]
+  [ "$(sed -n '16p' <<<"$entries" | cut -f1)" = "noop" ]
+}
+
+# A plain shell and a file manager are windows, not sessions. Counting them
+# would answer a question nobody asked with a bigger number.
+@test "the footer leaves a window with no Claude session out of the count" {
+  cat >"$WG_TMP/clients-plain.json" <<'EOF'
+[
+  {"address":"0xbbb1","pid":1001,"class":"Alacritty","title":"✳ ready for review","floating":false,"workspace":{"id":1,"name":"1"}},
+  {"address":"0xbbb2","pid":1006,"class":"Alacritty","title":"dev@host:~","floating":false,"workspace":{"id":1,"name":"1"}},
+  {"address":"0xbbb3","pid":1007,"class":"org.gnome.Nautilus","title":"Home","floating":true,"workspace":{"id":1,"name":"1"}}
+]
+EOF
+  export WG_FIXTURE_CLIENTS="$WG_TMP/clients-plain.json"
+  [ "$(wg_menu_build | grep -c '^window:')" -eq 3 ]
+  [ "$(wg_menu_build | tail -n1 | cut -f2)" = "── 1 Claude sessions · 1 idle · 0 busy" ]
+}
+
+@test "the footer says zero when no window is a Claude session" {
+  cat >"$WG_TMP/clients-none.json" <<'EOF'
+[
+  {"address":"0xbbb2","pid":1006,"class":"Alacritty","title":"dev@host:~","floating":false,"workspace":{"id":1,"name":"1"}}
+]
+EOF
+  export WG_FIXTURE_CLIENTS="$WG_TMP/clients-none.json"
+  [ "$(wg_menu_build | tail -n1 | cut -f2)" = "── 0 Claude sessions · 0 idle · 0 busy" ]
+}
+
+# An empty desktop is the one case where the table is a single blank line, and
+# a count taken from it must still be a number.
+@test "the footer counts zero when there are no windows at all" {
+  printf '[]\n' >"$WG_TMP/clients-empty.json"
+  export WG_FIXTURE_CLIENTS="$WG_TMP/clients-empty.json"
+  windows="$(wg_menu_build | grep -c '^window:' || true)"
+  [ "$windows" -eq 0 ]
+  [ "$(wg_menu_build | tail -n1 | cut -f2)" = "── 0 Claude sessions · 0 idle · 0 busy" ]
+}
+
+# Unselectable, like the separator: it is something to read, not something to do.
+@test "wg_menu_run returns nothing when the footer is chosen" {
+  entries="$(wg_menu_build)"
+  last=$(( $(wc -l <<<"$entries") - 1 ))
+  [[ "$(sed -n "$(( last + 1 ))p" <<<"$entries")" == *"Claude sessions"* ]]
+  # The row above it is selectable, so the index really is in range.
+  export WG_WALKER_PICK=$(( last - 1 ))
+  [ "$(wg_menu_run 'Groups' <<<"$entries")" = "window:0xaaa7" ]
+  export WG_WALKER_PICK=$last
+  [ "$(wg_menu_run 'Groups' <<<"$entries")" = "" ]
 }
 
 # A group can be made from the picker; until now it could only be unmade from a

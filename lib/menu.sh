@@ -47,17 +47,27 @@ wg_menu_build() {
   # awk and two wc processes each, on top of a jq for the label -- five
   # processes per group, for numbers one pass already has. Keys are prefixed
   # because a bare @ or * subscript means something else to bash.
+  # The same pass also totals the whole desktop for the footer at the bottom.
+  # Those totals count a window in no group at all, so they are taken before an
+  # ungrouped row is skipped -- a session waiting for you is a session waiting
+  # for you whether or not a group has claimed its project.
   local -A wins=() idles=() busies=()
-  local key
+  local key idle_total=0 busy_total=0
   while IFS= read -r line; do
     [[ -n $line ]] || continue
     wg_row_split "$line"
-    [[ -n ${WG_ROW[5]} ]] || continue
-    key="g:${WG_ROW[5]}"
-    wins[$key]=$(( ${wins[$key]:-0} + 1 ))
+    key=""
+    [[ -z ${WG_ROW[5]} ]] || key="g:${WG_ROW[5]}"
+    [[ -z $key ]] || wins[$key]=$(( ${wins[$key]:-0} + 1 ))
     case ${WG_ROW[6]} in
-      idle) idles[$key]=$(( ${idles[$key]:-0} + 1 )) ;;
-      busy) busies[$key]=$(( ${busies[$key]:-0} + 1 )) ;;
+      idle)
+        idle_total=$(( idle_total + 1 ))
+        [[ -z $key ]] || idles[$key]=$(( ${idles[$key]:-0} + 1 ))
+        ;;
+      busy)
+        busy_total=$(( busy_total + 1 ))
+        [[ -z $key ]] || busies[$key]=$(( ${busies[$key]:-0} + 1 ))
+        ;;
     esac
   done <<<"$table"
 
@@ -109,6 +119,20 @@ wg_menu_build() {
     wg_menu_where "${WG_ROW[5]}" "${WG_ROW[8]}"
     printf 'window:%s\t  %s %-44s %s\n' "${WG_ROW[1]}" "$glyph" "$shown" "$WG_WHERE"
   done <<<"$table"
+
+  # A footer, not an action. The group rows each answer "how much is waiting in
+  # here"; with a dozen groups and thirty windows nothing answers "how much is
+  # running at all", and that is the number the picker gets opened to think
+  # about. It is deliberately only the Claude sessions -- idle plus busy -- and
+  # not the plain terminals and browsers, which are already one visible row
+  # each and would only pad the number that was asked for.
+  #
+  # Last, so no existing entry's index moves: walker hands back a position in
+  # this list. noop, so landing on it does nothing -- wg_menu_run declines to
+  # return that action. The leading rule ties it to the separator above the
+  # window rows and keeps it from reading as another thing to pick.
+  printf 'noop\t── %d Claude sessions · %d idle · %d busy\n' \
+    "$(( idle_total + busy_total ))" "$idle_total" "$busy_total"
 }
 
 # Every group and nothing else: the chooser for picking one to act on.

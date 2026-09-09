@@ -225,8 +225,8 @@ in it".
 
 ## The picker
 
-`SUPER+G` opens walker with the groups first, the actions next, and every open
-window below a separator:
+`SUPER+G` opens walker with the groups first, the actions next, every open
+window below a separator, and a total on the last line:
 
 ```
 ▸ alpha              2 windows · 1 idle · 1 busy · on DP-1
@@ -240,12 +240,20 @@ window below a separator:
   ◐ running the test suite                       alpha:vat-rounding
   ✳ migration written                            beta
   · user@host:~                                  ungrouped
+── 3 Claude sessions · 2 idle · 1 busy
 ```
 
 Picking a group switches to its workspace. Picking a window focuses it. The
 group rows show the monitor a group is pinned to, if it has one. The window rows
 show each window's status glyph — `✳` idle, `◐` busy, `·` plain — its title with
 the glyph stripped, and the group it resolves to, or `ungrouped`.
+
+The last line is a footer rather than an entry: it cannot be selected, and
+picking it does nothing. It counts the Claude sessions across the whole desktop
+— every window that is idle or busy, in a group or not — and splits them the
+way a group row does. Plain windows are left out of it deliberately: they are
+one visible row each already, and the question the footer answers is how many
+sessions are running, not how many windows are open.
 
 A window whose shell is sitting in a Claude worktree —
 `~/projects/<project>/.claude/worktrees/<branch>` — shows that worktree's name
