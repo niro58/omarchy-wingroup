@@ -4,7 +4,7 @@
 WG_STATE_FILE="$WG_STATE_DIR/state.json"
 
 wg_state_default() {
-  printf '%s\n' '{"auto":true,"catchall":null,"groups":[],"overrides":{}}'
+  printf '%s\n' '{"auto":true,"follow":true,"catchall":null,"groups":[],"overrides":{}}'
 }
 
 wg_state_read() {

@@ -244,7 +244,7 @@ EOF
 seed_state() {
   mkdir -p "$WG_STATE_DIR"
   [[ -f "$WG_STATE_DIR/state.json" ]] && return 0
-  printf '%s\n' '{"auto":true,"catchall":null,"groups":[],"overrides":{}}' >"$WG_STATE_DIR/state.json"
+  printf '%s\n' '{"auto":true,"follow":true,"catchall":null,"groups":[],"overrides":{}}' >"$WG_STATE_DIR/state.json"
 }
 
 link_binaries

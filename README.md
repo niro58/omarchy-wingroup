@@ -43,7 +43,6 @@ Reading the example above:
   does not have focus, to full opacity when one of its sessions is busy, and
   to full opacity **and bold** when its workspace is the focused one. Being
   looked at beats being on screen, which beats being busy.
-
 Left-click a button to switch to that group's workspace. Right-click any
 button to open the picker menu (`wingroup menu`).
 
@@ -209,6 +208,7 @@ Lives at `~/.local/state/omarchy/wingroup/state.json`. Shape:
 ```json
 {
   "auto": true,
+  "follow": true,
   "catchall": null,
   "groups": [
     {
@@ -226,6 +226,10 @@ Lives at `~/.local/state/omarchy/wingroup/state.json`. Shape:
 
 - **`auto`** — whether new windows get filed automatically on open
   (`wingroup toggle-auto`).
+- **`follow`** — whether the daemon takes you *to* a window it files, rather
+  than filing it behind your back. `true` by default; see **Following a
+  window you just opened** below. A state file written before this setting
+  existed has no `follow` key, and behaves as `true`.
 - **`catchall`** — an optional group name that windows with no resolvable
   project are filed into instead of being left alone. `null` by default.
 - **`groups[]`** — `name` is the Hyprland workspace name (slugified,
@@ -266,6 +270,39 @@ retrying briefly while the shell finishes spawning). `wingroup tidy` runs
 the same resolution over every currently open window in one pass, useful
 after moving things around by hand or when timing didn't work out.
 
+## Following a window you just opened
+
+You open a terminal in `~/projects/everest-web`; it belongs on the `everest`
+workspace; you are on workspace 2. Filing it silently would leave you on
+workspace 2 looking at a terminal that never appeared — you asked for that
+window, so `wingroup` puts you on it. The daemon does this with a single
+`movetoworkspace` dispatch, which moves the window and switches to its
+workspace together.
+
+Bulk filing is the opposite case and stays silent, because being dragged
+across the desktop once per window is not something a dozen housekeeping
+moves should do to you:
+
+- `wingroup tidy` (and the filing `wingroup new` does for the windows its new
+  group claims) never follows — it is a batch by definition.
+- `wingroup-restore` respawns your login terminals. While it runs it creates
+  `$XDG_RUNTIME_DIR/wingroup-restoring`, which tells the daemon to keep
+  filing silently, and removes it when it finishes — including when the
+  restore script fails or is killed, so a bad restore cannot leave following
+  switched off for the session. Override the path with `WG_RESTORE_FLAG` if
+  you need to (both the daemon and `wingroup-restore` read it).
+- For the first **10 seconds** after the daemon starts, nothing is followed,
+  so a login burst is quiet even when something other than
+  `wingroup-restore` spawned it. Set `WG_FOLLOW_GRACE` (whole seconds, in the
+  daemon's environment) to change it; `0` disables the grace period.
+- Setting `"follow": false` in `state.json` turns following off entirely and
+  restores the old always-silent behaviour.
+
+Following changes *how* a window is moved, never *whether* it is. A floating
+window is still never touched, a window already on its group's workspace is
+still left alone, and `"auto": false` still switches automatic assignment off
+altogether.
+
 ## Startup integration with `restore-claude.sh`
 
 If you use a `~/restore-claude.sh` script that respawns the Claude Code
@@ -296,8 +333,9 @@ exec-once = wingroup-restore
 # <<< wingroup
 ```
 
-`wingroup-restore` runs your restore script and then runs `wingroup tidy
---yes`. The daemon already tries to file each terminal as it opens, but
+`wingroup-restore` runs your restore script — with following suppressed for
+the duration, see **Following a window you just opened** — and then runs
+`wingroup tidy --yes`. The daemon already tries to file each terminal as it opens, but
 that's a race against the shell spawning — `wingroup-restore`'s `tidy` pass
 afterwards makes the outcome deterministic regardless of who wins.
 

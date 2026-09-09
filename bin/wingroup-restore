@@ -6,11 +6,22 @@ set -euo pipefail
 
 : "${WG_RESTORE_SCRIPT:=$HOME/restore-claude.sh}"
 : "${WG_RESTORE_SETTLE:=5}"
+# The daemon follows a window it files onto its group's workspace, so that a
+# terminal the user just opened is a terminal the user is looking at. A login
+# restore spawns a dozen of them at once, and following each in turn would drag
+# the desktop around while the user watches. This file is how the daemon is told
+# to keep quiet; the trap clears it however this script ends, so a crashed or
+# killed restore cannot leave following switched off for the session.
+: "${WG_RESTORE_FLAG:=${XDG_RUNTIME_DIR:-/tmp}/wingroup-restoring}"
 
 if [[ ! -x $WG_RESTORE_SCRIPT ]]; then
   printf 'wingroup-restore: no restore script at %s, nothing to do\n' "$WG_RESTORE_SCRIPT" >&2
   exit 0
 fi
+
+wg_restore_unflag() { rm -f "$WG_RESTORE_FLAG"; }
+trap wg_restore_unflag EXIT
+: >"$WG_RESTORE_FLAG"
 
 "$WG_RESTORE_SCRIPT" "$@"
 

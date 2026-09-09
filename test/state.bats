@@ -15,7 +15,17 @@ teardown() { wg_teardown_tmp; }
   [ "$(jq -r '.auto' <<<"$output")" = "true" ]
   [ "$(jq -r '.catchall' <<<"$output")" = "null" ]
   [ "$(jq '.groups | length' <<<"$output")" -eq 0 ]
+  [ "$(jq -r '.follow' <<<"$output")" = "true" ]
   [ -f "$WG_STATE_DIR/state.json" ]
+}
+
+# Following a window onto its group's workspace is what makes a terminal the
+# user just opened a terminal the user can see, so it is on unless they say
+# otherwise -- both in a fresh state file and in one recovered from corruption.
+@test "the default state follows new windows" {
+  run wg_state_read
+  [ "$(jq -r '.follow' <<<"$output")" = "true" ]
+  [ "$(jq -r '[keys_unsorted[]] | join(",")' <<<"$output")" = "auto,follow,catchall,groups,overrides" ]
 }
 
 @test "wg_state_read returns the seeded fixture" {
@@ -31,6 +41,7 @@ teardown() { wg_teardown_tmp; }
   run wg_state_read
   [ "$status" -eq 0 ]
   [ "$(jq '.groups | length' <<<"$output")" -eq 0 ]
+  [ "$(jq -r '.follow' <<<"$output")" = "true" ]
   [ -f "$WG_STATE_DIR/state.json.corrupt" ]
   [ "$(cat "$WG_STATE_DIR/state.json.corrupt")" = "not json at all" ]
 }

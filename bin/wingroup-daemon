@@ -12,6 +12,14 @@ source "$WG_LIB_DIR/resolve.sh"
 : "${WG_RESOLVE_RETRIES:=10}"
 : "${WG_RESOLVE_DELAY:=0.1}"
 : "${WG_REFRESH_DEBOUNCE_MS:=150}"
+# Seconds after the daemon starts during which a filed window is moved silently.
+# Login opens a dozen terminals at once; following each of them in turn would
+# throw the user around the desktop before they have touched anything.
+: "${WG_FOLLOW_GRACE:=10}"
+# wingroup-restore creates this file while it is respawning terminals, for the
+# same reason. It is a file rather than a signal because the two are separate
+# processes with no handle on each other.
+: "${WG_RESTORE_FLAG:=${XDG_RUNTIME_DIR:-/tmp}/wingroup-restoring}"
 
 declare -A WG_SEEN=()
 WG_LAST_REFRESH_MS=0
@@ -20,6 +28,11 @@ wg_now_ms() {
   local t="${EPOCHREALTIME/,/.}"
   printf '%s\n' "$(( ${t%.*} * 1000 + 10#${t#*.} / 1000 ))"
 }
+
+# The grace period is measured from when this process came up, which is here:
+# the daemon is started by Hyprland's autostart, in the same burst as the
+# terminals whose arrival the grace period is there to cover.
+WG_START_MS="$(wg_now_ms)"
 
 wg_refresh_bar() {
   if [[ -n ${WG_REFRESH_CMD:-} ]]; then
@@ -55,6 +68,22 @@ wg_daemon_resolve_group() {
   return 0
 }
 
+# A window the user has just opened themselves should be shown to them -- that
+# is the whole point of having asked for it. A window filed as part of a burst
+# should not: bulk moves are housekeeping, and yanking focus through a dozen of
+# them is how a deliberately opened terminal ends up somewhere the user never
+# sees. $1 is the already-read state document.
+wg_daemon_should_follow() {
+  local state="$1" now
+  # A state file written before `follow` existed has no such key, and its
+  # absence has to read as "on" -- the default -- not as "off".
+  [[ "$(jq -r '.follow' <<<"$state")" != "false" ]] || return 1
+  [[ ! -e $WG_RESTORE_FLAG ]] || return 1
+  now="$(wg_now_ms)"
+  (( now - WG_START_MS >= WG_FOLLOW_GRACE * 1000 )) || return 1
+  return 0
+}
+
 wg_daemon_open_window() {
   local address="$1" state row floating workspace group catchall
 
@@ -81,7 +110,13 @@ wg_daemon_open_window() {
   fi
 
   [[ $workspace == "$group" ]] && return 0
-  wg_hypr_dispatch movetoworkspacesilent "name:$group,address:$address"
+  # movetoworkspace moves the window and switches to the workspace in one
+  # dispatch; movetoworkspacesilent moves it and leaves the user behind.
+  if wg_daemon_should_follow "$state"; then
+    wg_hypr_dispatch movetoworkspace "name:$group,address:$address"
+  else
+    wg_hypr_dispatch movetoworkspacesilent "name:$group,address:$address"
+  fi
   wg_daemon_request_refresh
 }
 
