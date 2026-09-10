@@ -40,6 +40,21 @@ recorded() {
   jq -r --arg s "$WG_SCOPE" --arg f "$1" '.sessions[$s][$f] // ""' <<<"$(wg_sessions_read)"
 }
 
+# Gives fake process $1 a parent of $2, which is what the ancestry walk reads.
+# Only here: nothing else in the suite cares who a fake process's parent is.
+wg_fake_ppid() {
+  mkdir -p "$WG_PROC_DIR/$1"
+  printf 'Name:\tx\nPPid:\t%s\n' "$2" >"$WG_PROC_DIR/$1/status"
+}
+
+# Names fake process $1, without giving it a scope or a cwd. wg_fake_proc would
+# do all three, but a process the walk only has to look at the name of does not
+# need the rest, and giving it a cwd would put it in the scan's results too.
+wg_fake_comm() {
+  mkdir -p "$WG_PROC_DIR/$1"
+  printf '%s\n' "$2" >"$WG_PROC_DIR/$1/comm"
+}
+
 @test "a well-formed payload records the session id against the scope" {
   hook '{"session_id":"11111111-2222-3333-4444-555555555555",
          "transcript_path":"/home/dev/.claude/projects/x.jsonl",
@@ -108,4 +123,46 @@ recorded() {
   # The cwd is the scan's, though: that one the scan does know, and a session
   # that has been cd'd since it started is somewhere new.
   [ "$(recorded cwd)" = "$WG_TMP/projects/shop-web-live" ]
+}
+
+# A session started from inside another session -- a subagent, a workflow,
+# anything driving `claude -p` -- fires SessionStart exactly like a terminal
+# session does, and it runs in the *terminal's* scope, because it is a
+# descendant of that terminal. Recording it replaces the terminal's session id
+# with the subagent's, and an oom-kill then hands back the subagent instead of
+# the work that was on screen.
+#
+# The process tree is the only thing that tells the two apart. Verified against
+# real nested and top-level sessions on this machine: CLAUDE_CODE_CHILD_SESSION
+# is 1 for both -- Claude sets it for every process it spawns, this hook
+# included -- so the environment cannot be used for it.
+@test "a session nested inside another claude records nothing" {
+  # this hook's claude (700) -> a shell (600) -> another claude (500)
+  wg_fake_ppid 700 600
+  wg_fake_ppid 600 500
+  wg_fake_comm 600 bash
+  wg_fake_comm 500 claude
+
+  export CLAUDE_PID=700
+  hook '{"session_id":"a-subagent-not-your-work","cwd":"/home/dev/projects/shop-web"}'
+  [ "$status" -eq 0 ]
+  [ -z "$(recorded session)" ]
+}
+
+# The other half of the same rule: a terminal's own session has a shell and a
+# terminal above it and no claude, and must still be recorded. Without this the
+# test above passes just as well on a hook that records nothing at all.
+@test "a session with no claude above it is still recorded" {
+  # this hook's claude (700) -> a shell (600) -> the terminal (500)
+  wg_fake_ppid 700 600
+  wg_fake_ppid 600 500
+  wg_fake_ppid 500 1
+  wg_fake_comm 600 bash
+  wg_fake_comm 500 alacritty
+  wg_fake_comm 1 systemd
+
+  export CLAUDE_PID=700
+  hook '{"session_id":"the-real-one","cwd":"/home/dev/projects/shop-web"}'
+  [ "$status" -eq 0 ]
+  [ "$(recorded session)" = "the-real-one" ]
 }
