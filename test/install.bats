@@ -91,7 +91,7 @@ teardown() { wg_teardown_tmp; }
 @test "install keeps hyprland/workspaces where it was and appends the slots after it" {
   "$WG_ROOT/install.sh"
   run bash -c "grep -E '\"modules-left\"' '$WG_WAYBAR_CONFIG'"
-  [ "$output" = '  "modules-left": ["custom/omarchy", "hyprland/workspaces", "custom/wingroup0", "custom/wingroup1", "custom/wingroup2", "custom/wingroup3", "custom/wingroup4", "custom/wingroup5", "custom/wingroup6", "custom/wingroup7"],' ]
+  [ "$output" = '  "modules-left": ["custom/omarchy", "hyprland/workspaces", "custom/wingroup0", "custom/wingroup1", "custom/wingroup2", "custom/wingroup3", "custom/wingroup4", "custom/wingroup5", "custom/wingroup6", "custom/wingroup7", "custom/wingroup-crashed"],' ]
 }
 
 # A group is a *named* workspace, and the numbered module has no icon for a
@@ -180,10 +180,13 @@ pattern_hides() {
   [ "$status" -eq 0 ]
 }
 
+# The eight slots and the crashed button, all on the one signal: a single
+# pkill -SIGUSR2 has to repaint the whole strip, or a restore could clear the
+# crash store while the badge on the bar still shows the old count.
 @test "install uses signal 11, not one Omarchy already claims" {
   "$WG_ROOT/install.sh"
   run bash -c "grep -c '\"signal\": 11' '$WG_WAYBAR_CONFIG'"
-  [ "$output" -eq 8 ]
+  [ "$output" -eq 9 ]
   run bash -c "grep -cE '\"signal\": (7|8|9|10),' '$WG_WAYBAR_CONFIG' || true"
   [ "$output" -eq 0 ]
 }
@@ -914,4 +917,268 @@ CSS
   [ "$output" -eq 0 ]
   run bash -c "grep -c '#battery { color: #0f0; }' '$WG_WAYBAR_STYLE'"
   [ "$output" -eq 1 ]
+}
+
+# --- the crashed button ----------------------------------------------------
+
+# A module of its own on the end of the bar, not a ninth slot: it answers for no
+# group, and it is there only when something has been killed. The whole contract
+# is asserted, because it is shared with bin/wingroup-waybar and bin/wingroup --
+# a module wired to the wrong command is a button that does nothing, and nothing
+# else in this repo would notice.
+@test "install defines the crashed button, wired to the crashed commands" {
+  "$WG_ROOT/install.sh"
+  local mod
+  mod="$(sed 's|//.*||' "$WG_WAYBAR_CONFIG" | jq -c '.["custom/wingroup-crashed"]')"
+  [ "$(jq -r '.exec' <<<"$mod")" = "wingroup-waybar crashed" ]
+  [ "$(jq -r '.["on-click"]' <<<"$mod")" = "wingroup crashed --menu" ]
+  [ "$(jq -r '.["on-click-right"]' <<<"$mod")" = "wingroup crashed --restore" ]
+  [ "$(jq -r '.["return-type"]' <<<"$mod")" = "json" ]
+  [ "$(jq -r '.interval' <<<"$mod")" = "once" ]
+  [ "$(jq -r '.signal' <<<"$mod")" = "11" ]
+}
+
+@test "the crashed button is the last thing in modules-left, and is there once" {
+  "$WG_ROOT/install.sh"
+  run bash -c "sed 's|//.*||' '$WG_WAYBAR_CONFIG' | jq -r '.\"modules-left\"[-1]'"
+  [ "$output" = "custom/wingroup-crashed" ]
+  run bash -c "sed 's|//.*||' '$WG_WAYBAR_CONFIG' \
+    | jq '[.\"modules-left\"[] | select(. == \"custom/wingroup-crashed\")] | length'"
+  [ "$output" -eq 1 ]
+}
+
+# A waybar config as an earlier wingroup wrote it: the slots defined and wired
+# up, the ignore line in place, and no crashed button because there was none.
+#
+# That is every machine that already has wingroup, and it is the case the old
+# "custom/wingroup0 is in the file, so stop" guard got wrong: install walked
+# past the whole function, so none of those machines would ever receive the new
+# module and the button would simply never appear. Nothing would say so. The
+# same bug has now been fixed twice in this file -- once for the autostart line,
+# once for the style block -- and both times it was found on a real machine
+# rather than here.
+#
+# The block holds one slot rather than eight on purpose: it is regenerated
+# whole, so what it used to contain does not matter, and a short one makes the
+# rewrite visible.
+wg_seed_old_config() {
+  cat >"$WG_WAYBAR_CONFIG" <<'JSON'
+{
+  "reload_style_on_change": true,
+  // >>> wingroup
+  "custom/wingroup0": {
+    "exec": "wingroup-waybar 0",
+    "return-type": "json",
+    "interval": "once",
+    "signal": 11,
+    "on-click": "wingroup activate 0",
+    "on-click-right": "wingroup menu",
+    "tooltip": true
+  },
+  // <<< wingroup
+  "modules-left": ["custom/omarchy", "hyprland/workspaces", "custom/wingroup0", "custom/wingroup1", "custom/wingroup2", "custom/wingroup3", "custom/wingroup4", "custom/wingroup5", "custom/wingroup6", "custom/wingroup7"],
+  "modules-center": ["clock"],
+  // Numbered workspace indicator
+  "hyprland/workspaces": {
+    // >>> wingroup
+    "ignore-workspaces": [".*[^0-9].*"],
+    // <<< wingroup
+    "on-click": "activate",
+    "format": "{icon}"
+  },
+  // Omarchy menu button
+  "custom/omarchy": {
+    "format": "",
+    "on-click": "omarchy-menu"
+  }
+}
+JSON
+}
+
+@test "a config installed before the crashed button existed gains it" {
+  wg_seed_old_config
+
+  "$WG_ROOT/install.sh"
+  run bash -c "sed 's|//.*||' '$WG_WAYBAR_CONFIG' | jq -r '.[\"custom/wingroup-crashed\"].exec'"
+  [ "$output" = "wingroup-waybar crashed" ]
+  run bash -c "sed 's|//.*||' '$WG_WAYBAR_CONFIG' | jq -r '.\"modules-left\"[-1]'"
+  [ "$output" = "custom/wingroup-crashed" ]
+  # and the block came back whole, not just the one slot it used to hold
+  run bash -c "grep -cE '\"custom/wingroup[0-9]+\"[[:space:]]*:[[:space:]]*\{' '$WG_WAYBAR_CONFIG'"
+  [ "$output" -eq 8 ]
+}
+
+# The slots were already on the line. Appending the list unconditionally would
+# put a second copy of all eight there -- which is why the old code could only
+# ever run once, and why removing that guard means asking for each entry
+# separately.
+@test "an upgrade adds the one missing entry to modules-left and duplicates nothing" {
+  wg_seed_old_config
+
+  "$WG_ROOT/install.sh"
+  local i
+  for i in 0 1 2 3 4 5 6 7; do
+    run bash -c "sed 's|//.*||' '$WG_WAYBAR_CONFIG' \
+      | jq '[.\"modules-left\"[] | select(. == \"custom/wingroup$i\")] | length'"
+    [ "$output" -eq 1 ]
+  done
+  run bash -c "sed 's|//.*||' '$WG_WAYBAR_CONFIG' | jq '.\"modules-left\" | length'"
+  [ "$output" -eq 11 ]
+}
+
+# The ignore line is one line inside an object of the user's rather than a block
+# we own, so it is written once and then left alone -- and it must never be
+# written a second time next to the first.
+@test "an upgrade leaves the ignore-workspaces line where it already is" {
+  wg_seed_old_config
+
+  "$WG_ROOT/install.sh"
+  run bash -c "grep -c 'ignore-workspaces' '$WG_WAYBAR_CONFIG'"
+  [ "$output" -eq 1 ]
+  # still inside the object it belongs to
+  run bash -c "grep -A3 '\"hyprland/workspaces\": {' '$WG_WAYBAR_CONFIG'"
+  [[ "$output" == *'"ignore-workspaces": [".*[^0-9].*"]'* ]]
+}
+
+@test "an upgraded config is still valid JSONC, and the user's own modules survive" {
+  wg_seed_old_config
+
+  "$WG_ROOT/install.sh"
+  run bash -c "sed 's|//.*||' '$WG_WAYBAR_CONFIG' | jq -e . >/dev/null"
+  [ "$status" -eq 0 ]
+  run bash -c "sed 's|//.*||' '$WG_WAYBAR_CONFIG' | jq -r '.[\"custom/omarchy\"][\"on-click\"]'"
+  [ "$output" = "omarchy-menu" ]
+  run bash -c "sed 's|//.*||' '$WG_WAYBAR_CONFIG' | jq -r '.\"modules-center\"[0]'"
+  [ "$output" = "clock" ]
+}
+
+@test "rewriting the module definitions says so" {
+  wg_seed_old_config
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"module definitions were out of date and have been rewritten"* ]]
+}
+
+# Nothing to add means nothing written at all -- no rewritten block, no second
+# copy of the slots, no backup of a file that was not touched.
+@test "installing twice leaves the waybar config byte for byte" {
+  "$WG_ROOT/install.sh"
+  cp "$WG_WAYBAR_CONFIG" "$WG_TMP/config.after-first"
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"out of date"* ]]
+  run cmp "$WG_TMP/config.after-first" "$WG_WAYBAR_CONFIG"
+  [ "$status" -eq 0 ]
+}
+
+# The byte-for-byte test above passes with or without the early return that
+# skips a config already up to date: the rewrite regenerates identical bytes
+# either way. What it cannot regenerate is the backup, so that is what pins the
+# guard -- and the backup name is stamped to the second, which is why the two
+# installs have to land in different ones. Without this, deleting the guard
+# leaves every reinstall quietly piling up another copy of the config.
+@test "installing twice over a current config makes no second backup" {
+  "$WG_ROOT/install.sh"
+  local before
+  before="$(find "$WG_TMP" -maxdepth 1 -name 'config.jsonc.bak*' | wc -l)"
+  [ "$before" -ge 1 ]
+  sleep 1
+  "$WG_ROOT/install.sh"
+  run bash -c "find '$WG_TMP' -maxdepth 1 -name 'config.jsonc.bak*' | wc -l"
+  [ "$output" -eq "$before" ]
+}
+
+# Same guard, same reasoning, for the style block.
+@test "installing twice over a current style makes no second backup" {
+  "$WG_ROOT/install.sh"
+  local before
+  before="$(find "$WG_TMP" -maxdepth 1 -name 'style.css.bak*' | wc -l)"
+  [ "$before" -ge 1 ]
+  sleep 1
+  "$WG_ROOT/install.sh"
+  run bash -c "find '$WG_TMP' -maxdepth 1 -name 'style.css.bak*' | wc -l"
+  [ "$output" -eq "$before" ]
+}
+
+# mktemp makes its file 0600, and a rename from /tmp onto a config on another
+# filesystem is a copy that carries that mode across. Tightening a file
+# wingroup did not create is still changing it behind the user's back, and now
+# that an out-of-date block is rewritten it would happen on every upgrade
+# rather than once.
+@test "install does not change the waybar config's permissions" {
+  chmod 644 "$WG_WAYBAR_CONFIG"
+  "$WG_ROOT/install.sh"
+  run stat -c '%a' "$WG_WAYBAR_CONFIG"
+  [ "$output" = "644" ]
+}
+
+@test "installing twice over an upgraded config leaves it byte for byte" {
+  wg_seed_old_config
+  "$WG_ROOT/install.sh"
+  cp "$WG_WAYBAR_CONFIG" "$WG_TMP/config.after-upgrade"
+  "$WG_ROOT/install.sh"
+  run cmp "$WG_TMP/config.after-upgrade" "$WG_WAYBAR_CONFIG"
+  [ "$status" -eq 0 ]
+}
+
+# The badge says a session was taken away from you, which is exactly what a
+# group button says when one of its sessions was killed -- so it is that rule
+# with one more selector on it, not a second rule to be kept in step by hand.
+@test "install writes the crashed rule for the button as well as for the slots" {
+  "$WG_ROOT/install.sh"
+  run bash -c "grep -c '#custom-wingroup-crashed.crashed' '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep '#custom-wingroup-crashed.crashed' '$WG_WAYBAR_STYLE'"
+  [[ "$output" == *"background:"* ]]
+  [[ "$output" == *"opacity: 1"* ]]
+  [[ "$output" == *"font-weight: bold"* ]]
+  # one rule, both kinds of button
+  [[ "$output" == *"#custom-wingroup0.crashed"* ]]
+  # and it sits on the bar like the others: same padding, from the same rule
+  run bash -c "grep 'padding: 0 6px' '$WG_WAYBAR_STYLE'"
+  [[ "$output" == *"#custom-wingroup-crashed {"* ]]
+}
+
+@test "uninstall takes the crashed button back out of the config and the style" {
+  "$WG_ROOT/install.sh"
+  "$WG_ROOT/uninstall.sh"
+  run bash -c "grep -c 'wingroup-crashed' '$WG_WAYBAR_CONFIG' || true"
+  [ "$output" -eq 0 ]
+  run bash -c "grep -c 'wingroup-crashed' '$WG_WAYBAR_STYLE' || true"
+  [ "$output" -eq 0 ]
+  run cmp "$WG_TMP/config.orig" "$WG_WAYBAR_CONFIG"
+  [ "$status" -eq 0 ]
+  run cmp "$WG_TMP/style.orig" "$WG_WAYBAR_STYLE"
+  [ "$status" -eq 0 ]
+}
+
+# An upgraded config is not what install first wrote there, and uninstall still
+# has to leave nothing of ours behind -- the entry on the user's modules-left
+# line included, since strip_block cannot reach that one.
+@test "uninstall leaves nothing behind in an upgraded config" {
+  wg_seed_old_config
+  "$WG_ROOT/install.sh"
+  "$WG_ROOT/uninstall.sh"
+  run bash -c "grep -c 'wingroup' '$WG_WAYBAR_CONFIG' || true"
+  [ "$output" -eq 0 ]
+  run bash -c "sed 's|//.*||' '$WG_WAYBAR_CONFIG' | jq -c '.\"modules-left\"'"
+  [ "$output" = '["custom/omarchy","hyprland/workspaces"]' ]
+  run bash -c "sed 's|//.*||' '$WG_WAYBAR_CONFIG' | jq -e . >/dev/null"
+  [ "$status" -eq 0 ]
+}
+
+# Definitions with no markers around them cannot be found, so they cannot be
+# replaced -- and inserting a fresh block anyway would define every module
+# twice. Refuse, and say what to do about it.
+@test "install refuses a config whose definitions have lost their markers" {
+  wg_seed_old_config
+  sed -i '/>>> wingroup/d; /<<< wingroup/d' "$WG_WAYBAR_CONFIG"
+  cp "$WG_WAYBAR_CONFIG" "$WG_TMP/config.unmarked"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"markers"* ]]
+  [[ "$output" == *"$WG_WAYBAR_CONFIG"* ]]
+  run cmp "$WG_TMP/config.unmarked" "$WG_WAYBAR_CONFIG"
+  [ "$status" -eq 0 ]
 }

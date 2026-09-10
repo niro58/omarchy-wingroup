@@ -440,3 +440,104 @@ wg_crash_clear() {
   run jq_calls
   [ "$output" -le 9 ]
 }
+
+# --- the crashed button ----------------------------------------------------
+#
+# A module of its own at the end of the bar: `wingroup-waybar crashed`. The
+# slots say which group lost something; this one says the machine did, carries
+# the count, and is the thing that gets clicked to bring the sessions back. It
+# belongs to no group, so it takes no slot number and reads no state.
+
+@test "the crashed button draws nothing when nothing has crashed" {
+  run "$WG_ROOT/bin/wingroup-waybar" crashed
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.text' <<<"$output")" = "" ]
+  [ "$(jq -r '.tooltip' <<<"$output")" = "" ]
+  [ "$(jq -r '.class' <<<"$output")" = "" ]
+}
+
+# The same nothing, one state further along: a machine that has been oom-killed
+# and dealt with, whose list is empty rather than absent. wg_crashed_clear
+# leaves no file at all, but an empty document is still a document some other
+# writer could leave behind, and it means the same thing to the bar.
+@test "an empty crash list draws nothing either" {
+  mkdir -p "$WG_RUNTIME_DIR"
+  printf '%s\n' '{"crashed":[]}' >"$WG_RUNTIME_DIR/crashed.json"
+  run "$WG_ROOT/bin/wingroup-waybar" crashed
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.text' <<<"$output")" = "" ]
+  [ "$(jq -r '.class' <<<"$output")" = "" ]
+  run bash -c "'$WG_ROOT/bin/wingroup-waybar' crashed | jq -e . >/dev/null"
+  [ "$status" -eq 0 ]
+}
+
+@test "one crashed session puts the warning glyph and a count on the bar" {
+  wg_crash /home/dev/projects/shop-web sess-a1
+  run "$WG_ROOT/bin/wingroup-waybar" crashed
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.text' <<<"$output")" = "⚠1" ]
+  [ "$(wg_class_list <<<"$output")" = "crashed" ]
+}
+
+# The count is the machine's, not a group's: these three are spread over two
+# groups and one project no group has claimed, and the button still says three.
+@test "three crashed sessions count up on the one button" {
+  wg_crash /home/dev/projects/shop-web sess-a1
+  wg_crash /home/dev/projects/site-platform sess-b2
+  wg_crash /home/dev/projects/unclaimed sess-c3
+  run "$WG_ROOT/bin/wingroup-waybar" crashed
+  [ "$(jq -r '.text' <<<"$output")" = "⚠3" ]
+  [ "$(wg_class_list <<<"$output")" = "crashed" ]
+}
+
+@test "the tooltip counts the dead and names every directory and time" {
+  wg_crash /home/dev/projects/shop-web sess-a1 2026-09-10T11:02:03+02:00
+  wg_crash /home/dev/projects/shop-core sess-b2 2026-09-10T11:44:00+02:00
+  run "$WG_ROOT/bin/wingroup-waybar" crashed
+  local tooltip
+  tooltip="$(jq -r '.tooltip' <<<"$output")"
+  [ "$(head -n1 <<<"$tooltip")" = "2 session(s) killed by systemd-oomd" ]
+  [[ "$tooltip" == *"/home/dev/projects/shop-web — 2026-09-10T11:02:03+02:00"* ]]
+  [[ "$tooltip" == *"/home/dev/projects/shop-core — 2026-09-10T11:44:00+02:00"* ]]
+  # One line of heading and one line per session, and nothing else.
+  [ "$(wc -l <<<"$tooltip")" -eq 3 ]
+}
+
+# What the click is actually deciding about: a recorded id brings the
+# conversation back. So the tooltip says it per session rather than in general.
+@test "the tooltip says which sessions can be resumed by id" {
+  wg_crash /home/dev/projects/shop-web sess-a1
+  run "$WG_ROOT/bin/wingroup-waybar" crashed
+  [[ "$(jq -r '.tooltip' <<<"$output")" == *"/home/dev/projects/shop-web — "*" · resumable"* ]]
+}
+
+# A session that was already running when the SessionStart hook was installed
+# was only ever seen by a scan, and a scan cannot learn an id. All a restore can
+# offer there is a fresh claude in the same directory; promising a resume would
+# be promising a conversation that is not coming back.
+@test "a crash with no session id is not described as resumable" {
+  wg_crash /home/dev/projects/shop-web ""
+  run "$WG_ROOT/bin/wingroup-waybar" crashed
+  local tooltip
+  tooltip="$(jq -r '.tooltip' <<<"$output")"
+  [[ "$tooltip" == *"no session id, a fresh claude"* ]]
+  [[ "$tooltip" != *"resumable"* ]]
+  [ "$(jq -r '.text' <<<"$output")" = "⚠1" ]
+}
+
+# This module is re-run on every window-title change like the slots are, and it
+# sits on the bar of every machine whether or not anything has ever died there
+# -- so what a healthy desktop pays for it is the number that matters.
+#
+# One: the single jq wg_emit spends to print the empty module. Nothing else is
+# bought at all -- no state file, no window table, no state map, and not even a
+# read of the crash list, because a machine with nothing to report has no crash
+# file and [[ -f ]] answers that for free. Two would mean the guard has stopped
+# guarding and the list is being read only to be told it is empty.
+@test "the crashed button costs one jq when nothing has crashed" {
+  wg_count_jq
+  run "$WG_ROOT/bin/wingroup-waybar" crashed
+  [ "$status" -eq 0 ]
+  run jq_calls
+  [ "$output" -le 1 ]
+}

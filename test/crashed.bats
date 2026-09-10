@@ -6,6 +6,10 @@ setup() {
   wg_setup_tmp
   wg_seed_state
   WG_CRASH_N=0
+  # --menu puts a picker on the screen, so every run in this file gets the stub
+  # one -- including the runs that must not open a picker at all, which is only
+  # a claim worth making when a real walker was reachable.
+  export WG_WALKER="$WG_ROOT/test/bin/walker-stub"
 }
 
 teardown() { wg_teardown_tmp; }
@@ -186,8 +190,196 @@ wg_crash() {
   [[ "$output" == *"no crashed sessions"* ]]
 }
 
+# --- the picker behind the bar's ⚠ button ----------------------------------
+
+# Two crashes, both with a directory that still exists: the setup nearly every
+# picker test wants.
+wg_crash_pair() {
+  mkdir -p "$WG_TMP/shop-web" "$WG_TMP/shop-api"
+  wg_crash "$WG_TMP/shop-web" "sess-a1" "2026-09-10T11:02:03+02:00"
+  wg_crash "$WG_TMP/shop-api" "" "2026-09-10T11:05:00+02:00"
+}
+
+# The index walker hands back is a position in this list, so the order is a
+# contract: restore-all at 0, the records after it in file order, dismiss-all
+# last.
+@test "the picker offers restore-all first, then one entry per session, then dismiss-all" {
+  wg_crash_pair
+  export WG_WALKER_STDIN_LOG="$WG_TMP/walker-stdin"
+  export WG_WALKER_PICK=""
+  run wingroup crashed --menu
+  [ "$status" -eq 0 ]
+  run cat "$WG_WALKER_STDIN_LOG"
+  [ "${#lines[@]}" -eq 4 ]
+  [[ "${lines[0]}" == *"Restore all (2)"* ]]
+  [[ "${lines[1]}" == *"$WG_TMP/shop-web"* ]]
+  [[ "${lines[2]}" == *"$WG_TMP/shop-api"* ]]
+  [[ "${lines[3]}" == *"Dismiss all"* ]]
+}
+
+# Resumable or not is the difference between getting the conversation back and
+# getting only the directory back, and it has to be visible before the pick.
+@test "a picker entry says when the session died and whether it can be resumed" {
+  wg_crash_pair
+  export WG_WALKER_STDIN_LOG="$WG_TMP/walker-stdin"
+  export WG_WALKER_PICK=""
+  run wingroup crashed --menu
+  run cat "$WG_WALKER_STDIN_LOG"
+  [[ "${lines[1]}" == *"2026-09-10T11:02:03+02:00"* ]]
+  [[ "${lines[1]}" == *"resumable"* ]]
+  [[ "${lines[2]}" == *"2026-09-10T11:05:00+02:00"* ]]
+  [[ "${lines[2]}" == *"no session id"* ]]
+}
+
+@test "picking one session relaunches that one and leaves the others on the bar" {
+  wg_crash_pair
+  export WG_WALKER_PICK=1
+  run wingroup crashed --menu
+  [ "$status" -eq 0 ]
+  run bash -c "wc -l <'$WG_LAUNCH_LOG'"
+  [ "$output" -eq 1 ]
+  run cat "$WG_LAUNCH_LOG"
+  [[ "$output" == *"--dir=$WG_TMP/shop-web"* ]]
+  [[ "$output" == *"claude --resume"* ]]
+  [[ "$output" == *"sess-a1"* ]]
+  # Only its own record is gone; the other is still on file, session id and all.
+  run jq -r '[.crashed[].cwd] | join(",")' "$WG_RUNTIME_DIR/crashed.json"
+  [ "$output" = "$WG_TMP/shop-api" ]
+  run bash -c "wc -l <'$WG_REFRESH_LOG'"
+  [ "$output" -eq 1 ]
+}
+
+# The record with no session id is the one the list must not lie about: picking
+# it opens a plain claude, and never `claude --resume <directory>`.
+@test "picking a session with no session id starts a plain claude in its directory" {
+  wg_crash_pair
+  export WG_WALKER_PICK=2
+  run wingroup crashed --menu
+  [ "$status" -eq 0 ]
+  run cat "$WG_LAUNCH_LOG"
+  [[ "$output" == *"--dir=$WG_TMP/shop-api"* ]]
+  [[ "$output" != *"--resume"* ]]
+  run jq -r '[.crashed[].session] | join(",")' "$WG_RUNTIME_DIR/crashed.json"
+  [ "$output" = "sess-a1" ]
+}
+
+# The same trade --restore makes, made one record at a time: crashed.json is the
+# only surviving copy of the session id, so a launcher that could not start a
+# terminal must not take the record with it.
+@test "a single restore that fails keeps its record" {
+  wg_crash_pair
+  export WG_LAUNCH_CMD="$WG_ROOT/test/bin/launch-fail-stub"
+  export WG_WALKER_PICK=1
+  run wingroup crashed --menu
+  [ "$status" -ne 0 ]
+  run jq -r '[.crashed[].session] | sort | join(",")' "$WG_RUNTIME_DIR/crashed.json"
+  [ "$output" = ",sess-a1" ]
+}
+
+@test "picking restore-all relaunches every session and empties the list" {
+  wg_crash_pair
+  export WG_WALKER_PICK=0
+  run wingroup crashed --menu
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"relaunched 2 session(s)"* ]]
+  run bash -c "wc -l <'$WG_LAUNCH_LOG'"
+  [ "$output" -eq 2 ]
+  run wingroup crashed
+  [[ "$output" == *"no crashed sessions"* ]]
+}
+
+@test "picking dismiss-all launches nothing and empties the list" {
+  wg_crash_pair
+  export WG_WALKER_PICK=3
+  run wingroup crashed --menu
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cleared 2 crashed session(s)"* ]]
+  [ ! -s "$WG_LAUNCH_LOG" ]
+  run wingroup crashed
+  [[ "$output" == *"no crashed sessions"* ]]
+}
+
+# Walking away from the picker is not an instruction to do anything.
+@test "cancelling the picker launches nothing and changes no record" {
+  wg_crash_pair
+  export WG_WALKER_PICK=""
+  run wingroup crashed --menu
+  [ "$status" -eq 0 ]
+  [ ! -s "$WG_LAUNCH_LOG" ]
+  [ ! -s "$WG_REFRESH_LOG" ]
+  run jq -r '.crashed | length' "$WG_RUNTIME_DIR/crashed.json"
+  [ "$output" -eq 2 ]
+}
+
+@test "--menu with nothing crashed says so and opens no picker" {
+  export WG_WALKER_ARGS_LOG="$WG_TMP/walker-args"
+  run wingroup crashed --menu
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no crashed sessions"* ]]
+  [ ! -f "$WG_WALKER_ARGS_LOG" ]
+}
+
+# The menu path skips a vanished directory for the reason --restore does: there
+# is nowhere to put the terminal. It keeps the record, because the user aimed at
+# one entry and nothing happened -- and it says so on the desktop, since a
+# picker opened from the bar has no terminal to print into.
+@test "picking a session whose directory is gone launches nothing and keeps the record" {
+  mkdir -p "$WG_TMP/shop-web"
+  wg_crash "$WG_TMP/vanished" "sess-x"
+  wg_crash "$WG_TMP/shop-web" "sess-a1"
+  export WG_WALKER_PICK=1
+  run wingroup crashed --menu
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipped $WG_TMP/vanished"* ]]
+  [[ "$output" == *"the directory is gone"* ]]
+  [ ! -s "$WG_LAUNCH_LOG" ]
+  [ ! -s "$WG_REFRESH_LOG" ]
+  run jq -r '[.crashed[].session] | sort | join(",")' "$WG_RUNTIME_DIR/crashed.json"
+  [ "$output" = "sess-a1,sess-x" ]
+  run cat "$WG_NOTIFY_LOG"
+  [[ "$output" == *"$WG_TMP/vanished"* ]]
+}
+
 @test "crashed rejects an unknown flag" {
   run wingroup crashed --burn-it-down
   [ "$status" -ne 0 ]
   [ ! -s "$WG_LAUNCH_LOG" ]
+}
+
+# Every way of reaching the crashed command comes from a bar with no terminal
+# behind it, so a message on stderr reaches nobody: the terminals would fail to
+# appear, the count would not go down, and nothing would say why.
+@test "a launch failure is notified, not just printed, when there is no terminal" {
+  local shop="$WG_TMP/projects/shop-web"
+  mkdir -p "$shop"
+  wg_crash "$shop" "sess-1"
+  export WG_LAUNCH_CMD="$WG_ROOT/test/bin/launch-fail-stub"
+
+  # setsid, so the command really has no controlling terminal -- the same
+  # condition a waybar click runs under. Asserting through wg_has_tty's own
+  # branch rather than mocking it is the point.
+  run bash -c "setsid '$WG_ROOT/bin/wingroup' crashed --restore </dev/null >/dev/null 2>&1 || true"
+  run notifications
+  [[ "$output" == *"launch(es) failed"* ]]
+}
+
+@test "a vanished directory is notified too" {
+  wg_crash "$WG_TMP/projects/gone-for-good" "sess-1"
+  run bash -c "setsid '$WG_ROOT/bin/wingroup' crashed --restore </dev/null >/dev/null 2>&1 || true"
+  run notifications
+  [[ "$output" == *"directory is gone"* ]]
+}
+
+# The usage line offers these as alternatives; the parser used to accept any
+# combination and quietly honour --menu, dropping the rest without a word.
+@test "combining crashed flags is refused rather than half-honoured" {
+  local shop="$WG_TMP/projects/shop-web"
+  mkdir -p "$shop"
+  wg_crash "$shop" "sess-1"
+
+  run wingroup crashed --menu --restore
+  [ "$status" -ne 0 ]
+  [ ! -s "$WG_LAUNCH_LOG" ]
+  run bash -c "jq '.crashed | length' '$WG_RUNTIME_DIR/crashed.json'"
+  [ "$output" -eq 1 ]
 }

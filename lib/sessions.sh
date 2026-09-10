@@ -246,6 +246,34 @@ wg_crashed_clear() {
   exec {fd}>&-
 }
 
+# Drops crash $1 -- counted from zero, in the order wg_crashed_rows prints them
+# -- and leaves the rest.
+#
+# By position, and not by any field of the record, because the field that
+# identifies one is the scope and the scope is the one thing that cannot be
+# handed back here intact: it is full of literal backslashes, and @tsv escapes
+# them, so a scope read out of a row is not the string that was written. The row
+# order is the array order and jq's del() takes an index, so counting is exact
+# and needs nothing round-tripped.
+#
+# The caller must therefore read the rows and act on them without anything else
+# writing in between. Restoring one at a time from the picker does exactly that,
+# and the watcher only ever appends.
+wg_crashed_remove() {
+  local index="$1"
+  [[ $index =~ ^[0-9]+$ ]] || return 1
+  # shellcheck disable=SC2016  # $i is a jq variable, not a shell one
+  wg_runtime_update "$WG_CRASHED_FILE" "$(wg_crashed_default)" \
+    'if ($i | tonumber) < (.crashed | length) then del(.crashed[$i | tonumber]) else . end' \
+    --arg i "$index"
+}
+
+# How many crashes are on file. The bar asks this and nothing else when the
+# answer is zero, which on a machine that is behaving is always.
+wg_crashed_count() {
+  jq -r '.crashed | length' <<<"$(wg_crashed_read)"
+}
+
 # One crash per line: session id, cwd, killed_at, tab separated.
 #
 # The scope stays in the file and out of the rows on purpose. It is the join key

@@ -92,6 +92,11 @@ WG_AUTOSTART_UPGRADED=()
 # cannot, and the user has no other way to notice which they have.
 WG_STYLE_REFRESHED=0
 
+# The same, for the module definitions in the waybar config. Same reason: a
+# machine that installed before a module existed has a block without it, and a
+# module the bar never draws is silent.
+WG_CONFIG_REFRESHED=0
+
 # What install_claude_hook did, for the closing summary. The hook is the only
 # source of exact session ids, so which of these happened changes what the
 # feature can do afterwards and the user has to be told.
@@ -137,7 +142,45 @@ waybar_modules_block() {
     printf '    "tooltip": true\n'
     printf '  },\n'
   done
+  # The crashed button: a module of its own on the end of the bar rather than
+  # another slot, because it answers for no group and appears only when
+  # something has been killed -- with nothing on file it emits empty text and no
+  # class, exactly as an unused slot does, and waybar draws nothing.
+  #
+  # Same return-type, interval and signal as the slots, so the one refresh that
+  # repaints the group strip repaints this too and the bar can never show a
+  # crash count from before the restore that cleared it.
+  printf '  "custom/wingroup-crashed": {\n'
+  printf '    "exec": "wingroup-waybar crashed",\n'
+  printf '    "return-type": "json",\n'
+  printf '    "interval": "once",\n'
+  printf '    "signal": %d,\n' "$WG_SIGNAL"
+  printf '    "on-click": "wingroup crashed --menu",\n'
+  printf '    "on-click-right": "wingroup crashed --restore",\n'
+  printf '    "tooltip": true\n'
+  printf '  },\n'
   printf '  // <<< wingroup%s\n' "$eof_flag"
+}
+
+# The module definitions block currently in $1, printed verbatim, or nothing
+# when there is none.
+#
+# Which block it is has to be decided from the contents, not the markers: the
+# definitions and the "ignore-workspaces" line are both fenced with the same
+# "// >>> wingroup" pair -- deliberately, so uninstall's strip_block takes both
+# with one rule -- and only the definitions are regenerated.
+wg_config_defs_block() {
+  awk '
+    index($0, "// >>> wingroup") { inblock = 1; buf = $0 "\n"; next }
+    inblock {
+      buf = buf $0 "\n"
+      if (index($0, "// <<< wingroup")) {
+        inblock = 0
+        if (index(buf, "custom/wingroup")) { printf "%s", buf; exit }
+      }
+      next
+    }
+  ' "$1"
 }
 
 # A group is a *named* Hyprland workspace, and Omarchy's "hyprland/workspaces"
@@ -168,24 +211,71 @@ waybar_ignore_block() {
   printf '    // <<< wingroup\n'
 }
 
+# The definitions block is generated and entirely ours, so -- like the style
+# block, and for the same reason -- an out-of-date one is rewritten rather than
+# walked past. "The block is there, leave the file alone" is what this used to
+# do, and it means every machine that already has wingroup never receives a
+# module added later: the button would simply never appear, and nothing would
+# say so. That has now happened twice on a real machine.
+#
+# It is harder than the style, because this is three edits and only one of them
+# is inside markers. The other two are lines of the *user's* that we added a
+# piece to, so each is decided on its own: an entry missing from "modules-left"
+# is appended, and the "ignore-workspaces" line is written once and then never
+# touched again.
 install_waybar_config() {
-  grep -q 'custom/wingroup0' "$WG_WAYBAR_CONFIG" && return 0
-
   local eof_flag=""
   wg_ends_with_newline "$WG_WAYBAR_CONFIG" || eof_flag=" no-eof-nl"
 
-  local slots i tmp
-  slots=""
-  for (( i = 0; i < WG_SLOTS; i++ )); do
-    slots+=", \"custom/wingroup$i\""
+  local block current insert=0
+  block="$(waybar_modules_block "$eof_flag")"
+  current="$(wg_config_defs_block "$WG_WAYBAR_CONFIG")"
+  if [[ -z $current ]]; then
+    # Definitions with no markers around them are a block this script cannot
+    # find and so cannot replace, and inserting a second one would define every
+    # module twice. Say so rather than write that file.
+    if grep -qE '"custom/wingroup[0-9]+"[[:space:]]*:[[:space:]]*\{' "$WG_WAYBAR_CONFIG"; then
+      printf 'install.sh: %s defines the wingroup modules, but the "// >>> wingroup" markers\naround them are gone, so they cannot be brought up to date in place.\nPut the markers back around them, or delete the definitions, then re-run.\nNo changes were made.\n' \
+        "$WG_WAYBAR_CONFIG" >&2
+      exit 1
+    fi
+    insert=1
+  fi
+
+  # Only the entries that are not on the line already. Appending all of them
+  # unconditionally is what the old "already installed? stop" guard hid: adding
+  # one module to a bar that has the other eight must add one entry, not nine.
+  local -a wanted=()
+  local i
+  for (( i = 0; i < WG_SLOTS; i++ )); do wanted+=("custom/wingroup$i"); done
+  wanted+=("custom/wingroup-crashed")
+
+  local left slots="" name
+  left="$(grep -E '"modules-left"[[:space:]]*:' "$WG_WAYBAR_CONFIG" || true)"
+  for name in "${wanted[@]}"; do
+    [[ $left == *"\"$name\""* ]] || slots+=", \"$name\""
   done
+
+  local ignore=""
+  grep -qF '"ignore-workspaces"' "$WG_WAYBAR_CONFIG" || ignore="$(waybar_ignore_block)"
+
+  # Already exactly right? Then write nothing. Writing anyway would back the
+  # file up and churn it on every install for no change -- and installing twice
+  # in a row has to leave the file byte for byte what it was.
+  if (( ! insert )) && [[ $current == "$block" && -z $slots && -z $ignore ]]; then
+    return 0
+  fi
+  if (( ! insert )) && [[ $current != "$block" ]]; then
+    WG_CONFIG_REFRESHED=1
+  fi
 
   # Three edits, one pass.
   #
-  # The definitions go in right after the line that opens the top-level object.
-  # That is not necessarily line 1: JSONC positively invites a leading comment,
-  # and a blank line or a BOM is legal too. Skip blank and comment lines, then
-  # anchor on the first line that contains a brace.
+  # The definitions replace the marked block where there is one. Where there is
+  # not, they go in right after the line that opens the top-level object -- and
+  # that is not necessarily line 1: JSONC positively invites a leading comment,
+  # and a blank line or a BOM is legal too. So skip blank and comment lines,
+  # then anchor on the first line that contains a brace.
   #
   # The slots are appended to "modules-left", after whatever is already there.
   # "hyprland/workspaces" stays and stays where it is: that ordering is what
@@ -198,21 +288,46 @@ install_waybar_config() {
   # Values reach awk through the environment, not -v: an -v assignment runs
   # escape processing over its value, and these blocks are verbatim text that
   # must survive unaltered.
-  tmp="$(mktemp)"
+  # Beside the target, not in /tmp: a rename across filesystems is a copy, and
+  # the copy arrives with mktemp's 0600 rather than whatever the config had.
+  # That used to fire once, on a first install; now that an out-of-date block is
+  # rewritten, it would fire on every upgrade -- silently tightening a file
+  # wingroup did not create. install_claude_hook solved this the same way.
+  local tmp
+  tmp="$(mktemp "$(dirname -- "$WG_WAYBAR_CONFIG")/.wingroup.XXXXXX")"
+  chmod --reference="$WG_WAYBAR_CONFIG" "$tmp" 2>/dev/null || true
   wg_slots="$slots" \
-  wg_block="$(waybar_modules_block "$eof_flag")" \
-  wg_ignore="$(waybar_ignore_block)" awk '
-    !inserted && $0 !~ /^[[:space:]]*(\/\/|\/\*|\*)/ && index($0, "{") > 0 {
+  wg_block="$block" \
+  wg_insert="$insert" \
+  wg_ignore="$ignore" awk '
+    index($0, "// >>> wingroup") { inblock = 1; buf = $0 "\n"; next }
+    inblock {
+      buf = buf $0 "\n"
+      if (index($0, "// <<< wingroup")) {
+        inblock = 0
+        # Buffered whole and only then judged, because the two blocks in this
+        # file share their markers and only their contents tell them apart.
+        if (index(buf, "custom/wingroup")) print ENVIRON["wg_block"]
+        else printf "%s", buf
+      }
+      next
+    }
+    ENVIRON["wg_insert"] == "1" && !inserted \
+    && $0 !~ /^[[:space:]]*(\/\/|\/\*|\*)/ && index($0, "{") > 0 {
       print; print ENVIRON["wg_block"]; inserted = 1; next
     }
-    /"modules-left"[[:space:]]*:/ {
+    ENVIRON["wg_slots"] != "" && /"modules-left"[[:space:]]*:/ {
       sub(/\][[:space:]]*,[[:space:]]*$/, ENVIRON["wg_slots"] "],")
       print; next
     }
-    !ignored && /"hyprland\/workspaces"[[:space:]]*:[[:space:]]*\{[[:space:]]*$/ {
+    ENVIRON["wg_ignore"] != "" && !ignored \
+    && /"hyprland\/workspaces"[[:space:]]*:[[:space:]]*\{[[:space:]]*$/ {
       print; print ENVIRON["wg_ignore"]; ignored = 1; next
     }
     { print }
+    # An opening marker with no closing one: hand the lines back rather than eat
+    # the rest of the file. Nothing follows them, so this restores the order.
+    END { if (inblock) printf "%s", buf }
   ' "$WG_WAYBAR_CONFIG" >"$tmp"
 
   # Every part of the edit has to have landed. The sub() above only fires when
@@ -220,15 +335,18 @@ install_waybar_config() {
   # go in when an opening brace was found, and the ignore line only goes in
   # when the "hyprland/workspaces" object opens on a line of its own. Any part
   # alone ships a bar that is wrong -- slots wired to modules that do not
-  # exist, modules nothing displays, or a dot per group next to the names --
-  # and the idempotency guard would then refuse to repair it. So check for all
-  # three, and on failure say which is missing and touch nothing.
-  local missing="" defs
-  defs="$(grep -cE '"custom/wingroup[0-9]+"[[:space:]]*:[[:space:]]*\{' "$tmp" || true)"
-  grep -qE '"modules-left"[[:space:]]*:.*"custom/wingroup0"' "$tmp" \
-    || missing+=$'\n  - the '"$WG_SLOTS"$' wingroup slots in "modules-left": it must be a single line ending in "],"'
-  (( defs == WG_SLOTS )) \
-    || missing+=$'\n  - the '"$WG_SLOTS"$' "custom/wingroupN": { ... } module definitions (found '"$defs"$'): they are inserted after the line that opens the top-level object'
+  # exist, modules nothing displays, or a dot per group next to the names -- so
+  # check for all three, and on failure say which is missing and touch nothing.
+  local missing="" defs left_now short=""
+  left_now="$(grep -E '"modules-left"[[:space:]]*:' "$tmp" || true)"
+  for name in "${wanted[@]}"; do
+    [[ $left_now == *"\"$name\""* ]] || short+=" $name"
+  done
+  defs="$(grep -cE '"custom/wingroup([0-9]+|-crashed)"[[:space:]]*:[[:space:]]*\{' "$tmp" || true)"
+  [[ -z $short ]] \
+    || missing+=$'\n  - these entries in "modules-left" ('"${short# }"$'): it must be a single line ending in "],"'
+  (( defs == ${#wanted[@]} )) \
+    || missing+=$'\n  - the '"${#wanted[@]}"$' "custom/wingroupN": { ... } module definitions (found '"$defs"$'): they are inserted after the line that opens the top-level object'
   grep -qF '"ignore-workspaces"' "$tmp" \
     || missing+=$'\n  - the "ignore-workspaces" entry that hides named group workspaces from the numbered indicator: it goes inside the "hyprland/workspaces" object, whose opening line must read \'"hyprland/workspaces": {\''
   if [[ -n $missing ]]; then
@@ -301,6 +419,13 @@ install_waybar_style() {
     active+="${active:+, }#custom-wingroup$i.active"
     crashed+="${crashed:+, }#custom-wingroup$i.crashed"
   done
+  # The crashed button is not a slot, so it takes no state class and no step of
+  # the ramp -- but it is one of these buttons and sits on the same bar, so it
+  # takes the base rule's padding, and it says the same thing a group holding a
+  # killed session says. Same declaration list, not a copy of it: two rules that
+  # have to look identical are one rule with two selectors, or they drift.
+  base+=", #custom-wingroup-crashed"
+  crashed+=", #custom-wingroup-crashed.crashed"
   # One selector list per step of the ramp, in step order: heat[0] is .idle1.
   local step sel
   for (( step = 1; step <= WG_IDLE_HEAT_MAX; step++ )); do
@@ -608,6 +733,10 @@ case $WG_AUTOSTART_ADDED in
       printf 'Autostart (%s): already configured, left unchanged.\n' "$WG_HYPR_AUTOSTART"
     fi ;;
 esac
+if (( WG_CONFIG_REFRESHED )); then
+  printf 'Waybar config (%s): the wingroup module definitions were out of date and have been rewritten.\n' \
+    "$WG_WAYBAR_CONFIG"
+fi
 if (( WG_STYLE_REFRESHED )); then
   printf 'Waybar style (%s): the wingroup block was out of date and has been rewritten.\n' \
     "$WG_WAYBAR_STYLE"
