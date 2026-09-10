@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Test-only stand-in for uwsm-app: records the terminal that would have been
+# spawned instead of putting one on the user's screen. One line per launch,
+# arguments tab separated, so a test can assert the directory and the session id
+# a relaunch asked for.
+printf '%s\n' "$(printf '%s\t' "$@")" >>"$WG_LAUNCH_LOG"
