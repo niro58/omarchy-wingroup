@@ -817,3 +817,101 @@ CONF
   run cmp "$WG_TMP/after-first.conf" "$WG_HYPR_AUTOSTART"
   [ "$status" -eq 0 ]
 }
+
+# The style block is generated and entirely ours -- the comment above it tells
+# the user to restate anything they want changed *after* it, never inside it --
+# so an out-of-date one is rewritten rather than walked past.
+#
+# Walked past is what it used to be, and it is how a machine that installed
+# before the crashed rule existed ended up with a bar that could never show a
+# crash: the block was there, install skipped it, and the one rule the feature
+# needs to be visible was never written. Nothing said so. Seen on a real
+# machine, which is the only reason it was noticed at all.
+wg_seed_old_style() {
+  cat >"$WG_WAYBAR_STYLE" <<'CSS'
+/* the user's own css */
+#clock { color: #fff; }
+
+/* >>> wingroup */
+#custom-wingroup0 { padding: 0 6px; opacity: 0.55; }
+#custom-wingroup0.busy { opacity: 1; }
+/* <<< wingroup */
+
+/* more of the user's css */
+#battery { color: #0f0; }
+CSS
+}
+
+@test "an out-of-date style block gains the rules it is missing" {
+  wg_seed_old_style
+
+  "$WG_ROOT/install.sh"
+  run bash -c "grep -c 'custom-wingroup0.crashed' '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+  # and the full ramp, which the old block also predates
+  run bash -c "grep -c 'custom-wingroup0.idle1' '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+}
+
+@test "refreshing the style block says so" {
+  wg_seed_old_style
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"wingroup block was out of date and has been rewritten"* ]]
+}
+
+# The block is ours; every line around it is the user's and must come through
+# a refresh untouched, in order.
+@test "refreshing the style block leaves the user's css alone" {
+  wg_seed_old_style
+
+  "$WG_ROOT/install.sh"
+  run bash -c "grep -c '#clock { color: #fff; }' '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep -c '#battery { color: #0f0; }' '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+  # the user's own comment survives, and ours has not been duplicated
+  run bash -c "grep -c \"the user's own css\" '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep -c '>>> wingroup' '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+}
+
+# A block that is already current is not rewritten. Otherwise every install
+# would back the file up and churn it for no change -- and, worse, the blank
+# line before the block would accumulate one per run.
+@test "a current style block is left byte for byte" {
+  "$WG_ROOT/install.sh"
+  cp "$WG_WAYBAR_STYLE" "$WG_TMP/style.after-first"
+  run "$WG_ROOT/install.sh"
+  [[ "$output" != *"out of date"* ]]
+  run cmp "$WG_TMP/style.after-first" "$WG_WAYBAR_STYLE"
+  [ "$status" -eq 0 ]
+}
+
+# Refreshing must not leave the file one blank line taller each time, which is
+# what a strip that keeps the separator and an append that adds another would.
+@test "refreshing twice does not grow the file" {
+  wg_seed_old_style
+  "$WG_ROOT/install.sh"
+  cp "$WG_WAYBAR_STYLE" "$WG_TMP/style.after-refresh"
+  # force a second refresh from the same starting point
+  wg_seed_old_style
+  "$WG_ROOT/install.sh"
+  run cmp "$WG_TMP/style.after-refresh" "$WG_WAYBAR_STYLE"
+  [ "$status" -eq 0 ]
+}
+
+# And uninstall still has to hand the file back exactly as it was found, even
+# though what it is removing is not what install first wrote there.
+@test "uninstall restores a refreshed style file byte for byte" {
+  wg_seed_old_style
+  cp "$WG_WAYBAR_STYLE" "$WG_TMP/style.old-block"
+
+  "$WG_ROOT/install.sh"
+  "$WG_ROOT/uninstall.sh"
+  run bash -c "grep -c 'wingroup' '$WG_WAYBAR_STYLE' || true"
+  [ "$output" -eq 0 ]
+  run bash -c "grep -c '#battery { color: #0f0; }' '$WG_WAYBAR_STYLE'"
+  [ "$output" -eq 1 ]
+}
