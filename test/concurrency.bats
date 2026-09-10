@@ -108,3 +108,56 @@ EOF
   run jq -r '[.groups[].name] | sort | join(",")' "$WG_STATE_DIR/state.json"
   [ "$output" = "fleet,g0,g1,g2,g3,g4,shop,site" ]
 }
+
+# Two crashed pickers at once, which is one waybar button and one double click.
+#
+# A crash record is identified by its position in the list, because the field
+# that names one is the scope and a scope cannot survive being read back out of
+# a row. Position only means anything while the list holds still. Without a
+# lock, both pickers offer index 0, the first pick deletes it, and the second
+# pick then deletes what is *now* index 0 -- a different session, never
+# relaunched, its id gone. Reproduced before the lock existed:
+#
+#   launched: proj-a, proj-a       <- the same one twice
+#   after:    []                   <- and sess-B deleted, unrestored
+#
+# Which is the one thing the whole feature exists to stop.
+@test "two crashed pickers at once cannot delete a session nobody restored" {
+  export WG_WALKER="$WG_ROOT/test/bin/walker-stub"
+  local a="$WG_TMP/projects/proj-a" b="$WG_TMP/projects/proj-b"
+  mkdir -p "$a" "$b"
+
+  # Two records, each with an id worth losing.
+  local i=0
+  for spec in "sess-A:$a" "sess-B:$b"; do
+    i=$(( i + 1 ))
+    (
+      set -euo pipefail
+      source "$WG_LIB_DIR/state.sh"
+      source "$WG_LIB_DIR/sessions.sh"
+      scope="$(printf 'app-Hyprland-xdg\\x2dterminal\\x2dexec-lock%d.scope' "$i")"
+      wg_sessions_record "$scope" "${spec%%:*}" "${spec#*:}" hook
+      wg_crashed_add "$scope" "2026-09-10T11:0$i:00+02:00"
+    )
+  done
+
+  # Both pick entry 1: the first crashed session in the list.
+  WG_WALKER_PICK=1 "$WG_ROOT/bin/wingroup" crashed --menu >/dev/null 2>&1 &
+  local p1=$!
+  WG_WALKER_PICK=1 "$WG_ROOT/bin/wingroup" crashed --menu >/dev/null 2>&1 &
+  local p2=$!
+  wait "$p1" || true
+  wait "$p2" || true
+
+  # Whatever the interleaving, a record may only leave the list by being
+  # restored. One picker wins the lock and takes one; the other must find the
+  # lock held and do nothing at all.
+  local left launched
+  left="$(jq '.crashed | length' "$WG_RUNTIME_DIR/crashed.json" 2>/dev/null || echo 0)"
+  launched="$(grep -c . "$WG_LAUNCH_LOG" || true)"
+  [ "$launched" -eq 1 ]
+  [ "$left" -eq 1 ]
+  # and the one still on file is the one that was not launched
+  run bash -c "jq -r '.crashed[0].session' '$WG_RUNTIME_DIR/crashed.json'"
+  [ "$output" = "sess-B" ]
+}

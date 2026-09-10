@@ -80,6 +80,11 @@ strip_waybar_slots() {
   for (( i = 0; i < WG_SLOTS; i++ )); do
     sed -i "s|, \"custom/wingroup$i\"||g" "$tmp"
   done
+  # The crashed button is a module of its own rather than a slot -- it answers
+  # for no group -- but install appends it to the same line, after the slots, so
+  # it comes off the same way. Named rather than folded into the loop above,
+  # because there is no Nth of it.
+  sed -i 's|, "custom/wingroup-crashed"||g' "$tmp"
   mv -f "$tmp" "$WG_WAYBAR_CONFIG"
 }
 

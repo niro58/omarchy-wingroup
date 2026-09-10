@@ -47,6 +47,18 @@ wg_die() {
   exit 1
 }
 
+# Something went wrong but the command carries on: same reasoning as wg_die's,
+# without the exit.
+#
+# It matters most for the crashed button. Every way of reaching it -- the click,
+# the right click, the picker -- comes from a bar with no terminal behind it, so
+# a launcher that is not there, or a directory that has gone, prints to a stderr
+# nobody is reading. The user sees the count not go down and has no idea why.
+wg_warn() {
+  printf 'wingroup: %s\n' "$1" >&2
+  wg_has_tty || wg_notify "wingroup" "$1"
+}
+
 wg_usage() {
   cat >&2 <<'USAGE'
 usage: wingroup <command>
@@ -61,7 +73,7 @@ usage: wingroup <command>
   dissolve <name>               remove a group, leaving its windows alone
   monitor <group> <name|->      pin a group to a monitor, or clear the pin
   toggle-auto                   turn automatic assignment on or off
-  crashed [--restore] [--clear] list sessions systemd-oomd killed
+  crashed [--menu|--restore|--clear]  list sessions systemd-oomd killed
 USAGE
   exit 1
 }
@@ -435,20 +447,146 @@ wg_crash_split() {
   WG_CRASH+=("${rest%%$'\t'*}" "${rest#*$'\t'}")
 }
 
+# Opens the terminal for one crashed record, backgrounded, and leaves its pid in
+# WG_CRASH_PID. Returns non-zero -- having launched nothing at all -- when the
+# directory is gone.
+#
+# Both restore paths come through here: --restore sweeps the whole list, the
+# picker relaunches the one entry that was chosen, and the terminal they open
+# has to be the same terminal. The launch stays backgrounded so a sweep can
+# start a dozen at once; what waiting for it means is the caller's business.
+WG_CRASH_PID=""
+
+wg_crash_launch() {
+  local session="$1" cwd="$2"
+  WG_CRASH_PID=""
+
+  # A worktree that has since been removed, or a project that moved. There is
+  # nowhere to put the terminal, and opening it in $HOME instead would be a
+  # session in the wrong place under the right name.
+  if [[ ! -d $cwd ]]; then
+    wg_warn "skipped $cwd — the directory is gone"
+    return 1
+  fi
+
+  # The shape restore-claude.sh uses, for its reasons: the launcher puts the
+  # terminal in a scope of its own, and the shell that outlives a failed
+  # --resume is what keeps the window -- and the error in it -- on screen,
+  # instead of the terminal vanishing the moment claude exits.
+  if [[ -n $session ]]; then
+    printf 'wingroup: resuming %s in %s\n' "$session" "$cwd"
+    # shellcheck disable=SC2016  # $0 belongs to bash -c, which expands it
+    "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
+      bash -c 'claude --resume "$0" || { echo; echo "resume failed for $0"; exec bash; }' "$session" \
+      >/dev/null &
+  else
+    # No id was ever recorded for this one: it was running before the hook was
+    # installed, and a scan can only see that *something* was in that directory.
+    # A fresh claude there is the most that can be offered, and saying so is the
+    # point -- the conversation is not coming back.
+    printf 'wingroup: no session id for %s — starting a fresh claude there\n' "$cwd"
+    "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
+      bash -c 'claude || { echo; echo "claude exited"; exec bash; }' \
+      >/dev/null &
+  fi
+  WG_CRASH_PID="$!"
+}
+
+# The picker behind the bar's ⚠ button.
+#
+# Restore-all first: losing several sessions at once is the case this exists
+# for, and relaunching the lot is what you almost always want afterwards. The
+# individual sessions come next, so an Enter pressed a row too early lands on
+# that bulk action rather than on one arbitrary record. Dismissing is last,
+# because it is the only entry that throws the session ids away for good.
+wg_crashed_menu_build() {
+  local -a rows=("$@")
+  local i note
+
+  printf 'restore-all\t⟳ Restore all (%s)\n' "${#rows[@]}"
+  for (( i = 0; i < ${#rows[@]}; i++ )); do
+    wg_crash_split "${rows[i]}"
+    # The difference between getting the conversation back and getting only the
+    # directory back, which is worth knowing before picking a row.
+    if [[ -n ${WG_CRASH[1]} ]]; then
+      note="resumable"
+    else
+      note="no session id, a fresh claude"
+    fi
+    printf 'crash:%d\t  %-44s %s  %s\n' "$i" "${WG_CRASH[2]}" "${WG_CRASH[3]}" "$note"
+  done
+  printf 'dismiss-all\t✕ Dismiss all — forget these %s\n' "${#rows[@]}"
+}
+
+# What the picker's answer means. $@ is the row list it was built from, so the
+# index in a crash: action still counts the records it was shown.
+#
+# That holds because of two things, and it is worth naming both. The watcher
+# only ever appends, so a crash arriving while the picker is open shifts no
+# existing index. And the caller holds wingroup-crashed.lock, so no second
+# picker can be removing records underneath this one -- without that, two open
+# pickers each acting on "index 0" delete two different sessions and relaunch
+# one of them twice.
+cmd_crashed_menu() {
+  local -a rows=("$@")
+  local action index
+
+  action="$(wg_crashed_menu_build "${rows[@]}" | wg_menu_run 'Crashed sessions')"
+  case $action in
+    # Cancelled: nothing was chosen, so nothing happens -- not even a refresh.
+    "") return 0 ;;
+    # The two bulk entries are the flags this command already has, behaviour and
+    # messages included. Keeping the whole list when a launch fails is
+    # --restore's job, and it stays --restore's job when it is the picker doing
+    # the asking.
+    restore-all) cmd_crashed --restore ;;
+    dismiss-all) cmd_crashed --clear ;;
+    crash:*)
+      index="${action#crash:}"
+      wg_crash_split "${rows[index]}"
+      # A directory that is gone is skipped here as it is under --restore, and
+      # the record is left alone: --restore may drop it because that sweep ends
+      # with an empty list either way, whereas here the user aimed at one entry
+      # and nothing happened, so nothing changes. The notification is because
+      # this picker is opened from the bar, where a message printed on stdout
+      # has no terminal to land in.
+      if ! wg_crash_launch "${WG_CRASH[1]}" "${WG_CRASH[2]}"; then
+        wg_notify "wingroup" "Cannot restore ${WG_CRASH[2]}: the directory is gone."
+        return 0
+      fi
+      # Waited on before the record goes, for the reason --restore waits: this
+      # file is the only surviving copy of the session id, so a launcher that is
+      # not there must not cost the user the one thing they came back for.
+      if ! wait "$WG_CRASH_PID"; then
+        printf 'wingroup: the launch failed — keeping the record so the session id is not lost\n' >&2
+        return 1
+      fi
+      wg_crashed_remove "$index"
+      wg_refresh
+      ;;
+  esac
+}
+
 # The sessions systemd-oomd killed, and what to do about them.
 #
 # This only ever reads a file. Everything in it was written while those sessions
 # were alive, because none of it survives them: the process is gone, and all the
 # journal knows is which scope died. See lib/sessions.sh.
 cmd_crashed() {
-  local restore=0 clear=0
+  local restore=0 clear=0 menu=0
   while (( $# )); do
     case $1 in
       --restore) restore=1; shift ;;
       --clear)   clear=1;   shift ;;
+      --menu)    menu=1;    shift ;;
       *) wg_usage ;;
     esac
   done
+  # The usage line offers these as alternatives, so accepting a combination and
+  # quietly honouring one of them would make the usage a lie. --menu in
+  # particular wins over everything below it, so `--menu --restore` used to open
+  # a picker and drop the restore without a word.
+  (( restore + clear + menu <= 1 )) || wg_usage
 
   local -a rows=()
   mapfile -t rows < <(wg_crashed_rows)
@@ -456,6 +594,30 @@ cmd_crashed() {
   if (( ${#rows[@]} == 0 )); then
     printf 'wingroup: no crashed sessions — nothing has been oom-killed since boot\n'
     return 0
+  fi
+
+  # Below the empty check, so the button on a bar that has nothing to flag says
+  # so rather than putting an empty picker on the screen.
+  if (( menu )); then
+    # One picker at a time, and this lock is not politeness -- it is what makes
+    # restoring a single session safe at all.
+    #
+    # A record is identified by its position in the list, because the field that
+    # names one is the scope and a scope cannot survive being read back out of a
+    # row. Position is only meaningful while the list does not move underneath
+    # the reader. Two pickers open at once -- one bar button, one double click --
+    # both offer index 0, the first pick deletes it, and the second pick then
+    # deletes what is *now* index 0: a different session, never relaunched, and
+    # its id gone with it. Which is the one thing this whole feature exists to
+    # stop happening.
+    #
+    # Non-blocking, like the group picker's: a second click does nothing rather
+    # than queueing a second window behind the first.
+    local lock="${XDG_RUNTIME_DIR:-/tmp}/wingroup-crashed.lock"
+    exec 9>"$lock"
+    flock -n 9 || return 0
+    cmd_crashed_menu "${rows[@]}"
+    return
   fi
 
   # --clear is the "I have dealt with these myself" exit: nothing is relaunched,
@@ -467,7 +629,7 @@ cmd_crashed() {
     return 0
   fi
 
-  local row session cwd
+  local row
   if (( ! restore )); then
     printf '%s session(s) killed by systemd-oomd:\n' "${#rows[@]}"
     for row in "${rows[@]}"; do
@@ -485,39 +647,12 @@ cmd_crashed() {
   local -a pids=()
   for row in "${rows[@]}"; do
     wg_crash_split "$row"
-    session="${WG_CRASH[1]}"
-    cwd="${WG_CRASH[2]}"
-    # A worktree that has since been removed, or a project that moved. There is
-    # nowhere to put the terminal, and opening it in $HOME instead would be a
-    # session in the wrong place under the right name.
-    if [[ ! -d $cwd ]]; then
-      printf 'wingroup: skipped %s — the directory is gone\n' "$cwd"
-      skipped=$(( skipped + 1 ))
-      continue
-    fi
-    # The shape restore-claude.sh uses, for its reasons: the launcher puts the
-    # terminal in a scope of its own, and the shell that outlives a failed
-    # --resume is what keeps the window -- and the error in it -- on screen,
-    # instead of the terminal vanishing the moment claude exits.
-    if [[ -n $session ]]; then
-      printf 'wingroup: resuming %s in %s\n' "$session" "$cwd"
-      # shellcheck disable=SC2016  # $0 belongs to bash -c, which expands it
-      "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
-        bash -c 'claude --resume "$0" || { echo; echo "resume failed for $0"; exec bash; }' "$session" \
-        >/dev/null &
-      pids+=("$!")
+    if wg_crash_launch "${WG_CRASH[1]}" "${WG_CRASH[2]}"; then
+      pids+=("$WG_CRASH_PID")
+      launched=$(( launched + 1 ))
     else
-      # No id was ever recorded for this one: it was running before the hook was
-      # installed, and a scan can only see that *something* was in that
-      # directory. A fresh claude there is the most that can be offered, and
-      # saying so is the point -- the conversation is not coming back.
-      printf 'wingroup: no session id for %s — starting a fresh claude there\n' "$cwd"
-      "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
-        bash -c 'claude || { echo; echo "claude exited"; exec bash; }' \
-        >/dev/null &
-      pids+=("$!")
+      skipped=$(( skipped + 1 ))
     fi
-    launched=$(( launched + 1 ))
   done
 
   # The launches are backgrounded so that a dozen terminals start at once rather
@@ -552,11 +687,13 @@ cmd_crashed() {
   fi
 
   if (( failed )); then
-    printf 'wingroup: %s launch(es) failed — keeping the list so the session ids are not lost\n' \
-      "$failed" >&2
-    # Non-zero as well as loud. The stderr line is for a person; a script that
-    # runs this to empty the list has to be able to find out from the exit
-    # status that the list is still full.
+    # Through wg_warn, because the commonest way to reach this is the bar's
+    # right click, and stderr there goes nowhere: the terminals would fail to
+    # appear, the count would not go down, and nothing would say why.
+    wg_warn "$failed launch(es) failed — keeping the list so the session ids are not lost"
+    # Non-zero as well as loud. The message is for a person; a script that runs
+    # this to empty the list has to be able to find out from the exit status
+    # that the list is still full.
     return 1
   fi
 }
