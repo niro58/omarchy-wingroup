@@ -27,6 +27,34 @@ source "$WG_LIB_DIR/state.sh"
 # shellcheck source=lib/sessions.sh
 source "$WG_LIB_DIR/sessions.sh"
 
+# True when another claude is already running above this one.
+#
+# A session started from inside a session -- a subagent, a workflow, anything
+# driving `claude -p` -- fires SessionStart exactly like a terminal session
+# does, and it is running in the *terminal's* scope, because it is a descendant
+# of that terminal. Recording it would overwrite the terminal's session id with
+# a subagent's, and the scope's one entry would then name a conversation that
+# was never the one on screen. Restoring that after an oom-kill gives you back
+# the subagent instead of your work.
+#
+# Ancestry, and not an environment variable: CLAUDE_CODE_CHILD_SESSION is set
+# for every process Claude spawns, this hook included, so it is 1 for a terminal
+# session's own hook too and tells the two apart not at all (verified). The
+# process tree is the fact that actually differs.
+wg_hook_nested() {
+  local pid="${CLAUDE_PID:-$PPID}" comm hops=0
+  # Start above our own claude: it is the one doing the starting, so finding it
+  # is expected. Anything further up that is also claude means we are nested.
+  while (( hops < 20 )); do
+    pid="$(awk '/^PPid:/{print $2}' "$WG_PROC_DIR/$pid/status" 2>/dev/null)" || return 1
+    [[ -n $pid && $pid != 0 ]] || return 1
+    read -r comm < "$WG_PROC_DIR/$pid/comm" 2>/dev/null || return 1
+    [[ $comm != "claude" ]] || return 0
+    hops=$(( hops + 1 ))
+  done
+  return 1
+}
+
 wg_hook_record() {
   local payload session cwd scope
   local -a fields=()
@@ -35,6 +63,10 @@ wg_hook_record() {
   # running it: read from it and the session that is starting would hang here
   # forever waiting for a payload nobody is going to type.
   [[ ! -t 0 ]] || return 0
+
+  # Checked before the payload is even read: a nested session has nothing to
+  # contribute and everything to overwrite.
+  ! wg_hook_nested || return 0
   payload="$(cat)" || return 0
   [[ -n $payload ]] || return 0
 
