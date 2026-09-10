@@ -17,9 +17,14 @@
 # directory the terminal was *opened* in, which is not where the session ended
 # up. crashed.json is what died: one record per scope systemd-oomd killed.
 #
-# Both live under $XDG_RUNTIME_DIR and are meant to die at reboot. A crash you
-# have not dealt with by the time you reboot is one wingroup-restore already
-# handles from the other end, by replaying the whole shutdown cluster.
+# Both live under $XDG_RUNTIME_DIR and are meant to die at reboot: they describe
+# processes, and after a reboot there are no processes to describe.
+#
+# The snapshot is the exception, and lives in the state directory because its
+# whole job is to outlive the boot. It is the same map, written out after every
+# scan, so that after a reboot there is an exact record of what was open --
+# which session, in which directory -- instead of the guess a restore otherwise
+# has to make from file timestamps.
 
 : "${WG_RUNTIME_DIR:=${XDG_RUNTIME_DIR:-/tmp}/wingroup}"
 WG_SESSIONS_FILE="$WG_RUNTIME_DIR/sessions.json"
@@ -37,6 +42,18 @@ WG_RUNTIME_LOCK="$WG_RUNTIME_DIR/.runtime.lock"
 # about it being handled, which is immediate; six hours is slack, not a
 # requirement, and the file is a few hundred bytes either way.
 : "${WG_SESSIONS_TTL:=21600}"
+
+# The snapshot, and the copy kept of the one the previous boot left behind.
+# In the state directory, not the runtime one: everything else here is about
+# processes that exist, and this is the one thing that has to survive them.
+: "${WG_STATE_DIR:=$HOME/.local/state/omarchy/wingroup}"
+WG_SNAPSHOT_FILE="$WG_STATE_DIR/sessions-snapshot.json"
+WG_SNAPSHOT_PREV="$WG_STATE_DIR/sessions-snapshot.prev.json"
+
+# Which boot we are on. The kernel makes a fresh one at every boot, so comparing
+# it against the one stamped on a snapshot answers the only question a restore
+# has: were these sessions open *before* this machine came up?
+: "${WG_BOOT_ID_FILE:=/proc/sys/kernel/random/boot_id}"
 
 wg_sessions_default() { printf '%s\n' '{"sessions":{}}'; }
 wg_crashed_default()  { printf '%s\n' '{"crashed":[]}'; }
@@ -238,6 +255,92 @@ wg_crashed_clear() {
 # and describes crashes, and the CLI relaunches the lot and clears the file.
 wg_crashed_rows() {
   jq -r '.crashed[] | [.session, .cwd, .killed_at] | @tsv' <<<"$(wg_crashed_read)"
+}
+
+wg_boot_id() {
+  local id=""
+  read -r id < "$WG_BOOT_ID_FILE" 2>/dev/null || true
+  printf '%s\n' "$id"
+}
+
+# Writes the live map out to the state directory, stamped with this boot.
+#
+# Called after every scan, so the file on disk is never more than one scan
+# interval behind what is actually open. There is no shutdown hook to be had
+# here -- a machine can lose power, and a session killed by oomd never gets to
+# say goodbye either -- so "recent enough" is the whole design, and a scan
+# interval of seconds makes it accurate enough to restore from.
+#
+# The first write of a new boot moves the file the previous boot left behind out
+# of the way instead of overwriting it, because that file is exactly what a
+# restore is about to want. Doing it here rather than in the restore removes the
+# ordering problem between the two: whichever of them runs first, the previous
+# boot's record survives -- as .prev if the watcher got there, and as the
+# snapshot itself if it did not.
+wg_snapshot_write() {
+  local boot existing tmp
+  boot="$(wg_boot_id)"
+  [[ -n $boot ]] || return 0
+
+  mkdir -p "$WG_STATE_DIR" || return 1
+  if [[ -f $WG_SNAPSHOT_FILE ]]; then
+    existing="$(jq -r '.boot // ""' "$WG_SNAPSHOT_FILE" 2>/dev/null || true)"
+    if [[ $existing != "$boot" ]]; then
+      mv -f "$WG_SNAPSHOT_FILE" "$WG_SNAPSHOT_PREV" 2>/dev/null || true
+    fi
+  fi
+
+  tmp="$(mktemp "$WG_STATE_DIR/.snap.XXXXXX")" || return 1
+  if jq --arg boot "$boot" '{boot: $boot, sessions: .sessions}' \
+       <<<"$(wg_sessions_read)" >"$tmp" 2>/dev/null && mv -f "$tmp" "$WG_SNAPSHOT_FILE"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# The sessions that were open when this machine last went down, one per line:
+# session id, cwd, tab separated. Empty when there is no such record.
+#
+# Both files are considered, and only a boot id that is not this one counts. A
+# snapshot stamped with the current boot describes what is open *now*, which is
+# the one thing a restore must not act on -- it would open a second terminal for
+# every session already on screen.
+#
+# The main file is tried first, and the order is load-bearing. Which of the two
+# holds the last boot's record depends on whether the watcher has written yet:
+#
+#   watcher first  snapshot = this boot, prev = last boot  -> prev is the answer
+#   restore first  snapshot = last boot, prev = the boot before it
+#
+# In the second case .prev is a boot old and would restore a set of terminals
+# that has been wrong for a whole session. Taking the main file when it is not
+# this boot's, and only then falling back to .prev, is right in both orders --
+# the current-boot test above is what makes trying it first safe.
+#
+# Returns 0 when a previous boot's record was found and 1 when there is none,
+# and the distinction is the whole point: "the last boot recorded no open
+# sessions" is an answer, and it is not the same answer as "there is no record".
+# A caller that told them apart by counting rows would fall back to guessing
+# every time you shut down with no sessions open -- and the guess reopens
+# whatever was last written to, which is the behaviour this replaces.
+wg_snapshot_previous_rows() {
+  local file boot current
+  current="$(wg_boot_id)"
+  # No boot id, no comparison, and without one every stamped snapshot looks like
+  # somebody else's -- including this boot's own, whose sessions are on screen
+  # right now. Refusing to answer is the only safe way to be wrong here.
+  [[ -n $current ]] || return 1
+  for file in "$WG_SNAPSHOT_FILE" "$WG_SNAPSHOT_PREV"; do
+    [[ -f $file ]] || continue
+    boot="$(jq -r '.boot // ""' "$file" 2>/dev/null || true)"
+    [[ -n $boot && $boot != "$current" ]] || continue
+    jq -r '.sessions | to_entries[]
+           | select((.value.cwd // "") != "")
+           | [.value.session // "", .value.cwd] | @tsv' "$file" 2>/dev/null || true
+    return 0
+  done
+  return 1
 }
 
 # The group a crashed session's directory belongs to, resolved the same way a
