@@ -32,6 +32,54 @@ wg_setup_tmp() {
   export WG_NOTIFY_CMD="$WG_ROOT/test/bin/notify-stub"
   export WG_NOTIFY_LOG="$WG_TMP/notify.log"
   : >"$WG_NOTIFY_LOG"
+  # sessions.json and crashed.json. Never the real runtime directory: a test
+  # that wrote there would tell the user's own bar that sessions had crashed.
+  export WG_RUNTIME_DIR="$WG_TMP/runtime"
+  # Nothing in the tests may read the machine's real process table, for the
+  # same reason test/stub-cwd.sh exists: the fixture pids are not processes.
+  export WG_PROC_DIR="$WG_TMP/proc"
+  mkdir -p "$WG_PROC_DIR"
+  # Never the real ~/.claude/settings.json. install.sh registers a SessionStart
+  # hook in it, so any test that runs install.sh -- not only the ones written to
+  # exercise the hook -- would otherwise edit and back up the settings file of
+  # the machine running the suite. Isolated here rather than in each test file
+  # for that reason: it has to hold for install-edgecases.bats and
+  # constants.bats too, neither of which is about the hook at all.
+  export WG_CLAUDE_SETTINGS="$WG_TMP/claude-settings.json"
+  # Never the real uwsm-app: a test must not put terminals on the user's screen.
+  export WG_LAUNCH_CMD="$WG_ROOT/test/bin/launch-stub"
+  export WG_LAUNCH_LOG="$WG_TMP/launch.log"
+  : >"$WG_LAUNCH_LOG"
+}
+
+# Adds one process to the fake $WG_PROC_DIR: pid, comm, scope, cwd.
+#
+# A directory of files rather than a stubbed function, because wg_sessions_scan
+# reads /proc itself -- globbing the pid list and reading three files per hit --
+# and stubbing that away would leave the part that actually ships untested.
+wg_fake_proc() {
+  local pid="$1" comm="$2" scope="$3" cwd="$4"
+  # On its own line, and not a fifth word on the `local` above: `local` is a
+  # builtin, so every word on it is expanded before any of the assignments take
+  # effect -- $pid there is still the caller's, or empty, and every fake process
+  # lands in $WG_PROC_DIR itself.
+  local dir="$WG_PROC_DIR/$pid"
+  mkdir -p "$dir" "$cwd"
+  printf '%s\n' "$comm" >"$dir/comm"
+  printf '0::/user.slice/user-1000.slice/app.slice/app-graphical.slice/%s\n' "$scope" >"$dir/cgroup"
+  ln -sfn "$cwd" "$dir/cwd"
+}
+
+# The scope name a terminal launched through uwsm/xdg-terminal-exec ends up in.
+# Written once here so a test names a scope the way the desktop does, escapes
+# and all -- those backslashes are literal, and they are why the scope is never
+# round-tripped through @tsv.
+wg_fake_scope() {
+  printf 'app-Hyprland-xdg\\x2dterminal\\x2dexec-%s.scope\n' "$1"
+}
+
+launches() {
+  cat "$WG_LAUNCH_LOG"
 }
 
 wg_teardown_tmp() {

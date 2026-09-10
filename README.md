@@ -48,6 +48,9 @@ some of it.
 - **`jq`** — all state and window-table handling.
 - **`socat`** — the daemon reads Hyprland's event socket through it.
 - **`pkill`** — sends waybar the redraw signal (`RTMIN+11`).
+- **`journalctl`** — `wingroup-oomwatch` follows the user journal to notice
+  sessions systemd-oomd has killed. Without systemd there is no oom-kill line to
+  read and nothing to detect; everything else still works.
 - **`notify-send`** — how an action started from the picker reports what it did.
   Optional: without it the same message still goes to stderr.
 - Base utilities: `bash` 5.0 or newer (the daemon times its refresh debounce
@@ -73,18 +76,20 @@ copies every file to `<file>.bak.<unix-timestamp>` before touching it**, and it
 is idempotent: a file that already contains the wingroup block is left alone, so
 re-running it is safe.
 
-Exactly four files are modified, plus two directories written to:
+Exactly four files are modified, plus `~/.claude/settings.json` if you have
+one, plus two directories written to:
 
 | File | What changes |
 | --- | --- |
 | `~/.config/waybar/config.jsonc` | Eight `"custom/wingroup0".."custom/wingroup7"` module definitions, appended to `"modules-left"`; `"ignore-workspaces"` added inside `"hyprland/workspaces"` |
-| `~/.config/waybar/style.css` | The `/* >>> wingroup */` block: base, idle ramp and state rules for all eight slots |
+| `~/.config/waybar/style.css` | The `/* >>> wingroup */` block: base, idle ramp, state and crashed rules for all eight slots |
 | `~/.config/hypr/bindings.conf` | `unbind = SUPER, G`, then `SUPER+G` and `SUPER+CTRL+G` bound to wingroup |
-| `~/.config/hypr/autostart.conf` | `exec-once = wingroup-daemon`, and `exec-once = wingroup-restore` only if you have a restore script |
-| `~/.local/bin/` | Symlinks to `wingroup`, `wingroup-daemon`, `wingroup-restore`, `wingroup-waybar` |
+| `~/.config/hypr/autostart.conf` | `exec-once = wingroup-daemon` and `exec-once = wingroup-oomwatch`, and `exec-once = wingroup-restore` only if you have a restore script |
+| `~/.claude/settings.json` | A `SessionStart` hook entry running `wingroup-hook` — only if the file already exists |
+| `~/.local/bin/` | Symlinks to `wingroup`, `wingroup-daemon`, `wingroup-hook`, `wingroup-oomwatch`, `wingroup-restore`, `wingroup-waybar` |
 | `~/.local/state/omarchy/wingroup/` | `state.json` seeded with an empty group list, if it does not exist |
 
-Three details worth knowing before you run it:
+Four details worth knowing before you run it:
 
 - **It takes over `SUPER+G`.** Hyprland binds that to `togglegroup` — its own
   window-tabbing feature, which is a different concept from this tool's project
@@ -102,6 +107,17 @@ Three details worth knowing before you run it:
   ending in `],`, and `"hyprland/workspaces": {` must open on a line of its own.
   If any of the three edits does not land, install prints which one and changes
   nothing at all.
+- **It registers a Claude Code hook.** If `~/.claude/settings.json` exists,
+  install adds one `SessionStart` entry to it running `wingroup-hook`, which is
+  the only way session ids are ever learned — see [Crashed
+  sessions](#crashed-sessions). The file is the user's own and mostly nothing to
+  do with wingroup, so the edit is careful: it is merged with `jq`, written to a
+  temp file beside the target and renamed, backed up first like every other
+  file, idempotent on the command string, and **refused outright if the existing
+  file is not valid JSON**. Every way it can go wrong — no file, unparseable
+  file, failed write — is announced and skipped rather than failing the install.
+  Pass `--no-claude-hook` to skip it deliberately; crash detection then names
+  the project a lost session was in rather than the session itself.
 
 `"hyprland/workspaces"` keeps its position, so the bar reads left to right:
 Omarchy menu button, your numbered workspaces, then the group strip.
@@ -213,6 +229,108 @@ Both classes land on the widget together, so `#custom-wingroup0.active.idle3`
 is a valid selector for "the group I am looking at, with three sessions waiting
 in it".
 
+## Crashed sessions
+
+Under memory pressure systemd-oomd picks the greediest cgroup on the machine and
+kills it. Most days that is the browser. Some days it is a terminal with a Claude
+Code session in it, and the window simply disappears — no message, no exit code,
+nothing in a shell to scroll back to. You find out an hour later by noticing a
+window you were sure you had left open, and then you have to work out which
+project it was and whether the conversation was worth anything.
+
+`wingroup crashed` answers that. The group that lost a session is flagged on the
+bar, and one command relaunches every lost session in the directory it was
+working in — resuming the actual conversation wherever wingroup knows its id.
+
+### How a dead session is identified
+
+Omarchy launches every terminal through uwsm/`xdg-terminal-exec`, which puts it
+in a systemd scope of its own:
+
+```
+app-Hyprland-xdg\x2dterminal\x2dexec-9029a872.scope
+```
+
+Those backslashes are literal characters in the unit name. That name is the only
+thing a live session and the record of its death have in common:
+`/proc/<pid>/cgroup` ends in it while the session runs, and systemd names it in
+the journal when it kills the thing:
+
+```
+2026-09-08T14:02:11+0200 host systemd[1443]: app-Hyprland-xdg\x2dterminal\x2dexec-9029a872.scope: Failed with result 'oom-kill'.
+```
+
+So the scope is the join key — and everything worth knowing has to be written
+down **while the session is still alive**. Afterwards there is nothing left to
+read: `/proc` is gone, and the journal's launch line records the directory the
+terminal was *opened* in, which is very often not where the session ended up.
+
+Three pieces do it:
+
+- **`wingroup-hook`** is a Claude Code `SessionStart` hook. Claude hands it the
+  session id and working directory on stdin and it files them under the scope
+  the terminal is running in. This is the only source of session ids anywhere on
+  the machine; nothing else can work one out, before or after the kill.
+- **`wingroup-oomwatch`** runs from login. It follows the user journal for
+  oom-kill lines, and every 15 seconds it rescans `/proc` for live `claude`
+  processes to keep the map current. That scan is the fallback for sessions that
+  predate the hook: it cannot learn an id, but it does learn that *something* was
+  running in that scope, and in which directory.
+- **`wingroup crashed`** reads what the two of them left behind.
+
+A kill line naming a scope with no session recorded against it is ignored, which
+is how the browser — the thing oomd actually kills most days — stays out of this
+entirely.
+
+Both files live under `$XDG_RUNTIME_DIR/wingroup/` and are meant to die at
+reboot. A crash you have not dealt with by the time you reboot is one
+`restore-claude.sh` already handles from the other end, by replaying the whole
+shutdown cluster.
+
+### The crashed bar state
+
+A group holding a crashed session gets the `crashed` class, and its tooltip
+gains a line per crash directly under the counts, above the projects:
+
+```
+alpha — 4 windows · 1 idle · 0 busy
+Crashed: /home/me/projects/alpha-api — 2026-09-08T14:02:11+0200
+Projects: alpha-web, alpha-api
+```
+
+`crashed` is a *third* class alongside the state and the idle step, never
+instead of one: a group can be the one you are looking at, warm with finished
+work, and still be short a session oomd took while you were elsewhere.
+
+| Class | Installed rule |
+| --- | --- |
+| `crashed` | `background: #7f1d1d; color: #ffd7d5; opacity: 1; font-weight: bold;` |
+
+It is the only rule in the block that fills the widget rather than colouring its
+text, because a crash is not "more idle sessions" and must not read as another
+step on the ramp. And it is written **after** the state rules — the mirror of
+why the ramp is written before them. The ramp has to yield to `active` or it
+would dim the group you are looking at; this rule raises every property it
+touches and lowers none, so it can safely take the last word, and it has to: the
+group you are looking at is exactly the one whose lost session you most need to
+be told about. Change it the way you change the ramp, by restating the selector
+after the wingroup block.
+
+### What cannot be recovered
+
+**A session that was already running when the hook was registered cannot be
+resumed by id.** The `/proc` scan can see that a `claude` was alive in that scope
+and where it was working; there is no way for it to find out *which* session that
+was, and after the kill there is nothing left to ask. Those crashes are still
+detected, still flagged on the bar, and `--restore` still opens a terminal in the
+right directory — but it starts a fresh `claude` there, and says so on the line
+it prints. You get the project back, not the conversation.
+
+Sessions started after the hook is registered are resumable by id. In practice
+that means every session opened in a new terminal after you install — the ones
+already open when you ran `./install.sh` stay unresumable until you restart them.
+
+
 ## Keybinds
 
 | Keybind | Command | What it does |
@@ -292,11 +410,20 @@ $ ./uninstall.sh
 $ hyprctl reload && pkill -SIGUSR2 waybar
 ```
 
-It removes the four symlinks from `~/.local/bin` and strips out exactly what
+It removes the six symlinks from `~/.local/bin` and strips out exactly what
 install added from each of the four config files, restoring the surrounding
 content **byte for byte** — including any blank line install prepended to a
 block, and including whether the file originally ended in a newline (install
 records that on the closing marker so uninstall can put it back).
+
+**The Claude Code hook is removed too**, if install put one there: uninstall
+takes out the single `SessionStart` entry running `wingroup-hook` and leaves
+everything else in `~/.claude/settings.json` alone, including any `SessionStart`
+hooks of your own. This is the one edit that cannot be reversed byte for byte —
+the file is JSON and `jq` reformats what it rewrites — so the *content* comes
+back exactly and the whitespace is `jq`'s. A settings file that never had the
+hook in it is not opened for writing at all, so uninstalling on a machine
+installed with `--no-claude-hook` cannot reflow it.
 
 **Your groups are kept.** `~/.local/state/omarchy/wingroup/` is never
 touched, so uninstalling and reinstalling later picks up where you left off. To
@@ -321,6 +448,7 @@ wingroup rename <name> <label>         change a group's displayed label
 wingroup dissolve <name>               remove a group, leaving its windows alone
 wingroup monitor <group> <name|->      pin a group to a monitor, or clear the pin
 wingroup toggle-auto                   turn automatic assignment on or off
+wingroup crashed [--restore] [--clear] list sessions systemd-oomd killed
 ```
 
 ### `wingroup new <label> [project...]`
@@ -446,6 +574,36 @@ $ wingroup toggle-auto
 
 Flips `.auto` in `state.json`. Turns automatic filing of newly opened windows on
 or off without touching groups, overrides, or windows already placed.
+
+### `wingroup crashed [--restore] [--clear]`
+
+```console
+$ wingroup crashed
+2 session(s) killed by systemd-oomd:
+  2026-09-08T14:02:11+0200  /home/me/projects/alpha-api  resumable
+  2026-09-08T14:09:44+0200  /home/me/projects/beta       no session id, a fresh claude
+```
+
+With no flags it lists what was lost and changes nothing — the time systemd
+killed it, the directory the session was working in, and whether an id was
+recorded for it. See [Crashed sessions](#crashed-sessions) for why some rows have
+one and some do not.
+
+`--restore` relaunches all of them: one terminal per session, opened in the
+directory that session was working in, running `claude --resume <id>` where there
+is an id and a plain `claude` where there is not. A record whose directory no
+longer exists — a worktree since removed, a project since moved — is skipped and
+said so, because opening the terminal in `$HOME` instead would be a session in
+the wrong place under the right name. The list is then cleared **whole**, skips
+included: a directory that is gone can never be restored, and leaving the record
+in would flag its group on the bar forever.
+
+`--clear` is the "I have dealt with these myself" exit — nothing is relaunched,
+the list is emptied, and the bar stops flagging groups that are fine again. Given
+both flags, `--restore` wins; it clears the list anyway.
+
+Nothing here is destructive. It only ever reads the two runtime files and opens
+terminals.
 
 ## `state.json`
 
@@ -582,18 +740,20 @@ Following changes *how* a window is moved, never *whether* it is.
 This part is optional and off unless you already have the script.
 
 If you keep a `~/restore-claude.sh` that respawns the terminals that were open
-at shutdown, `install.sh` adds a second autostart line for it:
+at shutdown, `install.sh` adds a third autostart line for it:
 
 ```
 # >>> wingroup
 exec-once = wingroup-daemon
+exec-once = wingroup-oomwatch
 exec-once = wingroup-restore
 # <<< wingroup
 ```
 
 **Install adds the `wingroup-restore` line only if that script exists and is
-executable at the moment you run `./install.sh`.** Otherwise you get the daemon
-line alone, and install says so in its closing summary. Respawning terminals at
+executable at the moment you run `./install.sh`.** The other two are
+unconditional. Otherwise you get those two alone, and install says so in its
+closing summary. Respawning terminals at
 every login is not something a window grouper should sign a stranger up for.
 
 `wingroup-restore` runs your script with following suppressed, waits five
@@ -627,10 +787,15 @@ All optional; the defaults are what install and the autostart lines use.
 | `WG_RESTORE_FLAG` | `$XDG_RUNTIME_DIR/wingroup-restoring` | Daemon, restore |
 | `WG_RESTORE_SCRIPT` | `~/restore-claude.sh` | Restore, install |
 | `WG_RESTORE_SETTLE` | `5` (seconds) | Restore |
+| `WG_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/wingroup` | Hook, watcher, bar, `crashed` |
+| `WG_SCAN_INTERVAL` | `15` (seconds) | Watcher |
+| `WG_SESSIONS_TTL` | `21600` (seconds) | Watcher |
+| `WG_JOURNAL_CMD` | `journalctl --user -f -n0 -o short-iso` | Watcher |
+| `WG_LAUNCH_CMD` | `uwsm-app` | `crashed --restore` |
 
 `install.sh` and `uninstall.sh` additionally honour `WG_BIN_DIR`,
-`WG_WAYBAR_CONFIG`, `WG_WAYBAR_STYLE`, `WG_HYPR_BINDINGS` and
-`WG_HYPR_AUTOSTART` if you keep those files somewhere non-standard.
+`WG_WAYBAR_CONFIG`, `WG_WAYBAR_STYLE`, `WG_HYPR_BINDINGS`, `WG_HYPR_AUTOSTART`
+and `WG_CLAUDE_SETTINGS` if you keep those files somewhere non-standard.
 
 ## Troubleshooting
 
@@ -669,6 +834,20 @@ opened windows stops.
 **Groups vanished.** Check for `state.json.corrupt` next to `state.json`: an
 unparseable state file is moved aside and replaced with the empty default. The
 `.corrupt` copy is the previous contents.
+
+**A session died and the bar never flagged it.** In order: `wingroup-oomwatch`
+must be running (`pgrep -fa wingroup-oomwatch`) — it is started by `exec-once` in
+`~/.config/hypr/autostart.conf`, so it comes up at login and `hyprctl reload`
+does not restart it. The scope must have been in the session map before the kill,
+which means the watcher must have been up while the session was alive. And it
+only ever files *oom-kills*: a session you closed, or one killed by anything
+other than systemd-oomd, is not a crash and is not recorded. `wingroup-oomwatch
+--once` with `WG_JOURNAL_CMD='journalctl --user -n200 -o short-iso --no-pager'`
+replays the recent journal by hand and can be run while the watcher is up.
+
+**A crashed session came back as a fresh `claude`.** No session id was ever
+recorded for it, which means it was already running when `wingroup-hook` was
+registered. See [What cannot be recovered](#what-cannot-be-recovered).
 
 **The bar shows a group with windows in it, but the workspace is empty.** Run
 `wingroup tidy`. Membership and location are separate facts, and something moved
@@ -720,6 +899,24 @@ a window out from under the group.
   all digits and shorter than the group count cannot be activated by name.
 - **Only local Hyprland windows exist.** Everything comes from `hyprctl
   clients`; there is no other entry source.
+- **A session that predates the hook cannot be resumed by id.** The `/proc` scan
+  learns the scope and the directory and never the session, so those crashes give
+  you the project back and not the conversation. See [What cannot be
+  recovered](#what-cannot-be-recovered).
+- **Only systemd-oomd kills are detected.** `wingroup-oomwatch` matches
+  `Failed with result 'oom-kill'` on the user journal. The kernel OOM killer, a
+  `SIGKILL` from somewhere else, and a terminal you closed yourself all look the
+  same from outside and none of them are recorded.
+- **Crash records die at reboot.** Both runtime files live under
+  `$XDG_RUNTIME_DIR`. A crash you have not dealt with by then is gone from the
+  bar — which is deliberate: `restore-claude.sh` handles that case from the other
+  end.
+- **The scope is the join key, so a terminal outside one is invisible.** A
+  session started from an `ssh` login, from a terminal not launched through
+  uwsm/`xdg-terminal-exec`, or from anything else with no `.scope` in its cgroup
+  path is never recorded and so never reported as crashed.
+- **Uninstall reformats `~/.claude/settings.json`.** It is the one file whose
+  content, but not whitespace, is restored — see [Uninstall](#uninstall).
 
 ## License
 

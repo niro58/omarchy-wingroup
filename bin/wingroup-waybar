@@ -10,6 +10,8 @@ source "$WG_LIB_DIR/state.sh"
 source "$WG_LIB_DIR/resolve.sh"
 # shellcheck source=lib/constants.sh
 source "$WG_LIB_DIR/constants.sh"
+# shellcheck source=lib/sessions.sh
+source "$WG_LIB_DIR/sessions.sh"
 
 # Tests point this at a stub that replaces /proc lookups with a fixture map.
 if [[ -n ${WG_TEST_STUB_CWD:-} ]]; then
@@ -85,6 +87,44 @@ main() {
     esac
   done < <(wg_window_table)
 
+  # Sessions systemd-oomd killed, narrowed to this group.
+  #
+  # This module is re-run on every window-title change, and Claude rewrites the
+  # title several times a second while it works, so anything paid here is paid
+  # at that rate: a journalctl call, a walk of /proc or a jq per window would
+  # each be ruinous. The watcher does that work once, when a kill actually
+  # happens, and leaves the answer in a file for this to read.
+  #
+  # Even reading that file is not free -- wg_crashed_rows is a mkdir and a jq --
+  # so the common case is settled first, by a test that costs no processes at
+  # all. A machine where nothing has died has no crash file: wg_crashed_clear
+  # removes it rather than leaving an empty document behind, precisely so that
+  # this stays a [[ -f ]] and not a jq for the rest of the boot.
+  local -a crash_rows=() crash_lines=()
+  if [[ -f $WG_CRASHED_FILE ]]; then
+    mapfile -t crash_rows < <(wg_crashed_rows)
+  fi
+  if (( ${#crash_rows[@]} )); then
+    # wg_window_table loads WG_STATE_MAP too, but it runs inside a process
+    # substitution -- the map it filled died with that subshell, so this is not
+    # a duplicate load. It costs a jq, so it is paid only when there is a crash
+    # to place, which on a machine that is behaving is never.
+    wg_state_map_load "$state"
+    local row rest cwd killed_at
+    for row in "${crash_rows[@]}"; do
+      # Peeled apart by expansion, not `IFS=$'\t' read -r a b c`: the session id
+      # column is empty for a session that was already running when the hook was
+      # installed, and tab is IFS whitespace, so read would collapse that empty
+      # column and slide the directory into the id. Same trap wg_row_split
+      # exists for.
+      rest="${row#*$'\t'}"
+      cwd="${rest%%$'\t'*}"
+      killed_at="${rest#*$'\t'}"
+      [[ "$(wg_crashed_group "$cwd")" == "$name" ]] || continue
+      crash_lines+=("Crashed: $cwd — $killed_at")
+    done
+  fi
+
   # activeworkspace answers for the focused monitor only, which on a
   # multi-monitor desktop is a lie by omission: a group can be on screen, in
   # full view, on the monitor that does not have focus. Ask every monitor.
@@ -134,12 +174,24 @@ main() {
     fi
     classes+=("idle$heat")
   fi
+  # A crash is a third fact about the same group, independent of the other two:
+  # a group can be the one you are looking at, warm with idle sessions, and
+  # still be short a session oomd took while you were elsewhere. So it is
+  # another class beside them, never instead of one.
+  (( ${#crash_lines[@]} == 0 )) || classes+=("crashed")
 
   projects="$(jq -r --arg n "$name" \
     'first(.groups[] | select(.name == $n) | .projects) | join(", ")' <<<"$state")"
 
   local tooltip
   tooltip="$(printf '%s — %d windows · %d idle · %d busy' "$label" "$total" "$idle" "$busy")"
+  # Directly under the counts, above the projects: what died is the one thing in
+  # here that needs doing something about, and `wingroup crashed --restore` is
+  # what does it.
+  local crash_line
+  for crash_line in ${crash_lines[@]+"${crash_lines[@]}"}; do
+    tooltip+=$'\n'"$crash_line"
+  done
   [[ -n $projects ]] && tooltip+=$'\n'"Projects: $projects"
 
   if (( slot == WG_SLOTS - 1 && ${#names[@]} > WG_SLOTS )); then
