@@ -513,7 +513,7 @@ wg_crashed_menu_build() {
     else
       note="no session id, a fresh claude"
     fi
-    printf 'crash:%d\t  %-44s %s  %s\n' "$i" "${WG_CRASH[2]}" "${WG_CRASH[3]}" "$note"
+    printf 'crash:%d\t  %-44s %s  %s\n' "$i" "${WG_CRASH[2]}" "$(wg_crash_when "${WG_CRASH[3]}")" "$note"
   done
   printf 'dismiss-all\t✕ Dismiss all — forget these %s\n' "${#rows[@]}"
 }
@@ -635,9 +635,9 @@ cmd_crashed() {
     for row in "${rows[@]}"; do
       wg_crash_split "$row"
       if [[ -n ${WG_CRASH[1]} ]]; then
-        printf '  %s  %s  resumable\n' "${WG_CRASH[3]}" "${WG_CRASH[2]}"
+        printf '  %s  %s  resumable\n' "$(wg_crash_when "${WG_CRASH[3]}")" "${WG_CRASH[2]}"
       else
-        printf '  %s  %s  no session id, a fresh claude\n' "${WG_CRASH[3]}" "${WG_CRASH[2]}"
+        printf '  %s  %s  no session id, a fresh claude\n' "$(wg_crash_when "${WG_CRASH[3]}")" "${WG_CRASH[2]}"
       fi
     done
     return 0

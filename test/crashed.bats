@@ -51,10 +51,10 @@ wg_crash() {
   run wingroup crashed
   [ "$status" -eq 0 ]
   [[ "${lines[0]}" == "2 session(s) killed by systemd-oomd:" ]]
-  [[ "${lines[1]}" == *"2026-09-10T11:02:03+02:00"* ]]
+  [[ "${lines[1]}" == *"09-10 11:02"* ]]
   [[ "${lines[1]}" == *"$WG_TMP/shop-web"* ]]
   [[ "${lines[1]}" == *"resumable"* ]]
-  [[ "${lines[2]}" == *"2026-09-10T11:05:00+02:00"* ]]
+  [[ "${lines[2]}" == *"09-10 11:05"* ]]
   [[ "${lines[2]}" == *"no session id"* ]]
 }
 
@@ -225,9 +225,9 @@ wg_crash_pair() {
   export WG_WALKER_PICK=""
   run wingroup crashed --menu
   run cat "$WG_WALKER_STDIN_LOG"
-  [[ "${lines[1]}" == *"2026-09-10T11:02:03+02:00"* ]]
+  [[ "${lines[1]}" == *"09-10 11:02"* ]]
   [[ "${lines[1]}" == *"resumable"* ]]
-  [[ "${lines[2]}" == *"2026-09-10T11:05:00+02:00"* ]]
+  [[ "${lines[2]}" == *"09-10 11:05"* ]]
   [[ "${lines[2]}" == *"no session id"* ]]
 }
 
@@ -382,4 +382,30 @@ wg_crash_pair() {
   [ ! -s "$WG_LAUNCH_LOG" ]
   run bash -c "jq '.crashed | length' '$WG_RUNTIME_DIR/crashed.json'"
   [ "$output" -eq 1 ]
+}
+
+# The picker column is narrow, and a full ISO timestamp does not fit: walker
+# truncated "2026-09-10T22:54:53+02:00" to "2026-09…", which told you the year
+# and hid the time. Seen on a real bar, which is the only way it would have been
+# noticed -- every test here passed while the thing was unreadable on screen.
+@test "the time a session died is short enough to survive the picker column" {
+  mkdir -p "$WG_TMP/shop-web"
+  wg_crash "$WG_TMP/shop-web" "sess-a1" "2026-09-10T22:54:53+02:00"
+
+  run wingroup crashed
+  [[ "${lines[1]}" == *"09-10 22:54"* ]]
+  # and the parts that were eating the width are gone
+  [[ "${lines[1]}" != *"2026-"* ]]
+  [[ "${lines[1]}" != *":53"* ]]
+  [[ "${lines[1]}" != *"+02:00"* ]]
+}
+
+# Anything that is not the shape the journal produces is passed through rather
+# than mangled into a wrong time. A long timestamp beats a plausible wrong one.
+@test "a timestamp that cannot be parsed is shown as it is" {
+  mkdir -p "$WG_TMP/shop-web"
+  wg_crash "$WG_TMP/shop-web" "sess-a1" "some other shape entirely"
+
+  run wingroup crashed
+  [[ "${lines[1]}" == *"some other shape entirely"* ]]
 }
