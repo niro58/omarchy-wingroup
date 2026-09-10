@@ -274,6 +274,30 @@ wg_crashed_count() {
   jq -r '.crashed | length' <<<"$(wg_crashed_read)"
 }
 
+# When a crash happened, short enough to read: "09-10 22:54".
+#
+# The journal hands over a full ISO timestamp -- 2026-09-10T22:54:53+02:00 --
+# which is 25 characters of which about five are the ones you want. In the
+# picker that pushed the column off the end of the window and truncated it to
+# "2026-09…", so the entry told you the year and not the time. The year is the
+# one part you can already guess.
+#
+# The seconds and the offset go too. Nobody deciding whether to bring a session
+# back is deciding on the second, and the offset is this machine's own.
+#
+# Parameter expansion only: this runs once per crash on the bar's path. Anything
+# it cannot parse is passed through unchanged rather than mangled -- better a
+# long timestamp than a wrong short one.
+wg_crash_when() {
+  local at="$1" day time
+  [[ $at == *T* ]] || { printf '%s\n' "$at"; return 0; }
+  day="${at%%T*}"          # 2026-09-10
+  time="${at#*T}"          # 22:54:53+02:00
+  time="${time%%[+-]*}"    # 22:54:53   (Z-suffixed times fall through to below)
+  time="${time%:*}"        # 22:54
+  printf '%s %s\n' "${day#*-}" "$time"
+}
+
 # One crash per line: session id, cwd, killed_at, tab separated.
 #
 # The scope stays in the file and out of the rows on purpose. It is the join key

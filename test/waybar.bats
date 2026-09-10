@@ -341,7 +341,7 @@ wg_crash_clear() {
   local tooltip
   tooltip="$(jq -r '.tooltip' <<<"$output")"
   [[ "$tooltip" == *"/home/dev/projects/shop-core"* ]]
-  [[ "$tooltip" == *"2026-09-10T11:02:03+02:00"* ]]
+  [[ "$tooltip" == *"09-10 11:02"* ]]
   # The line the tooltip has always opened with is still the line it opens with.
   [ "$(head -n1 <<<"$tooltip")" = "shop — 2 windows · 1 idle · 1 busy" ]
 }
@@ -497,8 +497,8 @@ wg_crash_clear() {
   local tooltip
   tooltip="$(jq -r '.tooltip' <<<"$output")"
   [ "$(head -n1 <<<"$tooltip")" = "2 session(s) killed by systemd-oomd" ]
-  [[ "$tooltip" == *"/home/dev/projects/shop-web — 2026-09-10T11:02:03+02:00"* ]]
-  [[ "$tooltip" == *"/home/dev/projects/shop-core — 2026-09-10T11:44:00+02:00"* ]]
+  [[ "$tooltip" == *"/home/dev/projects/shop-web — 09-10 11:02"* ]]
+  [[ "$tooltip" == *"/home/dev/projects/shop-core — 09-10 11:44"* ]]
   # One line of heading and one line per session, and nothing else.
   [ "$(wc -l <<<"$tooltip")" -eq 3 ]
 }

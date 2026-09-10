@@ -93,9 +93,9 @@ wg_crashed_button() {
     # button is clicked, so it is on every line: without a recorded id all a
     # restore can offer is a fresh claude in the same directory.
     if [[ -n $session ]]; then
-      tooltip+=$'\n'"$cwd — $killed_at · resumable"
+      tooltip+=$'\n'"$cwd — $(wg_crash_when "$killed_at") · resumable"
     else
-      tooltip+=$'\n'"$cwd — $killed_at · no session id, a fresh claude"
+      tooltip+=$'\n'"$cwd — $(wg_crash_when "$killed_at") · no session id, a fresh claude"
     fi
   done
 
@@ -181,7 +181,7 @@ main() {
       cwd="${rest%%$'\t'*}"
       killed_at="${rest#*$'\t'}"
       [[ "$(wg_crashed_group "$cwd")" == "$name" ]] || continue
-      crash_lines+=("Crashed: $cwd — $killed_at")
+      crash_lines+=("Crashed: $cwd — $(wg_crash_when "$killed_at")")
     done
   fi
 
