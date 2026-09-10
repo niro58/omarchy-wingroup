@@ -77,6 +77,16 @@ fi
 # it did not, or empty when the block was already there.
 WG_AUTOSTART_ADDED=""
 
+# The exec-once lines the block is supposed to contain, in the order they go in.
+# One list, read by both the fresh write and the upgrade, so that a line added
+# here cannot reach one path and be forgotten in the other -- which is exactly
+# how an existing install came to be left without the watcher.
+WG_AUTOSTART_LINES=(wingroup-daemon wingroup-oomwatch)
+[[ -x $WG_RESTORE_SCRIPT ]] && WG_AUTOSTART_LINES+=(wingroup-restore)
+
+# What the upgrade path added to a block that was already there.
+WG_AUTOSTART_UPGRADED=()
+
 # What install_claude_hook did, for the closing summary. The hook is the only
 # source of exact session ids, so which of these happened changes what the
 # feature can do afterwards and the user has to be told.
@@ -324,27 +334,66 @@ EOF
 # login is a surprising thing for a window grouper to do. $restore_line keeps
 # its own trailing newline so the closing marker, and the eof_flag that
 # uninstall.sh reads off it to reverse this byte-exactly, land either way.
+# Adds any exec-once line the block is missing, just above its closing marker.
+#
+# This is the upgrade path, and it is the whole reason install_autostart cannot
+# simply return when it finds its own marker. A machine that installed wingroup
+# before the watcher existed has a block containing the daemon and the restore
+# and nothing else; "the block is there, leave it alone" then means the watcher
+# is never autostarted, on exactly the machines that already use the thing --
+# and a missing watcher is silent, because everything else still works right up
+# until the next reboot loses every session. Observed on the author's machine.
+#
+# Line by line rather than rewriting the block, so that anything the user has
+# added inside it -- their own exec-once, a comment, an ordering they chose --
+# survives an upgrade untouched.
+install_autostart_missing() {
+  local line added=0 tmp
+  for line in ${WG_AUTOSTART_LINES[@]+"${WG_AUTOSTART_LINES[@]}"}; do
+    grep -qF "exec-once = $line" "$WG_HYPR_AUTOSTART" && continue
+    if (( ! added )); then
+      backup "$WG_HYPR_AUTOSTART"
+      added=1
+    fi
+    tmp="$(mktemp "$(dirname -- "$WG_HYPR_AUTOSTART")/.wingroup.XXXXXX")" || return 0
+    # Inserted before the closing marker so the line lands inside the block and
+    # uninstall's strip_block takes it away again with the rest.
+    if awk -v ins="exec-once = $line" \
+        '$0 ~ /<<< wingroup/ { print ins } { print }' \
+        "$WG_HYPR_AUTOSTART" >"$tmp" && mv -f "$tmp" "$WG_HYPR_AUTOSTART"; then
+      WG_AUTOSTART_UPGRADED+=("$line")
+    else
+      rm -f "$tmp"
+      return 0
+    fi
+  done
+}
+
 install_autostart() {
-  grep -q '>>> wingroup' "$WG_HYPR_AUTOSTART" && return 0
+  if grep -q '>>> wingroup' "$WG_HYPR_AUTOSTART"; then
+    install_autostart_missing
+    return 0
+  fi
 
   local eof_flag=""
   wg_ends_with_newline "$WG_HYPR_AUTOSTART" || eof_flag=" no-eof-nl"
 
-  local restore_line=""
   if [[ -x $WG_RESTORE_SCRIPT ]]; then
-    restore_line="exec-once = wingroup-restore"$'\n'
     WG_AUTOSTART_ADDED="both"
   else
     WG_AUTOSTART_ADDED="daemon"
   fi
 
+  local lines="" line
+  for line in ${WG_AUTOSTART_LINES[@]+"${WG_AUTOSTART_LINES[@]}"}; do
+    lines+="exec-once = $line"$'\n'
+  done
+
   backup "$WG_HYPR_AUTOSTART"
   cat >>"$WG_HYPR_AUTOSTART" <<EOF
 
 # >>> wingroup
-exec-once = wingroup-daemon
-exec-once = wingroup-oomwatch
-${restore_line}# <<< wingroup$eof_flag
+${lines}# <<< wingroup$eof_flag
 EOF
 }
 
@@ -478,7 +527,14 @@ case $WG_AUTOSTART_ADDED in
       "$WG_RESTORE_SCRIPT"
     printf '  To enable it later, see "Startup integration" in the README.\n' ;;
   *)
-    printf 'Autostart (%s): already configured, left unchanged.\n' "$WG_HYPR_AUTOSTART" ;;
+    if (( ${#WG_AUTOSTART_UPGRADED[@]} )); then
+      # Named individually, because this is the line an existing install was
+      # silently missing and "updated" would not tell anyone which.
+      printf 'Autostart (%s): added the missing "exec-once = %s".\n' \
+        "$WG_HYPR_AUTOSTART" "${WG_AUTOSTART_UPGRADED[@]}"
+    else
+      printf 'Autostart (%s): already configured, left unchanged.\n' "$WG_HYPR_AUTOSTART"
+    fi ;;
 esac
 # Say which of these happened either way. Every outcome but "added" leaves crash
 # detection able to name the project a lost session was in but not the session

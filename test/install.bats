@@ -727,3 +727,93 @@ JSON
   run wg_hook_count
   [ "$output" -eq 1 ]
 }
+
+# The upgrade path, and the reason install cannot stop at "my marker is there".
+#
+# A machine that installed wingroup before the watcher existed has a block with
+# the daemon and the restore in it and nothing else. Treating the marker as
+# "already configured" leaves that machine without the watcher for good -- and
+# nothing complains, because every other part still works, right up until a
+# reboot loses every session. This happened on a real machine.
+wg_seed_old_block() {
+  cat >"$WG_HYPR_AUTOSTART" <<'CONF'
+# my autostart
+
+# >>> wingroup
+exec-once = wingroup-daemon
+exec-once = wingroup-restore
+# <<< wingroup
+CONF
+}
+
+@test "install adds the watcher to a block installed before the watcher existed" {
+  printf '#!/usr/bin/env bash\n' >"$WG_RESTORE_SCRIPT"
+  chmod +x "$WG_RESTORE_SCRIPT"
+  wg_seed_old_block
+
+  "$WG_ROOT/install.sh"
+  run bash -c "grep -c 'exec-once = wingroup-oomwatch' '$WG_HYPR_AUTOSTART'"
+  [ "$output" -eq 1 ]
+  # and the lines that were already there are still there, once each
+  run bash -c "grep -c 'exec-once = wingroup-daemon' '$WG_HYPR_AUTOSTART'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep -c 'exec-once = wingroup-restore' '$WG_HYPR_AUTOSTART'"
+  [ "$output" -eq 1 ]
+}
+
+@test "install says which line it added to an existing block" {
+  printf '#!/usr/bin/env bash\n' >"$WG_RESTORE_SCRIPT"
+  chmod +x "$WG_RESTORE_SCRIPT"
+  wg_seed_old_block
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'added the missing "exec-once = wingroup-oomwatch"'* ]]
+}
+
+# The added line has to land inside the markers, or uninstall walks away from it
+# and leaves an exec-once for a command it has just unlinked.
+@test "a line added to an existing block is inside it and uninstall takes it out" {
+  printf '#!/usr/bin/env bash\n' >"$WG_RESTORE_SCRIPT"
+  chmod +x "$WG_RESTORE_SCRIPT"
+  wg_seed_old_block
+  cp "$WG_HYPR_AUTOSTART" "$WG_TMP/old-block.orig"
+
+  "$WG_ROOT/install.sh"
+  "$WG_ROOT/uninstall.sh"
+  run bash -c "grep -c 'wingroup-oomwatch' '$WG_HYPR_AUTOSTART' || true"
+  [ "$output" -eq 0 ]
+}
+
+# The block is the user's file too. Whatever they put in it -- their own
+# exec-once, a comment, an order they chose -- an upgrade must not rewrite.
+@test "an upgrade leaves what the user put inside the block alone" {
+  cat >"$WG_HYPR_AUTOSTART" <<'CONF'
+# my autostart
+
+# >>> wingroup
+exec-once = wingroup-daemon
+# I moved this one on purpose
+exec-once = my-own-thing
+# <<< wingroup
+CONF
+
+  "$WG_ROOT/install.sh"
+  run bash -c "grep -c 'exec-once = my-own-thing' '$WG_HYPR_AUTOSTART'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep -c 'I moved this one on purpose' '$WG_HYPR_AUTOSTART'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep -c 'exec-once = wingroup-oomwatch' '$WG_HYPR_AUTOSTART'"
+  [ "$output" -eq 1 ]
+}
+
+# Nothing missing means nothing written -- no edit, and no backup of a file that
+# was not touched.
+@test "a block that already has every line is left alone" {
+  "$WG_ROOT/install.sh"
+  cp "$WG_HYPR_AUTOSTART" "$WG_TMP/after-first.conf"
+  run "$WG_ROOT/install.sh"
+  [[ "$output" == *"already configured, left unchanged"* ]]
+  run cmp "$WG_TMP/after-first.conf" "$WG_HYPR_AUTOSTART"
+  [ "$status" -eq 0 ]
+}
