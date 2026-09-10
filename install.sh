@@ -87,6 +87,11 @@ WG_AUTOSTART_LINES=(wingroup-daemon wingroup-oomwatch)
 # What the upgrade path added to a block that was already there.
 WG_AUTOSTART_UPGRADED=()
 
+# Set when an existing style block was out of date and got rewritten. Worth
+# saying: it is the difference between a bar that can show a crash and one that
+# cannot, and the user has no other way to notice which they have.
+WG_STYLE_REFRESHED=0
+
 # What install_claude_hook did, for the closing summary. The hook is the only
 # source of exact session ids, so which of these happened changes what the
 # feature can do afterwards and the user has to be told.
@@ -240,13 +245,52 @@ install_waybar_config() {
   mv -f "$tmp" "$WG_WAYBAR_CONFIG"
 }
 
-install_waybar_style() {
-  grep -q '>>> wingroup' "$WG_WAYBAR_STYLE" && return 0
+# Drops the wingroup block out of $1, leaving everything around it alone.
+#
+# The same pair of markers uninstall.sh's strip_block matches, and for the same
+# reason: the block is ours from the opening marker to the closing one, and the
+# rest of the file is the user's. $2 and $3 are the comment delimiters, since
+# CSS and hyprland config do not spell a comment the same way.
+strip_own_block() {
+  local file="$1" prefix="$2" tmp
+  grep -qF "$prefix>>> wingroup" "$file" || return 0
+  tmp="$(mktemp "$(dirname -- "$file")/.wingroup.XXXXXX")" || return 1
+  # index(), not a regex: the marker prefix is a comment delimiter, and "/* "
+  # is three regex metacharacters in a row. Matching it literally means no
+  # escaping to get wrong -- and getting it wrong here is silent, because the
+  # caller treats a failure as "leave the file alone".
+  #
+  # omark/cmark rather than open/close: `close` is a gawk builtin and using it
+  # as a variable name is a fatal error, not a warning.
+  #
+  # Blank lines are buffered rather than printed as they arrive, so the one
+  # separating the block from what came before it can be dropped along with the
+  # block. Without that, installing over an existing block leaves a blank line
+  # behind and the next install adds another.
+  if awk -v omark="$prefix>>> wingroup" -v cmark="$prefix<<< wingroup" '
+      index($0, omark) { inblock = 1; blank = ""; next }
+      inblock { if (index($0, cmark)) inblock = 0; next }
+      /^[[:space:]]*$/ { blank = blank $0 "\n"; next }
+      { printf "%s", blank; blank = ""; print }
+      END { printf "%s", blank }
+    ' "$file" >"$tmp" && mv -f "$tmp" "$file"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
 
+# The style block is generated, entirely ours, and the comment below tells the
+# user to restate anything they want changed *after* it rather than editing
+# inside it. So when it is out of date it is rewritten rather than left alone.
+#
+# Left alone is what it used to be, and that is how a machine that installed
+# before the crashed rule existed ended up with a bar that could never show a
+# crash: the block was there, so install walked past it, and the one rule the
+# whole feature needs to be visible was never written. Nothing said so.
+install_waybar_style() {
   local eof_flag=""
   wg_ends_with_newline "$WG_WAYBAR_STYLE" || eof_flag=" no-eof-nl"
-
-  backup "$WG_WAYBAR_STYLE"
 
   local i base="" busy="" visible="" active="" crashed=""
   local -a heat=()
@@ -292,7 +336,8 @@ install_waybar_style() {
   # Every rule here is one line with one selector list, so a user who wants a
   # different ramp restates the step they want *after* this block -- last rule
   # of equal specificity wins -- and never has to edit inside the markers.
-  {
+  local block
+  block="$( {
     printf '\n/* >>> wingroup */\n'
     printf '%s { padding: 0 6px; opacity: 0.55; }\n' "$base"
     for (( step = 0; step < WG_IDLE_HEAT_MAX; step++ )); do
@@ -303,7 +348,34 @@ install_waybar_style() {
     printf '%s { opacity: 1; font-weight: bold; }\n' "$active"
     printf '%s { %s }\n' "$crashed" "$WG_CRASHED_STYLE"
     printf '/* <<< wingroup%s */\n' "$eof_flag"
-  } >>"$WG_WAYBAR_STYLE"
+  } )"
+
+  # Already exactly this? Then there is nothing to write, and writing anyway
+  # would back the file up and rewrite it on every install for no change.
+  if [[ -f $WG_WAYBAR_STYLE ]] && wg_block_matches "$WG_WAYBAR_STYLE" "$block"; then
+    return 0
+  fi
+
+  backup "$WG_WAYBAR_STYLE"
+  if grep -q '>>> wingroup' "$WG_WAYBAR_STYLE"; then
+    strip_own_block "$WG_WAYBAR_STYLE" '/* ' || return 0
+    WG_STYLE_REFRESHED=1
+  fi
+  printf '%s\n' "$block" >>"$WG_WAYBAR_STYLE"
+}
+
+# True when the block already in $1 is byte for byte the block in $2.
+wg_block_matches() {
+  local file="$1" block="$2" current
+  current="$(awk -v omark='/* >>> wingroup' -v cmark='/* <<< wingroup' '
+      index($0, omark) { inblock = 1 }
+      inblock { print }
+      index($0, cmark) { if (inblock) exit }
+    ' "$file")"
+  [[ -n $current ]] || return 1
+  # $block carries the leading blank line that separates it from whatever came
+  # before; the extracted one cannot, so compare without it.
+  [[ "$current" == "${block#$'\n'}" ]]
 }
 
 install_bindings() {
@@ -536,6 +608,10 @@ case $WG_AUTOSTART_ADDED in
       printf 'Autostart (%s): already configured, left unchanged.\n' "$WG_HYPR_AUTOSTART"
     fi ;;
 esac
+if (( WG_STYLE_REFRESHED )); then
+  printf 'Waybar style (%s): the wingroup block was out of date and has been rewritten.\n' \
+    "$WG_WAYBAR_STYLE"
+fi
 # Say which of these happened either way. Every outcome but "added" leaves crash
 # detection able to name the project a lost session was in but not the session
 # itself, and that is a difference the user should hear about now rather than
