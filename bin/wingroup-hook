@@ -27,29 +27,45 @@ source "$WG_LIB_DIR/state.sh"
 # shellcheck source=lib/sessions.sh
 source "$WG_LIB_DIR/sessions.sh"
 
-# True when another claude is already running above this one.
+# True when another claude above this one is running in the same scope: this
+# session did not open that scope, and the entry for it is not ours to take.
 #
 # A session started from inside a session -- a subagent, a workflow, anything
 # driving `claude -p` -- fires SessionStart exactly like a terminal session
-# does, and it is running in the *terminal's* scope, because it is a descendant
-# of that terminal. Recording it would overwrite the terminal's session id with
-# a subagent's, and the scope's one entry would then name a conversation that
-# was never the one on screen. Restoring that after an oom-kill gives you back
-# the subagent instead of your work.
+# does, and it runs in the *terminal's* scope, because it is a descendant of
+# that terminal. Recording it would overwrite the terminal's session id with a
+# subagent's, and the scope's one entry would then name a conversation that was
+# never the one on screen. Restoring that after an oom-kill gives you back the
+# subagent instead of your work.
 #
-# Ancestry, and not an environment variable: CLAUDE_CODE_CHILD_SESSION is set
-# for every process Claude spawns, this hook included, so it is 1 for a terminal
-# session's own hook too and tells the two apart not at all (verified). The
-# process tree is the fact that actually differs.
+# The scope is what the test is on, not ancestry alone, and the difference is
+# not theoretical. A terminal launched from inside a session -- which is exactly
+# what `wingroup crashed --restore` does -- keeps that session in its ancestry
+# while getting a scope of its own from systemd. Ancestry alone calls that
+# nested and records nothing, and the restored terminal is then the one session
+# on the machine that can never be restored again. Sharing the scope is what
+# actually means "somebody else's entry".
+#
+# Ancestry rather than an environment variable, though, for the half that is
+# about process identity: CLAUDE_CODE_CHILD_SESSION is set for every process
+# Claude spawns, this hook included, so it is 1 for a terminal session's own
+# hook too and tells the two apart not at all (verified on real sessions).
 wg_hook_nested() {
-  local pid="${CLAUDE_PID:-$PPID}" comm hops=0
+  local pid="${CLAUDE_PID:-$PPID}" comm hops=0 mine
+  mine="$(wg_proc_scope self)"
+  # No scope of our own to compare against. wg_hook_record refuses to write
+  # without one anyway, so leave the decision to it rather than guessing here.
+  [[ -n $mine ]] || return 1
   # Start above our own claude: it is the one doing the starting, so finding it
-  # is expected. Anything further up that is also claude means we are nested.
+  # is expected. Anything further up that is also claude, in the same scope, is
+  # a session that was here first.
   while (( hops < 20 )); do
     pid="$(awk '/^PPid:/{print $2}' "$WG_PROC_DIR/$pid/status" 2>/dev/null)" || return 1
     [[ -n $pid && $pid != 0 ]] || return 1
     read -r comm < "$WG_PROC_DIR/$pid/comm" 2>/dev/null || return 1
-    [[ $comm != "claude" ]] || return 0
+    if [[ $comm == "claude" && "$(wg_proc_scope "$pid")" == "$mine" ]]; then
+      return 0
+    fi
     hops=$(( hops + 1 ))
   done
   return 1
