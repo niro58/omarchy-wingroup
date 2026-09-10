@@ -205,8 +205,28 @@ wg_crashed_add() {
   ' --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" --arg at "$killed_at"
 }
 
+# Empties the crash list by removing the file, not by writing an empty document.
+#
+# The bar reads this on every window-title change, and Claude's spinner glyph
+# changes several times a second. "No file" is a test the bar can answer with a
+# single [[ -f ]] and no processes at all; an empty document costs it a mkdir
+# and a jq, forever, on a machine where nothing is wrong. Since the two states
+# mean the same thing to every reader -- wg_runtime_read turns a missing file
+# into the empty document -- the cheaper one is the one to leave behind.
+#
+# Still taken under the lock: a reader must never catch the file mid-removal.
 wg_crashed_clear() {
-  wg_runtime_update "$WG_CRASHED_FILE" "$(wg_crashed_default)" '.crashed = []'
+  local fd
+  mkdir -p "$WG_RUNTIME_DIR" || return 1
+  exec {fd}>>"$WG_RUNTIME_LOCK" || return 1
+  if ! flock -w "$WG_RUNTIME_LOCK_WAIT" "$fd"; then
+    printf 'wingroup: timed out waiting for %s; %s left unchanged\n' \
+      "$WG_RUNTIME_LOCK" "$WG_CRASHED_FILE" >&2
+    exec {fd}>&-
+    return 1
+  fi
+  rm -f "$WG_CRASHED_FILE"
+  exec {fd}>&-
 }
 
 # One crash per line: session id, cwd, killed_at, tab separated.

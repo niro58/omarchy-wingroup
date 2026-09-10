@@ -268,3 +268,175 @@ wg_group_windows() {
   [ "$(jq -r '.class | type' <<<"$output")" = "array" ]
   [ "$(jq -r '.class | length' <<<"$output")" = "2" ]
 }
+
+# --- crashed sessions ------------------------------------------------------
+#
+# systemd-oomd kills a Claude session and its terminal simply vanishes; the only
+# trace is a journal line naming the scope. The watcher turns that into a record
+# while the map of live sessions can still say what was in it, and the bar's job
+# is to say which group is the one that lost something.
+
+WG_CRASH_N=0
+
+# Files one crash the way the machine does: record the live session first, then
+# file the kill against its scope. Through the library rather than by writing
+# crashed.json by hand, so a record shape lib/sessions.sh would never produce is
+# not a record these tests trust. The subshell keeps the libraries' defaults out
+# of the test's own shell.
+wg_crash() {
+  local cwd="$1" session="${2:-}" at="${3:-2026-09-10T11:02:03+02:00}"
+  WG_CRASH_N=$(( WG_CRASH_N + 1 ))
+  # A scope of its own per crash: the list is deduped by scope, so two crashes
+  # sharing one would quietly become a single record.
+  local scope
+  scope="$(wg_fake_scope "c0ffee0$WG_CRASH_N")"
+  (
+    set -euo pipefail
+    source "$WG_LIB_DIR/state.sh"
+    source "$WG_LIB_DIR/sessions.sh"
+    wg_sessions_record "$scope" "$session" "$cwd" hook
+    wg_crashed_add "$scope" "$at"
+  )
+}
+
+# The other end of the same lifecycle -- `wingroup crashed --restore` finishes
+# by calling this -- and through the library for the same reason wg_crash is:
+# what the runtime directory looks like after a clear is the library's own
+# decision, and a test that removed the file by hand would be asserting its own
+# behaviour rather than the shipped one.
+wg_crash_clear() {
+  (
+    set -euo pipefail
+    source "$WG_LIB_DIR/state.sh"
+    source "$WG_LIB_DIR/sessions.sh"
+    wg_crashed_clear
+  )
+}
+
+@test "a group that lost a session to the oom killer gets the crashed class" {
+  wg_crash /home/dev/projects/shop-web sess-a1
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$(wg_class_list <<<"$output")" = "busy idle1 crashed" ]
+}
+
+@test "a group that lost nothing does not get the crashed class" {
+  wg_crash /home/dev/projects/shop-web sess-a1
+  run "$WG_ROOT/bin/wingroup-waybar" 1
+  [ "$(wg_class_list <<<"$output")" = "busy idle1" ]
+}
+
+# Three independent facts about one group: where it is, how much finished work
+# is waiting in it, and what it lost. All three ride together.
+@test "the crashed class rides alongside the idle heat and the active class" {
+  cp "$WG_FIXTURES/state-template.json" "$WG_STATE_DIR/state.json"
+  wg_group_windows template 3
+  wg_crash /home/dev/projects/shop-web sess-a1
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$(wg_class_list <<<"$output")" = "active idle3 crashed" ]
+}
+
+@test "the tooltip names what died, where it was and when" {
+  wg_crash /home/dev/projects/shop-core sess-a1 2026-09-10T11:02:03+02:00
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  local tooltip
+  tooltip="$(jq -r '.tooltip' <<<"$output")"
+  [[ "$tooltip" == *"/home/dev/projects/shop-core"* ]]
+  [[ "$tooltip" == *"2026-09-10T11:02:03+02:00"* ]]
+  # The line the tooltip has always opened with is still the line it opens with.
+  [ "$(head -n1 <<<"$tooltip")" = "shop — 2 windows · 1 idle · 1 busy" ]
+}
+
+# A crash record carries a directory, not a group: a session that died in a
+# project no group has claimed belongs to nobody, and must not be hung on
+# whichever button happens to be first.
+@test "a crash in a project belonging to no group attaches to no group" {
+  wg_crash /home/dev/projects/unclaimed sess-a1
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$(wg_class_list <<<"$output")" = "busy idle1" ]
+  [[ "$(jq -r '.tooltip' <<<"$output")" != *"Crashed"* ]]
+}
+
+@test "a crash outside the projects directory attaches to no group" {
+  wg_crash /tmp/somewhere sess-a1
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$(wg_class_list <<<"$output")" = "busy idle1" ]
+}
+
+# This module is re-run on every window-title change, and Claude rewrites the
+# title several times a second while it is working -- so whatever the module
+# costs is paid at that rate, all day. The crash check is one read of the crash
+# list: no journalctl, no walk of /proc, no jq per window.
+#
+# Nine, which is what the module cost before crash detection existed at all.
+# The tenth jq the crash read would have added is not spent here because the
+# module asks [[ -f $WG_CRASHED_FILE ]] first, and a machine where nothing has
+# died has no such file: the whole feature costs a healthy desktop no processes
+# whatsoever. Nine is therefore the number to defend -- ten would mean the
+# guard has stopped guarding.
+#
+# The numbers are budgets, not facts about jq. If a change pushes one of them
+# up, the change is the thing to look at.
+@test "the module stays inside its jq budget when nothing has crashed" {
+  wg_count_jq
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$status" -eq 0 ]
+  run jq_calls
+  [ "$output" -le 9 ]
+}
+
+# Resolving crashes costs a second read of the list and one load of the
+# project->group map, and that is all it costs however many sessions died: the
+# per-crash work is parameter expansion and an array lookup, not a jq.
+@test "three crashed sessions cost no more jq than one" {
+  wg_crash /home/dev/projects/shop-web sess-a1
+  wg_crash /home/dev/projects/shop-core sess-b2
+  wg_crash /home/dev/projects/shop-api sess-c3
+  wg_count_jq
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$status" -eq 0 ]
+  run jq_calls
+  [ "$output" -le 12 ]
+}
+
+# The budget above was only ever measured with no crash file at all, which is
+# the state of a machine that has never been oom-killed -- and the module lives
+# on machines that have. An empty crash *document* is a different state, and a
+# more expensive one: nothing can know a list is empty without reading it, so
+# the mkdir and the jq of wg_crashed_rows are paid in full for a list holding
+# nothing. That gap is the entire reason wg_crashed_clear removes the file
+# instead of writing {"crashed": []}, so it is measured here rather than
+# assumed -- if it ever closes, the removal has stopped buying anything and the
+# next test below is dead weight.
+@test "an empty crash document costs more jq than no crash file at all" {
+  mkdir -p "$WG_RUNTIME_DIR"
+  wg_count_jq
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$status" -eq 0 ]
+  local absent
+  absent="$(jq_calls)"
+  printf '%s\n' '{"crashed":[]}' >"$WG_RUNTIME_DIR/crashed.json"
+  : >"$WG_JQ_LOG"
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$status" -eq 0 ]
+  local empty
+  empty="$(jq_calls)"
+  [ "$empty" -gt "$absent" ]
+}
+
+# So a clear has to leave behind the cheap state, not the empty document: the
+# module is back on the budget it had before anything died, forever, rather
+# than paying the higher one for the rest of the boot because of one crash it
+# has already dealt with. Asserted through the module's cost rather than by
+# stat-ing the file, because the cost is the thing that actually matters here
+# and it is the thing the old budget test could not see -- with the clear
+# writing an empty document this run spends the empty-document count above, not
+# the no-crash-file one.
+@test "clearing a crash puts the module back on its no-crash-file budget" {
+  wg_crash /home/dev/projects/shop-web sess-a1
+  wg_crash_clear
+  wg_count_jq
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$status" -eq 0 ]
+  run jq_calls
+  [ "$output" -le 9 ]
+}

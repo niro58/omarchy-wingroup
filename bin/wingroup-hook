@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Claude Code SessionStart hook. Claude hands it a JSON object on stdin; two
+# fields off it go into the session map, keyed by the systemd scope this
+# terminal is running in: the session id -- which nothing else on the machine
+# can tell us -- and the directory the session is working in.
+#
+# That is the whole reason this exists. wingroup-oomwatch's scan can see that
+# *a* claude is alive in a scope and where it is working, but never which
+# session it is; only Claude knows that, and only while it is running. Once
+# systemd-oomd kills the scope, the journal line naming it is all that is left,
+# and it is worth having only if the map already says what was in there.
+#
+# Two rules govern everything below:
+#
+#   It exits 0 whatever happens. A SessionStart hook that fails is reported to
+#   the user as a problem with the session they are trying to start, and
+#   nothing here is worth interrupting that for.
+#
+#   It prints nothing on stdout. Claude Code feeds a SessionStart hook's stdout
+#   into the session as context, so a stray debug line would be prepended to
+#   the user's conversation. Diagnostics go to stderr; the happy path is quiet.
+set -euo pipefail
+
+WG_LIB_DIR="${WG_LIB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib" && pwd)}"
+# shellcheck source=lib/state.sh
+source "$WG_LIB_DIR/state.sh"
+# shellcheck source=lib/sessions.sh
+source "$WG_LIB_DIR/sessions.sh"
+
+wg_hook_record() {
+  local payload session cwd scope
+  local -a fields=()
+
+  # A terminal on stdin means somebody ran this by hand rather than Claude
+  # running it: read from it and the session that is starting would hang here
+  # forever waiting for a payload nobody is going to type.
+  [[ ! -t 0 ]] || return 0
+  payload="$(cat)" || return 0
+  [[ -n $payload ]] || return 0
+
+  # One jq for both fields, and no failure path out of it. The field names are
+  # Claude Code's, not ours; if a future payload stops carrying them, or is not
+  # JSON at all, this must come out empty and skip the recording rather than
+  # take the user's session down with it.
+  mapfile -t fields < <(jq -r '.session_id // "", .cwd // ""' <<<"$payload" 2>/dev/null) || true
+  session="${fields[0]:-}"
+  cwd="${fields[1]:-}"
+
+  # The id is the one thing this hook knows that the scan cannot work out for
+  # itself, so without one there is nothing here worth writing.
+  [[ -n $session ]] || return 0
+  # Claude runs the hook as a child of the session, so this process's own
+  # working directory is the session's when the payload did not name one.
+  [[ -n $cwd ]] || cwd="$PWD"
+
+  scope="$(wg_proc_scope self)"
+  # No scope, no join key. A shell outside a systemd scope -- an ssh login, a
+  # test runner -- can never be matched to an oom-kill line, so an entry for it
+  # would be a row nothing is ever able to look up.
+  [[ -n $scope ]] || return 0
+
+  wg_sessions_record "$scope" "$session" "$cwd" hook
+}
+
+wg_hook_record || true
+exit 0

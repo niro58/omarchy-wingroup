@@ -17,8 +17,29 @@ source "$WG_ROOT/lib/constants.sh"
 : "${WG_HYPR_AUTOSTART:=$HOME/.config/hypr/autostart.conf}"
 : "${WG_STATE_DIR:=$HOME/.local/state/omarchy/wingroup}"
 : "${WG_RESTORE_SCRIPT:=$HOME/restore-claude.sh}"
+: "${WG_CLAUDE_SETTINGS:=$HOME/.claude/settings.json}"
 
 WG_SIGNAL=11
+
+# The SessionStart hook command registered in the Claude Code settings file.
+# Written once: install matches on this exact string to stay idempotent, and
+# uninstall matches on it to know which entry is ours and leave the rest alone.
+WG_CLAUDE_HOOK_CMD="wingroup-hook"
+
+# install.sh has never taken an argument, and the only reason it takes one now
+# is that ~/.claude/settings.json is a file we did not create and the user may
+# not want us in. Everything else install writes is wingroup's own or already
+# marker-fenced; that file is neither, so it gets a way to say no.
+WG_CLAUDE_HOOK=1
+while (( $# )); do
+  case $1 in
+    --no-claude-hook) WG_CLAUDE_HOOK=0 ;;
+    *)
+      printf 'install.sh: unknown option: %s\nusage: install.sh [--no-claude-hook]\n' "$1" >&2
+      exit 2 ;;
+  esac
+  shift
+done
 
 # The ramp itself, one declaration block per step, dimmest first: amber at one
 # idle session, orange, red-orange, and a bright pure red at four-or-more, with
@@ -33,6 +54,15 @@ WG_IDLE_HEAT_RAMP=(
   'color: #ff3b30; opacity: 1; font-weight: bold;'
 )
 
+# A group holding a session systemd-oomd killed. Deliberately not another step
+# on the ramp above: the ramp says how much work is waiting, and this says
+# something was taken away from you, which is a different kind of fact and must
+# not read as "five idle sessions". So it is the one rule in the block that
+# fills the widget rather than only colouring its text -- a lit badge on the bar
+# is categorically unlike a hotter label, and no amount of idle heat can be
+# mistaken for it.
+WG_CRASHED_STYLE='background: #7f1d1d; color: #ffd7d5; opacity: 1; font-weight: bold;'
+
 # One declaration per step, or the module emits a class this script writes no
 # rule for. The two numbers now come from the same file, so this can only fire
 # if someone edits the ramp without editing lib/constants.sh.
@@ -42,9 +72,15 @@ if (( ${#WG_IDLE_HEAT_RAMP[@]} != WG_IDLE_HEAT_MAX )); then
   exit 1
 fi
 
-# What install_autostart actually wrote, for the closing summary: "both",
-# "daemon", or empty when the block was already there.
+# What install_autostart actually wrote, for the closing summary: "both" when
+# the restore line went in alongside the two unconditional ones, "daemon" when
+# it did not, or empty when the block was already there.
 WG_AUTOSTART_ADDED=""
+
+# What install_claude_hook did, for the closing summary. The hook is the only
+# source of exact session ids, so which of these happened changes what the
+# feature can do afterwards and the user has to be told.
+WG_CLAUDE_HOOK_RESULT=""
 
 backup() {
   [[ -f $1 ]] || return 0
@@ -202,13 +238,14 @@ install_waybar_style() {
 
   backup "$WG_WAYBAR_STYLE"
 
-  local i base="" busy="" visible="" active=""
+  local i base="" busy="" visible="" active="" crashed=""
   local -a heat=()
   for (( i = 0; i < WG_SLOTS; i++ )); do
     base+="${base:+, }#custom-wingroup$i"
     busy+="${busy:+, }#custom-wingroup$i.busy"
     visible+="${visible:+, }#custom-wingroup$i.visible"
     active+="${active:+, }#custom-wingroup$i.active"
+    crashed+="${crashed:+, }#custom-wingroup$i.crashed"
   done
   # One selector list per step of the ramp, in step order: heat[0] is .idle1.
   local step sel
@@ -234,6 +271,14 @@ install_waybar_style() {
   # ramp's colour with it. Coming after, it would dim the group you are
   # looking at -- the one thing the ramp must never do.
   #
+  # "crashed" goes last, after the states, and that is the mirror of why the
+  # ramp goes before them. The ramp had to yield to "active" because it would
+  # otherwise dim and un-bold the group being looked at. This rule raises every
+  # property it touches and lowers none -- full opacity, bold, a filled
+  # background -- so it can safely take the last word, and it has to: a group
+  # you are looking at is exactly the group whose lost session you most need to
+  # be told about, and a crash outranks every other thing a button can say.
+  #
   # Every rule here is one line with one selector list, so a user who wants a
   # different ramp restates the step they want *after* this block -- last rule
   # of equal specificity wins -- and never has to edit inside the markers.
@@ -246,6 +291,7 @@ install_waybar_style() {
     printf '%s { opacity: 1; }\n' "$busy"
     printf '%s { opacity: 0.85; }\n' "$visible"
     printf '%s { opacity: 1; font-weight: bold; }\n' "$active"
+    printf '%s { %s }\n' "$crashed" "$WG_CRASHED_STYLE"
     printf '/* <<< wingroup%s */\n' "$eof_flag"
   } >>"$WG_WAYBAR_STYLE"
 }
@@ -267,7 +313,12 @@ bindd = SUPER CTRL, G, Send window to group, exec, wingroup send
 EOF
 }
 
-# The daemon line is unconditional and always first. The restore line arranges
+# The daemon and watcher lines are unconditional and always first. The watcher
+# has to be started at login rather than on demand, because the only record of
+# what was alive in a scope is the one it keeps while the session is still
+# running: start it after the crash and there is nothing left to read.
+#
+# The restore line arranges
 # to run $WG_RESTORE_SCRIPT at every login, so it only goes in for someone who
 # actually has that script -- opting a stranger into respawning terminals at
 # login is a surprising thing for a window grouper to do. $restore_line keeps
@@ -292,8 +343,113 @@ install_autostart() {
 
 # >>> wingroup
 exec-once = wingroup-daemon
+exec-once = wingroup-oomwatch
 ${restore_line}# <<< wingroup$eof_flag
 EOF
+}
+
+# Registers bin/wingroup-hook as a Claude Code SessionStart hook.
+#
+# Without it crash detection still works -- the /proc scan learns that *some*
+# claude process was running in a scope, and in which directory -- but it can
+# never learn the session id, because only Claude Code knows that and only the
+# hook is told it. So this is the difference between being handed back the
+# session and being handed back the project it was in.
+#
+# ~/.claude/settings.json is the user's own file, full of things that have
+# nothing to do with us, and losing it costs them their permissions, their
+# model, their other hooks. So every failure mode here ends in "leave the file
+# exactly as it is and carry on": a missing file, an unparseable file, a jq
+# that errors, a temp file that will not write. None of them fail the install,
+# because a window grouper that refuses to install over a settings file it did
+# not like would be worse than one that quietly does less.
+#
+# The write is the same shape as wg_state_write's, and for the same reason:
+# validate the *result* as JSON before it can reach the real path, write it to a
+# temp file beside the target so the rename is atomic on the same filesystem,
+# and rename rather than truncate-and-write, so an interrupted install cannot
+# leave a half-file behind.
+install_claude_hook() {
+  if (( ! WG_CLAUDE_HOOK )); then
+    WG_CLAUDE_HOOK_RESULT="declined"
+    return 0
+  fi
+  if [[ ! -f $WG_CLAUDE_SETTINGS ]]; then
+    WG_CLAUDE_HOOK_RESULT="no-settings"
+    return 0
+  fi
+  if ! jq -e . "$WG_CLAUDE_SETTINGS" >/dev/null 2>&1; then
+    WG_CLAUDE_HOOK_RESULT="unparseable"
+    return 0
+  fi
+
+  # Idempotency is on the command string, not on the shape around it: a second
+  # install must not add a second entry, and a user who moved our entry under a
+  # matcher of their own still counts as having it.
+  if jq -e --arg c "$WG_CLAUDE_HOOK_CMD" \
+      'any(.hooks.SessionStart // [] | .[].hooks // [] | .[]; .command == $c)' \
+      "$WG_CLAUDE_SETTINGS" >/dev/null 2>&1; then
+    WG_CLAUDE_HOOK_RESULT="already"
+    return 0
+  fi
+
+  # Appended as an entry of its own rather than merged into an existing one, so
+  # nothing the user already had is rewritten -- uninstall then has a single
+  # entry to take back out and cannot disturb theirs either.
+  #
+  # No "matcher": omitting it matches every way a session starts -- startup,
+  # resume, clear, compact, fork -- and every one of those is a session that is
+  # about to be alive in a scope and has to be recorded. A resumed session is
+  # exactly the case that matters most: it is the one you got back after the
+  # last crash.
+  #
+  # The timeout is ours to set and the default is ten minutes. The hook writes
+  # one small JSON file; if it has not managed that in five seconds something is
+  # wrong, and the right thing is to drop it and let the session start.
+  local updated
+  # shellcheck disable=SC2016  # $c is a jq variable, not a shell one
+  updated="$(jq --arg c "$WG_CLAUDE_HOOK_CMD" '
+      .hooks //= {}
+    | .hooks.SessionStart //= []
+    | .hooks.SessionStart += [{hooks: [{type: "command", command: $c, timeout: 5}]}]
+  ' "$WG_CLAUDE_SETTINGS" 2>/dev/null)" || {
+    WG_CLAUDE_HOOK_RESULT="failed"
+    return 0
+  }
+  if ! jq -e . >/dev/null 2>&1 <<<"$updated"; then
+    WG_CLAUDE_HOOK_RESULT="failed"
+    return 0
+  fi
+
+  local tmp
+  tmp="$(mktemp "$(dirname -- "$WG_CLAUDE_SETTINGS")/.wingroup.XXXXXX")" || {
+    WG_CLAUDE_HOOK_RESULT="failed"
+    return 0
+  }
+  if ! printf '%s\n' "$updated" >"$tmp"; then
+    rm -f "$tmp"
+    WG_CLAUDE_HOOK_RESULT="failed"
+    return 0
+  fi
+  # Guarded, unlike every other backup call in this script, because this is the
+  # one file that is not ours. `backup` is a bare command under `set -e`, so a
+  # failed cp here would abort the whole install -- the single outcome this
+  # function is written to make impossible -- and leak the temp file with it.
+  if ! backup "$WG_CLAUDE_SETTINGS"; then
+    rm -f "$tmp"
+    WG_CLAUDE_HOOK_RESULT="failed"
+    return 0
+  fi
+  # mktemp makes the temp file 0600 and mv carries that across. Tightening a
+  # file we did not create is still changing it behind the user's back, so the
+  # mode of what we are replacing is copied over first.
+  chmod --reference="$WG_CLAUDE_SETTINGS" "$tmp" 2>/dev/null || true
+  if ! mv -f "$tmp" "$WG_CLAUDE_SETTINGS"; then
+    rm -f "$tmp"
+    WG_CLAUDE_HOOK_RESULT="failed"
+    return 0
+  fi
+  WG_CLAUDE_HOOK_RESULT="added"
 }
 
 seed_state() {
@@ -307,20 +463,47 @@ install_waybar_config
 install_waybar_style
 install_bindings
 install_autostart
+install_claude_hook
 seed_state
 
 printf 'wingroup installed. Reload with: hyprctl reload && pkill -SIGUSR2 waybar\n'
 case $WG_AUTOSTART_ADDED in
   both)
-    printf 'Autostart (%s): added "exec-once = wingroup-daemon" and "exec-once = wingroup-restore".\n' \
+    printf 'Autostart (%s): added "exec-once = wingroup-daemon", "exec-once = wingroup-oomwatch" and "exec-once = wingroup-restore".\n' \
       "$WG_HYPR_AUTOSTART" ;;
   daemon)
-    printf 'Autostart (%s): added "exec-once = wingroup-daemon".\n' "$WG_HYPR_AUTOSTART"
+    printf 'Autostart (%s): added "exec-once = wingroup-daemon" and "exec-once = wingroup-oomwatch".\n' \
+      "$WG_HYPR_AUTOSTART"
     printf '  No executable restore script at %s, so "exec-once = wingroup-restore" was left out.\n' \
       "$WG_RESTORE_SCRIPT"
     printf '  To enable it later, see "Startup integration" in the README.\n' ;;
   *)
     printf 'Autostart (%s): already configured, left unchanged.\n' "$WG_HYPR_AUTOSTART" ;;
+esac
+# Say which of these happened either way. Every outcome but "added" leaves crash
+# detection able to name the project a lost session was in but not the session
+# itself, and that is a difference the user should hear about now rather than
+# discover the first time they lose one.
+case $WG_CLAUDE_HOOK_RESULT in
+  added)
+    printf 'Claude Code hook (%s): registered "%s" on SessionStart.\n' \
+      "$WG_CLAUDE_SETTINGS" "$WG_CLAUDE_HOOK_CMD" ;;
+  already)
+    printf 'Claude Code hook (%s): already registered, left unchanged.\n' "$WG_CLAUDE_SETTINGS" ;;
+  declined)
+    printf 'Claude Code hook: skipped (--no-claude-hook).\n'
+    printf '  Crashed sessions will be detected, but only by project, not by session id.\n' ;;
+  no-settings)
+    printf 'Claude Code hook: no settings file at %s, so nothing was registered.\n' \
+      "$WG_CLAUDE_SETTINGS"
+    printf '  Crashed sessions will be detected, but only by project, not by session id.\n' ;;
+  unparseable)
+    printf 'Claude Code hook: %s is not valid JSON, so it was left untouched.\n' \
+      "$WG_CLAUDE_SETTINGS"
+    printf '  Fix or remove it and re-run ./install.sh to register the hook.\n' ;;
+  failed)
+    printf 'Claude Code hook: could not update %s, which is unchanged.\n' "$WG_CLAUDE_SETTINGS"
+    printf '  See "Crashed sessions" in the README for the entry to add by hand.\n' ;;
 esac
 printf 'Then create your first group, e.g.: wingroup new shop shop-web shop-api\n'
 printf 'and file the windows you already have open: wingroup tidy\n'

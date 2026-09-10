@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# Notices when systemd-oomd kills a Claude session, so the bar can offer it
+# back instead of the session simply vanishing.
+#
+# Two jobs, one process:
+#
+#   It follows the user journal for oom-kill lines. systemd names the cgroup it
+#   killed, and for an Omarchy terminal that cgroup is the scope the session
+#   map is keyed by -- so a kill line is a lookup, and a lookup that hits is a
+#   lost session.
+#
+#   It rescans /proc every WG_SCAN_INTERVAL seconds to keep that map current.
+#   Sessions started before the hook was installed have no id, but the scan
+#   still learns that something was running in that scope and where, which is
+#   enough to say which project was lost.
+#
+# Neither job may block the other, and both are idle almost all the time, so
+# they share one loop rather than one process each: the read that waits for the
+# next journal line is given the scan interval as its timeout, and whichever
+# happens first -- a line, or the timeout -- the loop then asks whether a scan
+# is due. No second process to start, reap or leave behind, and no shared state
+# to synchronise.
+set -euo pipefail
+
+WG_LIB_DIR="${WG_LIB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib" && pwd)}"
+# shellcheck source=lib/state.sh
+source "$WG_LIB_DIR/state.sh"
+# shellcheck source=lib/sessions.sh
+source "$WG_LIB_DIR/sessions.sh"
+
+# Whole seconds: the loop compares it against $SECONDS, which is what makes the
+# "is a scan due" check cost nothing on a busy journal.
+: "${WG_SCAN_INTERVAL:=15}"
+
+WG_JOURNAL_PID=""
+WG_JOURNAL_FD=""
+WG_LAST_SCAN=0
+# Scopes this watcher has already filed a crash for, so that systemd saying the
+# same death twice does not redraw the bar twice. See wg_oomwatch_handle_line.
+declare -A WG_FILED=()
+
+# The journal, followed from now on: -n0 so a restart does not re-file every
+# kill the machine has ever had, short-iso so the timestamp is the first field.
+#
+# The cost of -n0 is the other half of that trade, and it is real: a kill that
+# lands while the watcher is being restarted is never seen. `--since` the boot
+# would close that window and re-file nothing -- crashed.json dedupes by scope,
+# and sessions.json is empty at boot so an older kill has nothing to match --
+# but it would refile everything already dealt with and cleared, which is worse.
+# The window is the length of a restart, and the fallback is the bar being one
+# session short until you notice.
+# A test points WG_JOURNAL_CMD at a script that prints fixture lines and exits.
+#
+# Only ever called inside a process substitution, and exec'd so that it *is*
+# that process: run as an ordinary command it would leave journalctl as a
+# grandchild, and the pid we keep in order to kill it would be a subshell that
+# journalctl outlives -- one abandoned journal follower per login.
+wg_oomwatch_journal() {
+  if [[ -n ${WG_JOURNAL_CMD:-} ]]; then
+    exec "$WG_JOURNAL_CMD"
+  else
+    exec journalctl --user -f -n0 -o short-iso
+  fi
+}
+
+# Same idiom as bin/wingroup-daemon, deliberately repeated rather than shared:
+# they are separate processes with no library between them, and this is the
+# whole of it.
+wg_refresh_bar() {
+  if [[ -n ${WG_REFRESH_CMD:-} ]]; then
+    "$WG_REFRESH_CMD"
+  else
+    pkill -RTMIN+11 waybar || true
+  fi
+}
+
+# One journal line. The one that matters looks like
+#
+#   <iso-time> host systemd[1443]: app-Hyprland-xdg\x2dterminal\x2dexec-9029a872.scope: Failed with result 'oom-kill'.
+#
+# so the timestamp is the first field and the scope is the field ending in
+# ".scope:" -- read off as fields rather than pattern-matched out of the line,
+# because the scope name is full of literal backslashes and every attempt to
+# cut it out by hand has to keep them intact.
+#
+# Every line on the user journal comes through here, so the cheap test comes
+# first and everything after it is builtins: no process is forked for the
+# thousands of lines that are not a kill.
+wg_oomwatch_handle_line() {
+  local line="$1" killed_at scope="" field
+  local -a fields=()
+
+  [[ $line == *"Failed with result 'oom-kill'"* ]] || return 0
+
+  read -ra fields <<<"$line"
+  killed_at="${fields[0]}"
+  for field in "${fields[@]}"; do
+    if [[ $field == *.scope: ]]; then
+      scope="${field%:}"
+      break
+    fi
+  done
+  [[ -n $scope ]] || return 0
+
+  # systemd says this more than once for a single death -- the scope's own line
+  # and, when it killed several processes in the unit, oomd's -- and
+  # wg_crashed_add succeeds every time, because filing a scope that is already
+  # filed leaves the list correct. Correct, but not free: taking its word for it
+  # would redraw the whole bar again for a session that has not changed, and a
+  # redraw is a pkill plus a waybar re-render for every slot on the bar.
+  #
+  # So the repeat is caught here, before the three jq wg_crashed_add would cost.
+  # The map is per-process and the file outlives it, which is the right way
+  # round: a watcher that restarts re-files what it finds, and wg_crashed_add
+  # dedupes that against the file.
+  [[ -z ${WG_FILED[$scope]:-} ]] || return 0
+
+  # wg_crashed_add refuses a scope with no session in the map, which is how the
+  # browser -- the thing oomd actually kills most days -- stays out of this.
+  # Nothing to tell the user about, so nothing to redraw for either.
+  wg_crashed_add "$scope" "$killed_at" || return 0
+  WG_FILED[$scope]=1
+  wg_refresh_bar
+}
+
+wg_oomwatch_scan() {
+  WG_LAST_SCAN=$SECONDS
+  # wg_sessions_scan prints how many live sessions it found. Nothing here wants
+  # the number -- the map it leaves behind is the whole point -- and a watcher
+  # started by Hyprland's autostart has nowhere to print it to anyway.
+  wg_sessions_scan >/dev/null
+}
+
+wg_oomwatch_scan_due() {
+  (( SECONDS - WG_LAST_SCAN >= WG_SCAN_INTERVAL )) || return 1
+  wg_oomwatch_scan
+}
+
+# Closes the loop down. journalctl -f finds out we are gone only when it next
+# tries to write, and on a quiet journal that can be hours, so it is killed
+# rather than left to notice.
+wg_oomwatch_stop() {
+  trap - TERM INT
+  if [[ -n $WG_JOURNAL_PID ]]; then
+    kill "$WG_JOURNAL_PID" 2>/dev/null || true
+  fi
+  exit 0
+}
+
+wg_oomwatch_main() {
+  local lock="${XDG_RUNTIME_DIR:-/tmp}/wingroup-oomwatch.lock"
+  exec 9>"$lock"
+  if ! flock -n 9; then
+    printf 'wingroup-oomwatch: already running\n' >&2
+    exit 0
+  fi
+
+  trap wg_oomwatch_stop TERM INT
+
+  # Before the first line is read, not after the first interval: the map starts
+  # empty at login, and a session killed in that window would otherwise be a
+  # kill line for a scope nothing had recorded yet.
+  wg_oomwatch_scan
+
+  exec {WG_JOURNAL_FD}< <(wg_oomwatch_journal)
+  WG_JOURNAL_PID=$!
+
+  local line rc
+  while :; do
+    if IFS= read -r -u "$WG_JOURNAL_FD" -t "$WG_SCAN_INTERVAL" line; then
+      wg_oomwatch_handle_line "$line" || true
+    else
+      rc=$?
+      # read returns >128 when the timeout expired -- a quiet journal, which is
+      # the normal case. Anything else is the stream itself ending.
+      (( rc > 128 )) || break
+    fi
+    wg_oomwatch_scan_due || true
+  done
+
+  printf 'wingroup-oomwatch: journal stream ended\n' >&2
+  wg_oomwatch_stop
+}
+
+# One scan, then whatever the journal command has to say, then out. Takes no
+# lock: it is a diagnostic, and has to be runnable while the watcher is up.
+#
+# It drains its input rather than following it, so with the default journalctl
+# it would never return -- point WG_JOURNAL_CMD at something finite (a fixture,
+# or `journalctl --user -n200 -o short-iso --no-pager`) when running it by hand.
+wg_oomwatch_once() {
+  local line
+  wg_oomwatch_scan
+  while IFS= read -r line; do
+    wg_oomwatch_handle_line "$line" || true
+  done < <(wg_oomwatch_journal)
+}
+
+wg_oomwatch_dispatch() {
+  case ${1:-} in
+    --once) wg_oomwatch_once ;;
+    "")     wg_oomwatch_main ;;
+    *)
+      printf 'usage: wingroup-oomwatch [--once]\n' >&2
+      exit 2
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" && -z ${WG_OOMWATCH_NO_MAIN:-} ]]; then
+  wg_oomwatch_dispatch "$@"
+fi

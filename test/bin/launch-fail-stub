@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Test-only stand-in for a launcher that cannot start a terminal -- no terminal
+# configured for xdg-terminal-exec, or uwsm-app called outside a uwsm session.
+# It records the attempt exactly as launch-stub does and then exits non-zero, so
+# a test can tell a terminal that was attempted from one that actually came up.
+#
+# $WG_LAUNCH_FAIL_MATCH narrows the failure to the launches whose arguments
+# contain it: one $WG_LAUNCH_CMD is shared by every relaunch, and that is how a
+# test gets one launcher that works and one that does not out of a single stub.
+printf '%s\n' "$(printf '%s\t' "$@")" >>"$WG_LAUNCH_LOG"
+if [[ -n ${WG_LAUNCH_FAIL_MATCH:-} && $* != *"$WG_LAUNCH_FAIL_MATCH"* ]]; then
+  exit 0
+fi
+printf 'launch-fail-stub: no terminal available\n' >&2
+exit 1

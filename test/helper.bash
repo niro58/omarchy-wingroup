@@ -39,6 +39,13 @@ wg_setup_tmp() {
   # same reason test/stub-cwd.sh exists: the fixture pids are not processes.
   export WG_PROC_DIR="$WG_TMP/proc"
   mkdir -p "$WG_PROC_DIR"
+  # Never the real ~/.claude/settings.json. install.sh registers a SessionStart
+  # hook in it, so any test that runs install.sh -- not only the ones written to
+  # exercise the hook -- would otherwise edit and back up the settings file of
+  # the machine running the suite. Isolated here rather than in each test file
+  # for that reason: it has to hold for install-edgecases.bats and
+  # constants.bats too, neither of which is about the hook at all.
+  export WG_CLAUDE_SETTINGS="$WG_TMP/claude-settings.json"
   # Never the real uwsm-app: a test must not put terminals on the user's screen.
   export WG_LAUNCH_CMD="$WG_ROOT/test/bin/launch-stub"
   export WG_LAUNCH_LOG="$WG_TMP/launch.log"
@@ -51,7 +58,12 @@ wg_setup_tmp() {
 # reads /proc itself -- globbing the pid list and reading three files per hit --
 # and stubbing that away would leave the part that actually ships untested.
 wg_fake_proc() {
-  local pid="$1" comm="$2" scope="$3" cwd="$4" dir="$WG_PROC_DIR/$pid"
+  local pid="$1" comm="$2" scope="$3" cwd="$4"
+  # On its own line, and not a fifth word on the `local` above: `local` is a
+  # builtin, so every word on it is expanded before any of the assignments take
+  # effect -- $pid there is still the caller's, or empty, and every fake process
+  # lands in $WG_PROC_DIR itself.
+  local dir="$WG_PROC_DIR/$pid"
   mkdir -p "$dir" "$cwd"
   printf '%s\n' "$comm" >"$dir/comm"
   printf '0::/user.slice/user-1000.slice/app.slice/app-graphical.slice/%s\n' "$scope" >"$dir/cgroup"
