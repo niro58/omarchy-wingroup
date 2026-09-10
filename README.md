@@ -275,7 +275,10 @@ Three pieces do it:
   oom-kill lines, and every 15 seconds it rescans `/proc` for live `claude`
   processes to keep the map current. That scan is the fallback for sessions that
   predate the hook: it cannot learn an id, but it does learn that *something* was
-  running in that scope, and in which directory.
+  running in that scope, and in which directory. After every scan it also writes
+  the map out to disk, which is what the next boot's restore reads instead of
+  guessing — see [Startup
+  integration](#startup-integration-with-restore-claudesh).
 - **`wingroup crashed`** reads what the two of them left behind.
 
 A kill line naming a scope with no session recorded against it is ignored, which
@@ -283,9 +286,10 @@ is how the browser — the thing oomd actually kills most days — stays out of 
 entirely.
 
 Both files live under `$XDG_RUNTIME_DIR/wingroup/` and are meant to die at
-reboot. A crash you have not dealt with by the time you reboot is one
-`restore-claude.sh` already handles from the other end, by replaying the whole
-shutdown cluster.
+reboot. A crash you have not dealt with by the time you reboot is one the boot
+restore already handles from the other end: the session was still in the map
+when the machine went down, so it is in the snapshot and comes back with
+everything else.
 
 ### The crashed bar state
 
@@ -755,19 +759,94 @@ executable at the moment you run `./install.sh`.** The other two are
 unconditional. Otherwise you get those two alone, and install says so in its
 closing summary. Respawning terminals at
 every login is not something a window grouper should sign a stranger up for.
+That gate is on the autostart line, not on the snapshot below: `wingroup-restore`
+prefers the snapshot whether or not you have a script, but it still only runs at
+login if you asked for it.
 
-`wingroup-restore` runs your script with following suppressed, waits five
-seconds for the spawned shells to start (their working directory is not readable
-until they have), and then runs `wingroup tidy --yes`. The daemon is already
-filing each terminal as it opens, but that is a race against the shell spawning;
-the tidy pass afterwards makes the result the same whoever wins. Arguments are
-passed straight through, and `--dry-run` or `-n` skips the tidy.
+`wingroup-restore` brings the sessions back with following suppressed, waits
+five seconds for the spawned shells to start (their working directory is not
+readable until they have), and then runs `wingroup tidy --yes`. The daemon is
+already filing each terminal as it opens, but that is a race against the shell
+spawning; the tidy pass afterwards makes the result the same whoever wins.
+Arguments are passed straight through to the script, and `--dry-run` or `-n`
+skips the tidy.
 
-If the script is missing or not executable, `wingroup-restore` prints a note and
-exits 0.
+### What was open, from a record rather than a guess
 
-To turn it on after the fact, create the script and add the line yourself inside
-the existing wingroup block in `~/.config/hypr/autostart.conf`.
+`restore-claude.sh` has no record of what was open, so it infers one from
+Claude's own session files: it anchors on the three most recently written and
+takes every session whose file was touched within ten minutes either side of an
+anchor. That is a guess about a shutdown, and measured on a real machine after a
+real reboot it got seven sessions wrong. Three that were genuinely open did not
+come back — one idle 29 minutes before shutdown, one idle two hours, and one
+that had never been given a prompt and so had no session file to be timestamped
+at all. Four that were *not* open came back anyway, because their files happened
+to fall inside the window. Any session left sitting for more than about ten
+minutes before you shut down was silently lost.
+
+No timestamp can fix that; the answer is to write down what was open while it
+still was. The watcher already tracks exactly that for crash detection — scope,
+session id and working directory for every live `claude` — so after every scan
+it writes that map out, stamped with the boot it was taken on. At the next boot
+`wingroup-restore` reads it and relaunches those sessions and no others,
+resuming by id where one was recorded and starting a fresh `claude` in the right
+directory where none was. A directory that no longer exists is skipped and said
+so, the way `wingroup crashed --restore` skips one.
+
+Two honest limits. The snapshot is at most one scan interval stale — 15 seconds
+by default — so a session opened in the last moments before a shutdown may not
+be in it. And it only knows the sessions that were running while the watcher was up:
+on a first boot after installing, or a boot the watcher never came up on, there
+is no snapshot and `restore-claude.sh` is still the fallback, guessing exactly
+as it always did.
+
+`wingroup-restore --dry-run` prints exactly the list the restore works from, one
+line per session, and launches nothing:
+
+```console
+$ wingroup-restore --dry-run
+resume /home/me/projects/alpha-api  4c8f1d7e-9a02-4b13-8f5c-2d6e0a71b394
+resume /home/me/projects/alpha-web  b1e75a20-6c48-4d9f-a3e1-77ff05c2d8ab
+fresh  /home/me/projects/beta  (no session id was recorded)
+skip   /home/me/projects/gamma  (directory is gone)
+wingroup-restore: restored 3 session(s) from the snapshot
+```
+
+The last line says `restored` even on a dry run; nothing was launched. Three,
+not four, because the skipped row is not a session that came back.
+
+Run it after a login to see what the restore did, or would have done if you have
+not added the autostart line. It is not a preview of the *next* reboot: the list
+is the sessions open at the last shutdown, and the snapshot stamped with the
+current boot is the one thing it will not read. The previous boot's record stays
+readable for as long as this boot lasts, so the answer does not go stale
+underneath you.
+
+The snapshot is `sessions-snapshot.json` in
+`~/.local/state/omarchy/wingroup/`, with `sessions-snapshot.prev.json` beside
+it. The state directory, not the runtime one: everything else the watcher writes
+describes processes that exist and is meant to die at reboot, and these two are
+the one thing whose whole job is to outlive it. The first write of a new boot
+moves the existing file aside to `.prev` rather than overwriting it, so whichever
+of the watcher and the restore comes up first, the previous boot's record is
+still there to read. A snapshot stamped with the *current* boot is never
+restored from — it describes what is on screen right now, and acting on it would
+open a second terminal for every session you already have open.
+
+Having a record and having something to restore are different things. If you
+close every Claude terminal before shutting down, the last scan writes a
+snapshot with nothing in it — which is a complete and correct answer, and the
+right thing to do with it is nothing. `wingroup-restore` does not fall back to
+guessing there; it falls back only when there is no record at all. The same goes
+for a record whose directories have not come back, an unmounted drive say: the
+rows are reported as skipped and nothing is invented to replace them.
+
+If there is no snapshot and the script is missing or not executable,
+`wingroup-restore` prints a note and exits 0.
+
+To turn it on after the fact, add the line yourself inside the existing wingroup
+block in `~/.config/hypr/autostart.conf`. The script is only needed for the
+fallback; restoring from the snapshot needs nothing but the line.
 
 ## Environment variables
 
@@ -785,13 +864,13 @@ All optional; the defaults are what install and the autostart lines use.
 | `WG_REFRESH_DEBOUNCE_MS` | `150` | Daemon |
 | `WG_FOLLOW_GRACE` | `10` (seconds; `0` disables) | Daemon |
 | `WG_RESTORE_FLAG` | `$XDG_RUNTIME_DIR/wingroup-restoring` | Daemon, restore |
-| `WG_RESTORE_SCRIPT` | `~/restore-claude.sh` | Restore, install |
+| `WG_RESTORE_SCRIPT` | `~/restore-claude.sh` | Restore, install — the fallback when there is no snapshot |
 | `WG_RESTORE_SETTLE` | `5` (seconds) | Restore |
 | `WG_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/wingroup` | Hook, watcher, bar, `crashed` |
-| `WG_SCAN_INTERVAL` | `15` (seconds) | Watcher |
+| `WG_SCAN_INTERVAL` | `15` (seconds) | Watcher — also how stale the boot snapshot can be |
 | `WG_SESSIONS_TTL` | `21600` (seconds) | Watcher |
 | `WG_JOURNAL_CMD` | `journalctl --user -f -n0 -o short-iso` | Watcher |
-| `WG_LAUNCH_CMD` | `uwsm-app` | `crashed --restore` |
+| `WG_LAUNCH_CMD` | `uwsm-app` | `crashed --restore`, restore from the snapshot |
 
 `install.sh` and `uninstall.sh` additionally honour `WG_BIN_DIR`,
 `WG_WAYBAR_CONFIG`, `WG_WAYBAR_STYLE`, `WG_HYPR_BINDINGS`, `WG_HYPR_AUTOSTART`
@@ -848,6 +927,14 @@ replays the recent journal by hand and can be run while the watcher is up.
 **A crashed session came back as a fresh `claude`.** No session id was ever
 recorded for it, which means it was already running when `wingroup-hook` was
 registered. See [What cannot be recovered](#what-cannot-be-recovered).
+
+**A session did not come back after a reboot.** Run `wingroup-restore --dry-run`
+— it prints the list without launching anything, and it is the same list the
+real run uses. If it says it is falling back to `restore-claude.sh`, there was
+no usable snapshot — the first login after installing, or a boot
+`wingroup-oomwatch` never came up on. If the list is there but short, the
+likeliest reason is that the session started after the last scan wrote the
+snapshot.
 
 **The bar shows a group with windows in it, but the workspace is empty.** Run
 `wingroup tidy`. Membership and location are separate facts, and something moved
@@ -909,8 +996,14 @@ a window out from under the group.
   same from outside and none of them are recorded.
 - **Crash records die at reboot.** Both runtime files live under
   `$XDG_RUNTIME_DIR`. A crash you have not dealt with by then is gone from the
-  bar — which is deliberate: `restore-claude.sh` handles that case from the other
-  end.
+  bar — which is deliberate: the boot restore handles that case from the other
+  end, since the session is in the snapshot like any other.
+- **The boot snapshot is only as good as the last scan.** It is written after
+  every scan, so it is up to `WG_SCAN_INTERVAL` seconds behind, and it holds
+  nothing at all for a boot the watcher never came up on — and with no snapshot
+  the restore is back to `restore-claude.sh` guessing from file timestamps. See
+  [What was open, from a record rather than a
+  guess](#what-was-open-from-a-record-rather-than-a-guess).
 - **The scope is the join key, so a terminal outside one is invisible.** A
   session started from an `ssh` login, from a terminal not launched through
   uwsm/`xdg-terminal-exec`, or from anything else with no `.scope` in its cgroup

@@ -129,6 +129,11 @@ wg_oomwatch_scan() {
   # the number -- the map it leaves behind is the whole point -- and a watcher
   # started by Hyprland's autostart has nowhere to print it to anyway.
   wg_sessions_scan >/dev/null
+  # And straight back out to disk, so that what is open right now survives the
+  # machine going down. This is what a restore reads at the next boot instead of
+  # guessing from file timestamps; it is only ever one scan interval stale, and
+  # a failure to write it is not worth taking the watcher down over.
+  wg_snapshot_write || true
 }
 
 wg_oomwatch_scan_due() {

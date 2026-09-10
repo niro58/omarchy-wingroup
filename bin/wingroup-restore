@@ -2,7 +2,26 @@
 # Restore the Claude sessions that were open at shutdown, then make sure every
 # restored terminal ends up in its project's group. The daemon files them as
 # they open; this tidy pass makes the result independent of that race.
+#
+# There are two ways to know what was open, and they are not equally good.
+#
+# The snapshot is a record: the watcher writes out what is actually running
+# after every scan, so after a reboot there is an exact list -- which session,
+# in which directory. If one exists, it is used, and nothing is guessed.
+#
+# Without one, the fallback script infers the list from when session files were
+# last written, clustering around the most recent few. That works only for
+# sessions that were being used right up to the shutdown. A session left idle
+# for half an hour has an older timestamp, falls outside the cluster, and is
+# silently dropped -- while a closed session whose timestamp happens to land
+# inside it is just as silently reopened. Hence the snapshot.
 set -euo pipefail
+
+WG_LIB_DIR="${WG_LIB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib" && pwd)}"
+# shellcheck source=lib/state.sh
+source "$WG_LIB_DIR/state.sh"
+# shellcheck source=lib/sessions.sh
+source "$WG_LIB_DIR/sessions.sh"
 
 : "${WG_RESTORE_SCRIPT:=$HOME/restore-claude.sh}"
 : "${WG_RESTORE_SETTLE:=5}"
@@ -14,21 +33,94 @@ set -euo pipefail
 # killed restore cannot leave following switched off for the session.
 : "${WG_RESTORE_FLAG:=${XDG_RUNTIME_DIR:-/tmp}/wingroup-restoring}"
 
-if [[ ! -x $WG_RESTORE_SCRIPT ]]; then
-  printf 'wingroup-restore: no restore script at %s, nothing to do\n' "$WG_RESTORE_SCRIPT" >&2
-  exit 0
-fi
+wg_restore_dry() {
+  local arg
+  for arg in ${@+"$@"}; do
+    [[ $arg == --dry-run || $arg == -n ]] && return 0
+  done
+  return 1
+}
+
+# Spawns a terminal per session in the snapshot. Prints one line each, so a dry
+# run is a readable answer to "what would come back".
+#
+# A session with no id gets a plain claude in the right directory: it was
+# running before the hook was installed, so the directory is all that was ever
+# learned about it, and saying so is better than pretending.
+wg_restore_from_snapshot() {
+  local dry="$1" rows="$2" row session cwd count=0
+  [[ -n $rows ]] || { printf '0\n'; return 0; }
+  while IFS= read -r row; do
+    # Peeled apart by expansion, not `IFS=$'\t' read -r session cwd`: the
+    # session id is empty for anything that predates the hook, tab is IFS
+    # whitespace, and read collapses a leading run of it -- so the directory
+    # would land in $session and the row would be dropped as having no
+    # directory at all. Exactly the trap wg_row_split exists for.
+    session="${row%%$'\t'*}"
+    cwd="${row#*$'\t'}"
+    [[ -n $cwd ]] || continue
+    if [[ ! -d $cwd ]]; then
+      printf 'skip   %s  (directory is gone)\n' "$cwd"
+      continue
+    fi
+    count=$(( count + 1 ))
+    if [[ -n $session ]]; then
+      printf 'resume %s  %s\n' "$cwd" "$session"
+    else
+      printf 'fresh  %s  (no session id was recorded)\n' "$cwd"
+    fi
+    (( ! dry )) || continue
+    if [[ -n $session ]]; then
+      # Keep the shell alive if the resume fails, so the error stays readable.
+      # shellcheck disable=SC2016  # $0 belongs to bash -c, which expands it
+      "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
+        bash -c 'claude --resume "$0" || { echo; echo "resume failed for $0"; exec bash; }' "$session" \
+        >/dev/null 2>&1 &
+    else
+      "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
+        bash -c 'claude || { echo; echo "claude exited"; exec bash; }' \
+        >/dev/null 2>&1 &
+    fi
+    disown 2>/dev/null || true
+  done <<<"$rows"
+  printf '%s\n' "$count"
+}
 
 wg_restore_unflag() { rm -f "$WG_RESTORE_FLAG"; }
 trap wg_restore_unflag EXIT
 : >"$WG_RESTORE_FLAG"
 
-"$WG_RESTORE_SCRIPT" "$@"
+wg_restore_dry ${@+"$@"} && WG_DRY=1 || WG_DRY=0
+
+# Whether there is a record at all is a separate question from how much is in
+# it, and they must not be answered by the same number. "The last boot had
+# nothing open" is a record, and the right thing to do with it is nothing --
+# falling back to the guesser there would reopen whatever happened to be written
+# to most recently, which is the behaviour the snapshot exists to replace.
+WG_HAVE_SNAPSHOT=1
+WG_SNAPSHOT_ROWS="$(wg_snapshot_previous_rows)" || WG_HAVE_SNAPSHOT=0
+
+# Everything the snapshot prints is for the user; only the last line is the
+# count, which is this script's own business.
+WG_SNAPSHOT_OUT="$(wg_restore_from_snapshot "$WG_DRY" "$WG_SNAPSHOT_ROWS")"
+WG_SNAPSHOT_COUNT="${WG_SNAPSHOT_OUT##*$'\n'}"
+[[ $WG_SNAPSHOT_OUT == *$'\n'* ]] && printf '%s\n' "${WG_SNAPSHOT_OUT%$'\n'*}"
+
+if (( WG_HAVE_SNAPSHOT )); then
+  printf 'wingroup-restore: restored %s session(s) from the snapshot\n' "$WG_SNAPSHOT_COUNT"
+elif [[ -x $WG_RESTORE_SCRIPT ]]; then
+  # No snapshot to work from -- the first boot after installing, or a boot the
+  # watcher never came up on. Guessing is better than nothing.
+  printf 'wingroup-restore: no session snapshot, falling back to %s\n' "$WG_RESTORE_SCRIPT" >&2
+  "$WG_RESTORE_SCRIPT" ${@+"$@"}
+else
+  printf 'wingroup-restore: no session snapshot and no restore script at %s, nothing to do\n' \
+    "$WG_RESTORE_SCRIPT" >&2
+  exit 0
+fi
 
 # A dry run spawns nothing, so there is nothing to file.
-for arg in ${@+"$@"}; do
-  [[ $arg == --dry-run || $arg == -n ]] && exit 0
-done
+(( ! WG_DRY )) || exit 0
 
 # Terminals need a moment to spawn their shells before cwd resolution works.
 [[ $WG_RESTORE_SETTLE == 0 ]] || sleep "$WG_RESTORE_SETTLE"

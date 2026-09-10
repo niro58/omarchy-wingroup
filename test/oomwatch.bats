@@ -38,6 +38,14 @@ setup() {
   chmod +x "$WG_TMP/journal"
   : >"$WG_TMP/journal.txt"
   export WG_JOURNAL_CMD="$WG_TMP/journal"
+
+  # The kernel's boot id, faked. Every scan stamps the snapshot with it, and
+  # the tests below need to be able to say "some other boot" -- which nothing
+  # reading the machine's real boot id can.
+  WG_BOOT_NOW="4f8e2c10-boot-now"
+  WG_BOOT_BEFORE="1a77bd93-boot-before"
+  export WG_BOOT_ID_FILE="$WG_TMP/boot-id"
+  printf '%s\n' "$WG_BOOT_NOW" >"$WG_BOOT_ID_FILE"
 }
 
 teardown() {
@@ -358,4 +366,66 @@ bar_refreshed() { (( $(refreshes) >= 1 )); }
   run wait "$watcher"
   [ "$status" -eq 0 ]
   exec 8>&-
+}
+
+# --- the snapshot ------------------------------------------------------------
+#
+# The map lives in the runtime directory and dies with the boot, which is right
+# for everything else it is used for and useless to a restore. So every scan
+# also writes it out to the state directory, stamped with the boot it describes.
+
+# A snapshot as the watcher on some other boot left it behind.
+wg_snapshot_from_boot() {
+  local boot="$1" scope="$2" session="$3" cwd="$4"
+  mkdir -p "$WG_STATE_DIR"
+  jq -n --arg boot "$boot" --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" \
+     '{boot: $boot, sessions: {($scope): {session: $session, cwd: $cwd, source: "scan", seen: 0}}}' \
+     >"$WG_SNAPSHOT_FILE"
+}
+
+# There is no shutdown hook to be had -- a machine can lose power, and a session
+# oomd kills never says goodbye either -- so the snapshot is only ever as good
+# as the last scan, and the last scan has to leave it correct.
+@test "a scan writes the session map out to the snapshot, stamped with this boot" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  # And one the hook told us about, because the id is the half of the record a
+  # restore actually resumes from.
+  wg_sessions_record "$WG_SCOPE_TWO" "abc-123" "$WG_TMP/projects/site-platform" hook
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ -f "$WG_SNAPSHOT_FILE" ]
+  [ "$(jq -r '.boot' "$WG_SNAPSHOT_FILE")" = "$WG_BOOT_NOW" ]
+  [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 2 ]
+  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].cwd' "$WG_SNAPSHOT_FILE")" = "$WG_TMP/projects/shop-web" ]
+  [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions[$s].session' "$WG_SNAPSHOT_FILE")" = "abc-123" ]
+}
+
+# The ordering guard between the watcher and the restore, and the one thing in
+# this file that loses every session on the machine if it breaks. Both start at
+# login; if the watcher gets there first and simply overwrote the file, the
+# record of what was open would be gone before the restore ever read it. So the
+# first write of a new boot moves the old file aside instead, and the restore
+# finds it either way.
+@test "the first scan of a new boot keeps the previous boot's snapshot" {
+  wg_snapshot_from_boot "$WG_BOOT_BEFORE" "$WG_SCOPE" "sess-1" "$WG_TMP/projects/shop-web"
+  # This boot is running something else entirely.
+  wg_fake_proc 1002 claude "$WG_SCOPE_TWO" "$WG_TMP/projects/site-platform"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.boot' "$WG_SNAPSHOT_PREV")" = "$WG_BOOT_BEFORE" ]
+  [ "$(jq -r '.boot' "$WG_SNAPSHOT_FILE")" = "$WG_BOOT_NOW" ]
+
+  # Every scan after the first is on a boot the snapshot already carries, so it
+  # overwrites and moves nothing: pushing this boot's file onto .prev would
+  # throw away the very record the move was made to protect.
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.boot' "$WG_SNAPSHOT_PREV")" = "$WG_BOOT_BEFORE" ]
+
+  # And what the restore will ask for is still the sessions from before the
+  # reboot, not the one this boot is running.
+  run wg_snapshot_previous_rows
+  [ "$output" = "$(printf 'sess-1\t%s' "$WG_TMP/projects/shop-web")" ]
 }
