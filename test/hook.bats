@@ -132,21 +132,44 @@ wg_fake_comm() {
 # with the subagent's, and an oom-kill then hands back the subagent instead of
 # the work that was on screen.
 #
-# The process tree is the only thing that tells the two apart. Verified against
-# real nested and top-level sessions on this machine: CLAUDE_CODE_CHILD_SESSION
-# is 1 for both -- Claude sets it for every process it spawns, this hook
-# included -- so the environment cannot be used for it.
+# The environment cannot tell the two apart. Verified against real nested and
+# top-level sessions on this machine: CLAUDE_CODE_CHILD_SESSION is 1 for both --
+# Claude sets it for every process it spawns, this hook included.
 @test "a session nested inside another claude records nothing" {
-  # this hook's claude (700) -> a shell (600) -> another claude (500)
+  # this hook's claude (700) -> a shell (600) -> another claude (500), all of
+  # them in this terminal's scope, which is what makes 500's entry not ours
   wg_fake_ppid 700 600
   wg_fake_ppid 600 500
   wg_fake_comm 600 bash
-  wg_fake_comm 500 claude
+  wg_fake_proc 500 claude "$WG_SCOPE" "$WG_SESSION_CWD"
 
   export CLAUDE_PID=700
   hook '{"session_id":"a-subagent-not-your-work","cwd":"/home/dev/projects/shop-web"}'
   [ "$status" -eq 0 ]
   [ -z "$(recorded session)" ]
+}
+
+# Sharing the scope is the test, not ancestry on its own, and this is the case
+# that separates them.
+#
+# A terminal launched from inside a session keeps that session in its ancestry
+# while systemd gives it a scope of its own -- which is exactly what happens to
+# every terminal `wingroup crashed --restore` brings back, since it is normally
+# run from a session. On ancestry alone those are all called nested and none of
+# them is ever recorded, so the sessions you just restored become the only ones
+# on the machine that can never be restored again.
+@test "a session in its own scope is recorded even with a claude above it" {
+  # this hook's claude (700) -> a shell (600) -> another claude (500), but 500
+  # is in a different scope: 700 opened this one and the entry is its own
+  wg_fake_ppid 700 600
+  wg_fake_ppid 600 500
+  wg_fake_comm 600 bash
+  wg_fake_proc 500 claude "$(wg_fake_scope 5150da5e)" "$WG_TMP/projects/elsewhere"
+
+  export CLAUDE_PID=700
+  hook '{"session_id":"my-own-scope","cwd":"/home/dev/projects/shop-web"}'
+  [ "$status" -eq 0 ]
+  [ "$(recorded session)" = "my-own-scope" ]
 }
 
 # The other half of the same rule: a terminal's own session has a shell and a
