@@ -457,6 +457,47 @@ wg_crash_split() {
 # start a dozen at once; what waiting for it means is the caller's business.
 WG_CRASH_PID=""
 
+# How long to give a launcher before deciding it took. See wg_crash_settle.
+: "${WG_LAUNCH_SETTLE:=0.4}"
+
+# Did those launches take? $@ is the pids; prints how many did not.
+#
+# There are two shapes of launcher and they end differently, which is the whole
+# reason this is not a `wait`.
+#
+# uwsm-app on a machine where it hands the terminal to systemd returns straight
+# away with exit 0. On a machine where xdg-terminal-exec execs the terminal in
+# place, the launcher process *becomes* the terminal and stays alive for as long
+# as the window is open. Waiting for it to exit worked on the first and hung
+# forever on the second: the picker held its lock for the life of the restored
+# terminal, the record stayed on the bar, and the button did nothing until the
+# user closed the very terminal they had just brought back. Observed, on a real
+# desktop, as "onclick doesn't do anything".
+#
+# So the question is not what it exited with, it is whether it is still there.
+# Still running after a moment is a terminal that opened. Already gone with a
+# non-zero status is a launcher that was never there. Already gone with zero is
+# the hand-off kind, which also worked.
+#
+# One settle for the whole sweep rather than one each, so restoring a dozen
+# sessions costs one pause and not twelve.
+#
+# The count comes back in WG_CRASH_FAILED rather than on stdout, because a
+# command substitution would run this in a subshell and a subshell cannot wait
+# for jobs it did not start: every launch would look like it had failed.
+WG_CRASH_FAILED=0
+
+wg_crash_settle() {
+  local p
+  WG_CRASH_FAILED=0
+  (( $# )) || return 0
+  sleep "$WG_LAUNCH_SETTLE"
+  for p in "$@"; do
+    kill -0 "$p" 2>/dev/null && continue
+    wait "$p" || WG_CRASH_FAILED=$(( WG_CRASH_FAILED + 1 ))
+  done
+}
+
 wg_crash_launch() {
   local session="$1" cwd="$2"
   WG_CRASH_PID=""
@@ -473,12 +514,20 @@ wg_crash_launch() {
   # terminal in a scope of its own, and the shell that outlives a failed
   # --resume is what keeps the window -- and the error in it -- on screen,
   # instead of the terminal vanishing the moment claude exits.
+  #
+  # 9>&- closes the picker's lock in the child, and it is not housekeeping.
+  # cmd_crashed holds that lock on file descriptor 9, an fd is inherited across
+  # fork and exec, and on a desktop where the launcher becomes the terminal the
+  # child is a window that lives for hours. Without this the restored terminal
+  # goes on holding the lock long after wingroup has exited, and every later
+  # click on the button finds it held and silently does nothing. Observed: an
+  # alacritty, its shell and its claude all holding fd 9 on the lock file.
   if [[ -n $session ]]; then
     printf 'wingroup: resuming %s in %s\n' "$session" "$cwd"
     # shellcheck disable=SC2016  # $0 belongs to bash -c, which expands it
     "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
       bash -c 'claude --resume "$0" || { echo; echo "resume failed for $0"; exec bash; }' "$session" \
-      >/dev/null &
+      >/dev/null 9>&- &
   else
     # No id was ever recorded for this one: it was running before the hook was
     # installed, and a scan can only see that *something* was in that directory.
@@ -487,7 +536,7 @@ wg_crash_launch() {
     printf 'wingroup: no session id for %s — starting a fresh claude there\n' "$cwd"
     "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
       bash -c 'claude || { echo; echo "claude exited"; exec bash; }' \
-      >/dev/null &
+      >/dev/null 9>&- &
   fi
   WG_CRASH_PID="$!"
 }
@@ -554,11 +603,12 @@ cmd_crashed_menu() {
         wg_notify "wingroup" "Cannot restore ${WG_CRASH[2]}: the directory is gone."
         return 0
       fi
-      # Waited on before the record goes, for the reason --restore waits: this
+      # Checked before the record goes, for the reason --restore checks: this
       # file is the only surviving copy of the session id, so a launcher that is
       # not there must not cost the user the one thing they came back for.
-      if ! wait "$WG_CRASH_PID"; then
-        printf 'wingroup: the launch failed — keeping the record so the session id is not lost\n' >&2
+      wg_crash_settle "$WG_CRASH_PID"
+      if (( WG_CRASH_FAILED )); then
+        wg_warn "the launch failed — keeping the record so the session id is not lost"
         return 1
       fi
       wg_crashed_remove "$index"
@@ -656,18 +706,16 @@ cmd_crashed() {
   done
 
   # The launches are backgrounded so that a dozen terminals start at once rather
-  # than one after another, then waited for one at a time.
+  # than one after another, then checked together.
   #
-  # One at a time, and not a bare `wait`, because a bare `wait` returns 0 no
-  # matter how its children fared -- and this list is the only surviving record
-  # of the session ids. A launcher that is not there (no terminal configured for
-  # xdg-terminal-exec, uwsm-app outside a uwsm session) would otherwise report a
-  # successful relaunch, clear the file, and take every id with it. Their stderr
-  # is left alone for the same reason: a launch that fails has to be visible.
-  local failed=0 p
-  for p in ${pids[@]+"${pids[@]}"}; do
-    wait "$p" || failed=$(( failed + 1 ))
-  done
+  # Checked, and not waited for: a bare `wait` returns 0 no matter how its
+  # children fared, and waiting on them one at a time hangs for as long as the
+  # terminals stay open on any desktop where the launcher becomes the terminal.
+  # This list is the only surviving record of the session ids, so neither a
+  # launcher that was never there nor a launcher that worked may be mistaken for
+  # the other. wg_crash_settle is where that distinction lives.
+  wg_crash_settle ${pids[@]+"${pids[@]}"}
+  local failed="$WG_CRASH_FAILED"
 
   if (( ! failed )); then
     # Cleared whole, skips included: a record whose directory is gone can never
