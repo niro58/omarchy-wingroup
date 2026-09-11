@@ -41,17 +41,28 @@ while (( $# )); do
   shift
 done
 
-# The ramp itself, one declaration block per step, dimmest first: amber at one
-# idle session, orange, red-orange, and a bright pure red at four-or-more, with
-# opacity and weight climbing alongside the hue so a group full of finished
-# sessions reads at a glance on a dark bar rather than only up close. Literal
-# colours rather than the theme's @foreground: leaving the palette the rest of
-# the bar sits in is the point. As many entries as WG_IDLE_HEAT_MAX.
+# The ramp itself, one declaration block per step, dimmest first: pale sand at
+# one idle session, then amber, deep amber, and a vivid orange at four-or-more.
+# It stays inside the warm half of the wheel and never reaches red, because red
+# is the crashed rule's and a bar is read at a glance: two reds a metre away are
+# one red, and a user who cannot tell "four sessions are waiting" from "a
+# session was killed" is guessing. So hue is no longer available to carry the
+# top of the ramp, and saturation carries it instead: 55 -> 69 -> 79 -> 89,
+# climbing while lightness falls 65 -> 61 -> 57 -> 53, which is what makes step
+# four read hotter than step three without either of them reading as red.
+#
+# Opacity (0.70 -> 1) and weight (normal -> 500 -> 600 -> bold) are written
+# here too, but they cannot be what the ramp rests on: the busy, visible and
+# active rules come *after* it and set opacity themselves, and active sets
+# weight as well. On the group you are actually looking at, saturation is the
+# only one of the three still standing.
+# Literal colours rather than the theme's @foreground: leaving the palette the
+# rest of the bar sits in is the point. As many entries as WG_IDLE_HEAT_MAX.
 WG_IDLE_HEAT_RAMP=(
-  'color: #e0a458; opacity: 0.75;'
-  'color: #ef8354; opacity: 0.85;'
-  'color: #f45d48; opacity: 0.95; font-weight: 600;'
-  'color: #ff3b30; opacity: 1; font-weight: bold;'
+  'color: #d7b377; opacity: 0.70;'
+  'color: #e0a458; opacity: 0.82; font-weight: 500;'
+  'color: #e8933d; opacity: 0.92; font-weight: 600;'
+  'color: #f2851c; opacity: 1; font-weight: bold;'
 )
 
 # A group holding a session systemd-oomd killed. Deliberately not another step
@@ -61,7 +72,14 @@ WG_IDLE_HEAT_RAMP=(
 # fills the widget rather than only colouring its text -- a lit badge on the bar
 # is categorically unlike a hotter label, and no amount of idle heat can be
 # mistaken for it.
-WG_CRASHED_STYLE='background: #7f1d1d; color: #ffd7d5; opacity: 1; font-weight: bold;'
+#
+# It is also the only red left in the block, and it is a lit alarm red rather
+# than the dark maroon it used to be: back when the ramp's top step was bright
+# red too, a dim red badge was the quieter of the two and the louder thing on
+# the bar was the one that only meant "busy". Now red means exactly one thing,
+# so this is allowed to be the loudest rule here. Near-white text on the fill
+# keeps the label readable at that saturation.
+WG_CRASHED_STYLE='background: #c81e1e; color: #fff5f5; opacity: 1; font-weight: bold;'
 
 # One declaration per step, or the module emits a class this script writes no
 # rule for. The two numbers now come from the same file, so this can only fire

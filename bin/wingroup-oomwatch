@@ -27,6 +27,8 @@ WG_LIB_DIR="${WG_LIB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/
 source "$WG_LIB_DIR/state.sh"
 # shellcheck source=lib/sessions.sh
 source "$WG_LIB_DIR/sessions.sh"
+# shellcheck source=lib/notify.sh
+source "$WG_LIB_DIR/notify.sh"
 
 # Whole seconds: the loop compares it against $SECONDS, which is what makes the
 # "is a scan due" check cost nothing on a busy journal.
@@ -121,6 +123,105 @@ wg_oomwatch_handle_line() {
   wg_crashed_add "$scope" "$killed_at" || return 0
   WG_FILED[$scope]=1
   wg_refresh_bar
+  # After the redraw rather than before it, so the bar -- a pkill and a
+  # re-render this machine controls -- is already right before anything talks to
+  # dbus. Ordering is only a preference, though, and not the safety: what keeps
+  # a notification daemon that never answers from stopping this loop is the
+  # timeout inside wg_notify, because every line after this one waits on it.
+  wg_oomwatch_notify "$scope"
+}
+
+# Tells the user, once, about the crash just filed for $1.
+#
+# The failure this exists for: a session was oom-killed at 23:58, the bar went
+# red, the record was correct and the session was resumable -- and the user
+# found out the next morning, because the only thing that had been told was a
+# bar nobody was looking at.
+#
+# The summary names the directory, never the scope. A scope is
+# "app-Hyprland-xdg\x2dterminal\x2dexec-6fa9129b.scope", which identifies
+# nothing to somebody reading it off a lock screen hours later; the last path
+# segment is what they call the project.
+#
+# The body says whether the conversation comes back or only the directory does,
+# in the same words the bar's tooltip and the picker use, because that is what
+# decides whether this is worth getting up for.
+#
+# One notification per lost session, not one per burst. oomd kills the biggest
+# cgroup and then looks again, so several can go inside a minute -- four in two
+# minutes, in this machine's journal. Coalescing them would need a timer this
+# loop does not have, and the cheap version of it -- announce the first, stay
+# quiet for the rest -- is worse than noisy: it names one project and leaves
+# the user believing that was the only thing that died. So each lost session
+# gets its own, and from the second onward each carries the running total. The
+# first cannot: when it is sent, one is all that has happened, and this loop has
+# no way of knowing another is a second away. What the total buys is that a user
+# looking at the last notification of a burst is not left thinking it was the
+# only one.
+wg_oomwatch_notify() {
+  local scope="$1" cwd session at count note summary body when
+  local -a facts=()
+
+  # One pass over the file the crash was just written to, for the four facts the
+  # text needs. It is not one process -- wg_crashed_read validates the document
+  # with a jq of its own before handing it over -- but it is one read, and it is
+  # only ever reached for a crash that was actually filed. The cost lands once
+  # per lost session and never on the journal noise every other line here is.
+  mapfile -t facts < <(jq -r --arg s "$scope" '
+    (.crashed | length | tostring),
+    ((first(.crashed[] | select(.scope == $s)) // {})
+     | (.cwd // ""), (.session // ""), (.killed_at // ""))
+  ' <<<"$(wg_crashed_read)")
+  count="${facts[0]:-}"
+  cwd="${facts[1]:-}"
+  session="${facts[2]:-}"
+  at="${facts[3]:-}"
+  # A jq that died leaves the array short, and an unusable count must not take
+  # an arithmetic expansion -- and with it the watcher -- down.
+  [[ $count =~ ^[0-9]+$ ]] || count=1
+
+  if [[ -n $session ]]; then
+    note="resumable"
+  else
+    note="no session id, a fresh claude"
+  fi
+
+  # When it died, in the same short form the bar and the picker use.
+  #
+  # This is the one surface built to be read hours after the fact, and it was
+  # the only one dropping the time -- which inverts the premise. Read at eight
+  # in the morning, "a session was killed" does not say whether that was ten
+  # minutes ago or overnight, and that is what decides whether the work is still
+  # worth resuming.
+  when=""
+  [[ -z $at ]] || when=" at $(wg_crash_when "$at")"
+
+  if [[ -n $cwd ]]; then
+    summary="Claude session lost: ${cwd##*/}"
+    # "/" is the one directory with nothing after its last slash.
+    [[ -n ${cwd##*/} ]] || summary="Claude session lost: $cwd"
+    body="systemd-oomd killed it$when in $cwd — $note."
+  else
+    # Filed without a directory. Rare enough to be unreachable in practice and
+    # cheap enough to handle anyway; the alternative is a notification headed
+    # "Claude session lost: ".
+    summary="Claude session lost"
+    body="systemd-oomd killed it$when — $note."
+  fi
+  if (( count > 1 )); then
+    body+=" $count crashed sessions are waiting."
+  fi
+  body+=" Bring it back from the ⚠ button on the bar, or run: wingroup crashed --restore"
+
+  # Critical, so it is still on the screen at breakfast: a notification daemon
+  # expires a normal one after a few seconds, which for a session that died
+  # while nobody was in front of the machine is the same as never sending it.
+  #
+  # wg_notify swallows its own failures, and this repeats the guarantee at the
+  # call site for the reason wg_snapshot_write below is written the same way:
+  # nothing about a notification is worth ending a watcher whose whole job is
+  # to still be running hours from now.
+  wg_notify "$summary" "$body" critical || true
 }
 
 wg_oomwatch_scan() {

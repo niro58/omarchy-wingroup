@@ -9,7 +9,7 @@ A strip of buttons in waybar shows every group, and — if the terminals are
 running Claude Code — how many sessions in each one have finished and are
 waiting on you.
 
-![Waybar strip: the numbered workspaces, then five group buttons — "mail" plain and dimmed with no idle sessions, then "docs" with a superscript one in amber, "api" with a superscript two in orange, "web" with a superscript three in red-orange, and "infra" with a superscript five in bold red](docs/images/bar.png)
+![Waybar strip: the numbered workspaces, then five group buttons — "mail" plain and dimmed with no idle sessions, then "docs" with a superscript one in faint sand, "api" with a superscript two in amber, "web" with a superscript three in deep amber, and "infra" with a superscript five in bold orange](docs/images/bar.png)
 
 ## The problem
 
@@ -189,14 +189,28 @@ looking at and hold four finished sessions at once.
 | Idle sessions | Class | Installed rule |
 | --- | --- | --- |
 | 0 | *(none)* | — |
-| 1 | `idle1` | `color: #e0a458; opacity: 0.75;` |
-| 2 | `idle2` | `color: #ef8354; opacity: 0.85;` |
-| 3 | `idle3` | `color: #f45d48; opacity: 0.95; font-weight: 600;` |
-| 4 or more | `idle4` | `color: #ff3b30; opacity: 1; font-weight: bold;` |
+| 1 | `idle1` | `color: #d7b377; opacity: 0.70;` |
+| 2 | `idle2` | `color: #e0a458; opacity: 0.82; font-weight: 500;` |
+| 3 | `idle3` | `color: #e8933d; opacity: 0.92; font-weight: 600;` |
+| 4 or more | `idle4` | `color: #f2851c; opacity: 1; font-weight: bold;` |
 
 `idle4` is a ceiling: past a handful the exact number stops changing what you do
 about it. A group with nothing waiting emits no idle class and looks exactly as
 it always has.
+
+**The ramp stays warm and never reaches red.** Red on this bar means one thing
+only: a session was killed — see [The crashed bar state](#the-crashed-bar-state).
+The ramp means the opposite, that work finished and is waiting for you, and
+nothing has gone wrong. It used to end on a bright red at `idle4`, which on a
+dark bar at a glance was the same red as a crash, and people read a full group
+as an error. So the four steps now run sand → amber → deep amber → orange, and
+the escalation the hue used to carry is carried by saturation instead — 55, 69,
+79, 89, climbing as lightness falls 65, 61, 57, 53. Opacity and weight climb
+too, but they are not what the ramp rests on: the `busy`, `visible` and `active`
+rules come after it and set opacity themselves, and `active` sets weight as
+well, so on the group you are looking at saturation is the only one left doing
+the work. If you have been running wingroup a while: the rule changed, not your
+groups. Nothing on the bar is red unless something died.
 
 In the stylesheet the ramp sits **between** the base rule and the three state
 rules. Both kinds of selector are one id plus one class, so they have equal
@@ -308,11 +322,16 @@ work, and still be short a session oomd took while you were elsewhere.
 
 | Class | Installed rule |
 | --- | --- |
-| `crashed` | `background: #7f1d1d; color: #ffd7d5; opacity: 1; font-weight: bold;` |
+| `crashed` | `background: #c81e1e; color: #fff5f5; opacity: 1; font-weight: bold;` |
 
 It is the only rule in the block that fills the widget rather than colouring its
 text, because a crash is not "more idle sessions" and must not read as another
-step on the ramp. And it is written **after** the state rules — the mirror of
+step on the ramp. It is also the only red left anywhere in the block, now that
+[the idle ramp](#the-idle-colour-ramp) has stopped short of red — so a red
+button on the strip always means a lost session and never anything else. The
+fill is a lit alarm red rather than the dark maroon it used to be: when the
+ramp's top step was bright red as well, the dimmer of the two reds was the one
+that mattered. And it is written **after** the state rules — the mirror of
 why the ramp is written before them. The ramp has to yield to `active` or it
 would dim the group you are looking at; this rule raises every property it
 touches and lowers none, so it can safely take the last word, and it has to: the

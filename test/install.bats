@@ -287,16 +287,77 @@ pattern_hides() {
   done
 }
 
-# Warm at one, unmistakably red and bright at the ceiling.
-@test "the ramp runs from warm to bright red across its four steps" {
+# Faint and warm at one, hot and heavy at the ceiling -- but still warm, and
+# never red. Hue is no longer available to carry the top of the ramp, so what
+# says step four outruns step three is opacity and weight.
+@test "the ramp runs from faint warmth to a hot orange across its four steps" {
   "$WG_ROOT/install.sh"
   run bash -c "grep '#custom-wingroup0.idle1' '$WG_WAYBAR_STYLE'"
-  [[ "$output" == *"#e0a458"* ]]
-  [[ "$output" == *"opacity: 0.75"* ]]
+  [[ "$output" == *"#d7b377"* ]]
+  [[ "$output" == *"opacity: 0.70"* ]]
+  [[ "$output" != *"font-weight"* ]]
+  run bash -c "grep '#custom-wingroup0.idle3' '$WG_WAYBAR_STYLE'"
+  [[ "$output" == *"#e8933d"* ]]
+  [[ "$output" == *"opacity: 0.92"* ]]
+  [[ "$output" == *"font-weight: 600"* ]]
   run bash -c "grep '#custom-wingroup0.idle4' '$WG_WAYBAR_STYLE'"
-  [[ "$output" == *"#ff3b30"* ]]
+  [[ "$output" == *"#f2851c"* ]]
   [[ "$output" == *"opacity: 1"* ]]
   [[ "$output" == *"font-weight: bold"* ]]
+}
+
+# Opacity has to climb at every step and never repeat: with the four hues this
+# close together it is most of what separates "one waiting" from "four".
+@test "every step of the ramp is brighter than the one below it" {
+  "$WG_ROOT/install.sh"
+  local step op prev=0
+  for step in 1 2 3 4; do
+    op="$(grep "#custom-wingroup0.idle$step" "$WG_WAYBAR_STYLE" \
+      | sed -n 's/.*opacity: \([0-9.]*\).*/\1/p')"
+    [ -n "$op" ]
+    awk -v a="$op" -v b="$prev" 'BEGIN { exit !(a > b) }'
+    prev="$op"
+  done
+}
+
+# The point of the whole change: red means one thing on this bar, and it is not
+# "work is waiting". A user glancing at the strip read the old bright-red top
+# step as an error, and happened to be right -- which is a guess, not a bar you
+# can read. So no step may borrow the crashed rule's colours, fill a background
+# the way it does, or drift round the wheel into red under its own steam. This
+# is the test that fails if someone later slides the ramp back into red.
+@test "no step of the idle ramp reads as the crashed alarm" {
+  "$WG_ROOT/install.sh"
+  local step rule hex r g b
+  for step in 1 2 3 4; do
+    rule="$(grep "#custom-wingroup0.idle$step" "$WG_WAYBAR_STYLE")"
+    # not the alarm's own colours, and not filled the way the alarm is
+    [[ "$rule" != *"#c81e1e"* ]]
+    [[ "$rule" != *"#fff5f5"* ]]
+    [[ "$rule" != *"#7f1d1d"* ]]
+    [[ "$rule" != *"#ffd7d5"* ]]
+    [[ "$rule" != *background* ]]
+    # and warm rather than red, measured as hue and not as saturation.
+    #
+    # "How far red leads green" only says how vivid a colour is. A dusty red
+    # like #c05050 leads green by 112 and passes a 128 threshold comfortably --
+    # so would the crashed maroon #7f1d1d, at 98. What actually separates amber
+    # from red is where green sits between blue and red: at the amber end it is
+    # about halfway, and in any red it is on the floor.
+    #
+    #   #d7b377 62   #e0a458 55   #e8933d 50   #f2851c 49     <- the ramp
+    #   #c05050  0   #7f1d1d  0   #c81e1e  0   #ff3b30  5     <- reds
+    #
+    # A 35 cut sits in that gap with room on both sides, and it fails for a red
+    # of any vividness rather than only for a bright one.
+    hex="$(printf '%s' "$rule" | sed -n 's/.*color: #\([0-9a-f]\{6\}\).*/\1/p')"
+    [ -n "$hex" ]
+    r=$((16#${hex:0:2}))
+    g=$((16#${hex:2:2}))
+    b=$((16#${hex:4:2}))
+    [ "$r" -gt "$b" ]
+    [ "$(( (g - b) * 100 / (r - b) ))" -ge 35 ]
+  done
 }
 
 # A group can be the one you are looking at *and* have four sessions waiting in
@@ -417,11 +478,14 @@ pattern_hides() {
 
 # A crash is not "more idle sessions", and the rule must not read as one. Every
 # step of the ramp colours text and nothing else; this one fills the widget, so
-# no amount of idle heat can be mistaken for a session that was killed.
+# no amount of idle heat can be mistaken for a session that was killed. The fill
+# is a lit red rather than the old dark maroon now that the ramp has given red
+# up: this is the loudest rule in the block and it should look like it.
 @test "the crashed rule is an alarm, not another step on the idle ramp" {
   "$WG_ROOT/install.sh"
   run bash -c "grep '#custom-wingroup0.crashed' '$WG_WAYBAR_STYLE'"
-  [[ "$output" == *"background:"* ]]
+  [[ "$output" == *"background: #c81e1e"* ]]
+  [[ "$output" == *"color: #fff5f5"* ]]
   [[ "$output" == *"opacity: 1"* ]]
   [[ "$output" == *"font-weight: bold"* ]]
   # no ramp step fills a background, or the two states would look alike

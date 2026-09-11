@@ -48,6 +48,23 @@ setup() {
   printf '%s\n' "$WG_BOOT_NOW" >"$WG_BOOT_ID_FILE"
 }
 
+# Waits for the backgrounded watcher $1 to finish and asserts it stopped
+# cleanly, tolerating one thing and one thing only: bash having already reaped
+# it, which `wait` reports as 127.
+#
+# `run wait "$pid"` on its own is racy here -- measured at roughly one run in
+# ten -- because whether the job is still in the table when bats gets to it
+# depends on timing this test does not control. Tolerating 127 costs nothing:
+# a trap that did not run leaves 143, and that still fails.
+wg_assert_stopped_cleanly() {
+  local pid="$1" rc=0
+  wait "$pid" 2>/dev/null || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 127 ]; then
+    echo "watcher exited $rc, wanted a clean 0 (127 would mean already reaped)" >&2
+    return 1
+  fi
+}
+
 teardown() {
   # The live-loop test runs a real watcher in the background. An assertion
   # failing in the middle of it never reaches that test's own kill, and a
@@ -304,8 +321,7 @@ bar_refreshed() { (( $(refreshes) >= 1 )); }
   [ -n "$child" ]
 
   kill -TERM "$watcher"
-  run wait "$watcher"
-  [ "$status" -eq 0 ]
+  wg_assert_stopped_cleanly "$watcher"
 
   i=0
   while (( i++ < 50 )) && kill -0 "$child" 2>/dev/null; do sleep 0.1; done
@@ -363,8 +379,7 @@ bar_refreshed() { (( $(refreshes) >= 1 )); }
   [ "$(refreshes)" -eq 1 ]
 
   kill -TERM "$watcher"
-  run wait "$watcher"
-  [ "$status" -eq 0 ]
+  wg_assert_stopped_cleanly "$watcher"
   exec 8>&-
 }
 
@@ -428,4 +443,251 @@ wg_snapshot_from_boot() {
   # reboot, not the one this boot is running.
   run wg_snapshot_previous_rows
   [ "$output" = "$(printf 'sess-1\t%s' "$WG_TMP/projects/shop-web")" ]
+}
+
+# --- telling the user --------------------------------------------------------
+#
+# A red bar is only a signal to somebody looking at the bar. The crash this was
+# written for happened at 23:58 and was read the next morning, off a button
+# that had been red all night.
+
+notifies() {
+  wc -l <"$WG_NOTIFY_LOG"
+}
+
+# Column $2 of notification $1, both counted from one: 1 summary, 2 body,
+# 3 urgency. The stub writes one tab-separated line per notification and
+# nothing here puts a newline in a field, so a line is a notification.
+notify_field() {
+  sed -n "${1}p" "$WG_NOTIFY_LOG" | cut -f"$2"
+}
+
+notified()       { (( $(notifies) >= 1 )); }
+notified_twice() { (( $(notifies) >= 2 )); }
+
+@test "a filed crash sends exactly one notification, and it is critical" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  journal_kill "$WG_SCOPE"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(notifies)" -eq 1 ]
+  # A normal notification expires after a few seconds. The whole point of this
+  # one is that it is still there when the user comes back to the machine.
+  [ "$(notify_field 1 3)" = "critical" ]
+}
+
+# The scope is the join key and nothing else. Reading
+# "app-Hyprland-xdg\x2dterminal\x2dexec-9029a872.scope" off a lock screen tells
+# you nothing about what you just lost.
+@test "the notification names the directory that was lost, not the scope" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  journal_kill "$WG_SCOPE"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [[ "$(notify_field 1 1)" == *"shop-web"* ]]
+  [[ "$(notify_field 1 1)" != *".scope"* ]]
+  [[ "$(notify_field 1 1)" != *"x2dterminal"* ]]
+  # And the full path in the body, because two projects can share a last
+  # segment and the summary only carries that segment.
+  [[ "$(notify_field 1 2)" == *"$WG_TMP/projects/shop-web"* ]]
+}
+
+# Whether the conversation comes back or only the directory does is what the
+# user is deciding when they read this, so it is said in the same words the bar
+# tooltip and the picker use.
+@test "the notification says resumable when the hook recorded an id" {
+  wg_sessions_record "$WG_SCOPE" "abc-123" "$WG_TMP/projects/shop-web" hook
+  journal_kill "$WG_SCOPE"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [[ "$(notify_field 1 2)" == *"resumable"* ]]
+  [[ "$(notify_field 1 2)" != *"fresh claude"* ]]
+}
+
+@test "the notification says a fresh claude when no id was ever recorded" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  journal_kill "$WG_SCOPE"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [[ "$(notify_field 1 2)" == *"no session id, a fresh claude"* ]]
+}
+
+# Knowing is no use without knowing what to do next, and the two ways back in
+# are the bar's button and the CLI behind it.
+@test "the notification says how to bring the session back" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  journal_kill "$WG_SCOPE"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [[ "$(notify_field 1 2)" == *"⚠"* ]]
+  [[ "$(notify_field 1 2)" == *"wingroup crashed --restore"* ]]
+}
+
+# Same guard as the bar redraw, for a worse reason: a redraw repeated is wasted
+# work, but a critical notification repeated is another popup the user has to
+# dismiss by hand for a session that only died once.
+@test "a repeated kill line for a scope already filed notifies only once" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  journal_kill "$WG_SCOPE"
+  journal_kill "$WG_SCOPE"
+  journal_kill "$WG_SCOPE"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(crashes)" -eq 1 ]
+  [ "$(notifies)" -eq 1 ]
+}
+
+# The browser is what oomd kills most days, and the user needs no telling:
+# they were watching it happen.
+@test "a kill for a scope that was never a session notifies nothing" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  journal_kill "$WG_BROWSER_SCOPE"
+  journal_kill "dev-sda1.device"
+  journal_says 'systemd[1443]: Started Brave.'
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(notifies)" -eq 0 ]
+}
+
+# oomd frees what it can and then looks again, so a bad minute takes several
+# sessions. One notification each, because the alternative -- announce the
+# first and stay quiet after it -- names one project and lets the user believe
+# nothing else died. The running total is what stops any single one of them
+# being read as the whole story.
+@test "two sessions killed at once get one notification each, with the total" {
+  wg_sessions_record "$WG_SCOPE" "abc-123" "$WG_TMP/projects/shop-web" hook
+  wg_fake_proc 1002 claude "$WG_SCOPE_TWO" "$WG_TMP/projects/site-platform"
+  journal_kill "$WG_SCOPE"
+  journal_kill "$WG_SCOPE_TWO"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(crashes)" -eq 2 ]
+  [ "$(notifies)" -eq 2 ]
+  # Each names its own project, and each is accurate about that one.
+  [[ "$(notify_field 1 1)" == *"shop-web"* ]]
+  [[ "$(notify_field 1 2)" == *"resumable"* ]]
+  [[ "$(notify_field 2 1)" == *"site-platform"* ]]
+  [[ "$(notify_field 2 2)" == *"no session id, a fresh claude"* ]]
+  # The first could not have known what was coming; the second says how many
+  # are waiting on the button by then.
+  [[ "$(notify_field 1 2)" != *"crashed sessions are waiting"* ]]
+  [[ "$(notify_field 2 2)" == *"2 crashed sessions are waiting"* ]]
+}
+
+# The one that matters. There may be no notification daemon at all -- least of
+# all at login, which is exactly when the watcher starts -- and a watcher that
+# died of trying to say something would file no crash for the rest of the day.
+@test "a notifier that fails does not stop the crash being recorded" {
+  export WG_NOTIFY_CMD="$WG_TMP/failing-notifier"
+  # It logs before it fails, so this test cannot pass against a watcher that
+  # never notifies -- which is what it did before: it asserted only the crash
+  # count, and stayed green with the whole feature deleted.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\t%%s\\t%%s\\n" "$1" "$2" "$3" >>"$WG_NOTIFY_LOG"\nexit 1\n' >"$WG_NOTIFY_CMD"
+  chmod +x "$WG_NOTIFY_CMD"
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_fake_proc 1002 claude "$WG_SCOPE_TWO" "$WG_TMP/projects/site-platform"
+  journal_kill "$WG_SCOPE"
+  journal_kill "$WG_SCOPE_TWO"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  # Both of them: the watcher did not merely survive the first failure, it went
+  # on reading the stream afterwards.
+  [ "$(crashes)" -eq 2 ]
+  [ "$(refreshes)" -eq 2 ]
+  # and it really was asked to notify, twice, and failed twice
+  [ "$(notifies)" -eq 2 ]
+}
+
+@test "a notifier that is not there at all does not stop the crash being recorded" {
+  # A path with nothing on it, rather than unsetting WG_NOTIFY_CMD: unset, this
+  # would fall through to the machine's real notify-send and put a test's
+  # notification on the user's own desktop.
+  export WG_NOTIFY_CMD="$WG_TMP/no-such-notifier"
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  journal_kill "$WG_SCOPE"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(crashes)" -eq 1 ]
+  [ "$(refreshes)" -eq 1 ]
+}
+
+# The live loop is where the watcher spends its life, and it is the process
+# that has to be still running hours later. --once cannot show that: it exits
+# either way.
+@test "the live loop notifies off the follower and keeps running afterwards" {
+  local watcher
+  mkfifo "$WG_TMP/fifo"
+  printf '#!/usr/bin/env bash\nexec cat %q\n' "$WG_TMP/fifo" >"$WG_TMP/journal"
+  export WG_SCAN_INTERVAL=1
+
+  "$WG_ROOT/bin/wingroup-oomwatch" &
+  watcher=$!
+  # Read by teardown, so a failure below still takes the watcher down.
+  WG_WATCHER_PID=$watcher
+  exec 8>"$WG_TMP/fifo"
+
+  wait_until follower_up
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wait_until scope_known "$WG_SCOPE"
+
+  journal_kill "$WG_SCOPE"
+  cat "$WG_TMP/journal.txt" >&8
+  wait_until notified
+  [[ "$(notify_field 1 1)" == *"shop-web"* ]]
+  [ "$(notify_field 1 3)" = "critical" ]
+
+  # Still there and still reading, which is the half of this that --once cannot
+  # test: a second session dies later in the same login.
+  wg_fake_proc 1002 claude "$WG_SCOPE_TWO" "$WG_TMP/projects/site-platform"
+  wait_until scope_known "$WG_SCOPE_TWO"
+  : >"$WG_TMP/journal.txt"
+  journal_kill "$WG_SCOPE_TWO"
+  cat "$WG_TMP/journal.txt" >&8
+  wait_until notified_twice
+  [[ "$(notify_field 2 1)" == *"site-platform"* ]]
+
+  kill -TERM "$watcher"
+  wg_assert_stopped_cleanly "$watcher"
+  exec 8>&-
+}
+
+# The failure mode that is worse than not notifying at all.
+#
+# wg_notify swallows a non-zero exit, but an exit status says nothing about a
+# notifier that never returns -- and notify-send is a blocking dbus call. The
+# watcher runs it in the one loop that also reads the journal and rescans
+# /proc, so a stuck call stops all three at once: every later kill is missed
+# for good (the journal is followed with -n0, so nothing re-reads it), the
+# snapshot a restore needs stops being written, and SIGTERM is deferred so
+# logout leaks the follower.
+#
+# The realistic version is not a notifier that hangs forever but a daemon that
+# has stopped answering its bus name, which costs GDBus' 25 second timeout per
+# notification -- at the exact moment the machine is out of memory and that
+# daemon is most likely to be swapped out.
+@test "a notifier that hangs does not stop the watcher reading the journal" {
+  export WG_NOTIFY_CMD="$WG_TMP/hanging-notifier"
+  printf '#!/usr/bin/env bash\nexec sleep 600\n' >"$WG_NOTIFY_CMD"
+  chmod +x "$WG_NOTIFY_CMD"
+  # Short enough to keep the suite quick; the point is that it is bounded at all.
+  export WG_NOTIFY_TIMEOUT=1
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_fake_proc 1002 claude "$WG_SCOPE_TWO" "$WG_TMP/projects/site-platform"
+  journal_kill "$WG_SCOPE"
+  journal_kill "$WG_SCOPE_TWO"
+
+  # timeout, not patience: an unbounded notify call is exactly what this pins,
+  # so the test has to fail by giving up rather than by hanging the suite.
+  run timeout 20 "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -ne 124 ]
+  [ "$status" -eq 0 ]
+  # The second kill is the one that proves it: the watcher came back from the
+  # first stuck notification and went on reading.
+  [ "$(crashes)" -eq 2 ]
 }
