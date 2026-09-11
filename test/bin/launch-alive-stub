@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Test-only stand-in for a launcher that becomes the terminal.
+#
+# uwsm-app hands the window to systemd and returns; xdg-terminal-exec on a
+# desktop like the author's execs the terminal in place, so the launcher process
+# *is* the window and stays alive for hours. Both are real, and the second one
+# is the one that used to hang wingroup for as long as the terminal was open.
+#
+# Records the launch like launch-stub does, then stays up. It also reports
+# whether it inherited file descriptor 9 -- the picker's lock -- because a
+# terminal holding that lock is what silently wedged the button.
+printf '%s\n' "$(printf '%s\t' "$@")" >>"$WG_LAUNCH_LOG"
+if [[ -n ${WG_LAUNCH_FD_LOG:-} ]]; then
+  if [[ -e /proc/self/fd/9 ]]; then
+    printf 'fd9 inherited\n' >>"$WG_LAUNCH_FD_LOG"
+  else
+    printf 'fd9 closed\n' >>"$WG_LAUNCH_FD_LOG"
+  fi
+fi
+exec sleep "${WG_LAUNCH_ALIVE_FOR:-10}"

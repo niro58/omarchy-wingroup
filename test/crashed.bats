@@ -409,3 +409,92 @@ wg_crash_pair() {
   run wingroup crashed
   [[ "${lines[1]}" == *"some other shape entirely"* ]]
 }
+
+# A launcher that becomes the terminal, which is what happens on a desktop where
+# xdg-terminal-exec execs the terminal in place rather than handing it to
+# systemd. The launcher process then stays alive for as long as the window.
+#
+# Waiting for it to exit meant wingroup sat in do_wait for the life of the
+# restored terminal: the record was never removed, the bar was never refreshed,
+# and the picker's lock was held the whole time. Reported from a real desktop as
+# "after restoring still have the warning icon, and onclick it doesn't do
+# anything".
+@test "a launcher that stays alive counts as restored, not as hung" {
+  local shop="$WG_TMP/projects/shop-web"
+  mkdir -p "$shop"
+  wg_crash "$shop" "sess-a1"
+  export WG_LAUNCH_CMD="$WG_ROOT/test/bin/launch-alive-stub"
+  export WG_LAUNCH_ALIVE_FOR=30
+  export WG_LAUNCH_SETTLE=0.2
+
+  # timeout, not patience: the bug this pins is an unbounded wait, so the test
+  # has to fail by giving up rather than by hanging the suite.
+  run timeout 10 "$WG_ROOT/bin/wingroup" crashed --restore
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"relaunched 1 session(s)"* ]]
+  # the record is gone, promptly, rather than when the terminal is closed
+  run bash -c "jq '.crashed | length' '$WG_RUNTIME_DIR/crashed.json' 2>/dev/null || echo 0"
+  [ "$output" -eq 0 ]
+  run bash -c "wc -l <'$WG_REFRESH_LOG'"
+  [ "$output" -ge 1 ]
+}
+
+@test "a launcher that stays alive is restored through the picker too" {
+  local shop="$WG_TMP/projects/shop-web"
+  mkdir -p "$shop"
+  wg_crash "$shop" "sess-a1"
+  export WG_LAUNCH_CMD="$WG_ROOT/test/bin/launch-alive-stub"
+  export WG_LAUNCH_ALIVE_FOR=30
+  export WG_LAUNCH_SETTLE=0.2
+
+  run timeout 10 env WG_WALKER_PICK=1 "$WG_ROOT/bin/wingroup" crashed --menu
+  [ "$status" -eq 0 ]
+  run bash -c "jq '.crashed | length' '$WG_RUNTIME_DIR/crashed.json' 2>/dev/null || echo 0"
+  [ "$output" -eq 0 ]
+}
+
+# The picker holds its lock on file descriptor 9, and an fd survives fork and
+# exec. On a desktop where the launcher becomes the terminal, that terminal goes
+# on holding the lock long after wingroup has exited -- so every later click
+# finds it held and silently does nothing. Seen for real: an alacritty, its
+# shell and its claude all holding fd 9 on the lock file.
+@test "the picker's lock is not inherited by the terminal it opens" {
+  local shop="$WG_TMP/projects/shop-web"
+  mkdir -p "$shop"
+  wg_crash "$shop" "sess-a1"
+  export WG_LAUNCH_CMD="$WG_ROOT/test/bin/launch-alive-stub"
+  export WG_LAUNCH_ALIVE_FOR=30
+  export WG_LAUNCH_SETTLE=0.2
+  export WG_LAUNCH_FD_LOG="$WG_TMP/fd.log"
+  : >"$WG_LAUNCH_FD_LOG"
+
+  run timeout 10 env WG_WALKER_PICK=1 "$WG_ROOT/bin/wingroup" crashed --menu
+  [ "$status" -eq 0 ]
+  run cat "$WG_LAUNCH_FD_LOG"
+  [ "$output" = "fd9 closed" ]
+}
+
+# The whole point of the two fixes above, stated as the thing the user does:
+# restore one session, then click the button again. The second click has to
+# work while the first restored terminal is still open.
+@test "the button still works after a restore, with that terminal still open" {
+  local a="$WG_TMP/projects/proj-a" b="$WG_TMP/projects/proj-b"
+  mkdir -p "$a" "$b"
+  wg_crash "$a" "sess-a"
+  wg_crash "$b" "sess-b"
+  export WG_LAUNCH_CMD="$WG_ROOT/test/bin/launch-alive-stub"
+  export WG_LAUNCH_ALIVE_FOR=30
+  export WG_LAUNCH_SETTLE=0.2
+
+  # first click: restore the first session
+  run timeout 10 env WG_WALKER_PICK=1 "$WG_ROOT/bin/wingroup" crashed --menu
+  [ "$status" -eq 0 ]
+
+  # second click, with the first terminal still running: the picker must open
+  export WG_WALKER_STDIN_LOG="$WG_TMP/second-picker.log"
+  : >"$WG_WALKER_STDIN_LOG"
+  run timeout 10 env WG_WALKER_PICK= "$WG_ROOT/bin/wingroup" crashed --menu
+  [ "$status" -eq 0 ]
+  run bash -c "grep -c 'proj-b' '$WG_TMP/second-picker.log'"
+  [ "$output" -ge 1 ]
+}
