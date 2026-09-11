@@ -12,6 +12,8 @@ source "$WG_LIB_DIR/resolve.sh"
 source "$WG_LIB_DIR/menu.sh"
 # shellcheck source=lib/sessions.sh
 source "$WG_LIB_DIR/sessions.sh"
+# shellcheck source=lib/notify.sh
+source "$WG_LIB_DIR/notify.sh"
 
 # Tests point this at a stub that replaces /proc lookups with a fixture map.
 if [[ -n ${WG_TEST_STUB_CWD:-} ]]; then
@@ -24,19 +26,9 @@ fi
 # A picker action reached from SUPER+G has no terminal behind it: writing to
 # stderr there means nobody ever sees it, and the entry looks like it did
 # nothing. So a failure with no tty on either standard stream is also sent to
-# the notification daemon. A genuine CLI invocation has a terminal and keeps
-# plain stderr -- desktop notifications for something already printed in front
-# of the user would be noise.
-wg_notify() {
-  local summary="$1" body="${2:-}"
-  if [[ -n ${WG_NOTIFY_CMD:-} ]]; then
-    "$WG_NOTIFY_CMD" "$summary" "$body" || true
-    return 0
-  fi
-  command -v notify-send >/dev/null 2>&1 || return 0
-  notify-send "$summary" "$body" || true
-}
-
+# the notification daemon (wg_notify, in lib/notify.sh). A genuine CLI
+# invocation has a terminal and keeps plain stderr -- desktop notifications for
+# something already printed in front of the user would be noise.
 wg_has_tty() {
   [[ -t 1 || -t 2 ]]
 }
