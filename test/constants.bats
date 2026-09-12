@@ -112,15 +112,17 @@ wg_last_installed_slot() {
 }
 
 # A client list of $2 idle Claude windows, all sent to group $1 by an override.
+# $2 idle windows sitting in group $1, which is to say on its workspace.
+#
+# On the workspace, and not on workspace 1 with an override pointing at the
+# group: a group holds the windows that are on it, so that is what has to be
+# fabricated for the heat ramp to see them. The override version counted only
+# while windows were attributed by the group that owned their project.
 wg_group_windows() {
   local group="$1" idle="$2"
-  jq -n --argjson i "$idle" '
+  jq -n --argjson i "$idle" --arg g "$group" '
     [ range(0; $i) | {address: "0xbb\(.)", title: "✳ waiting for the next thing",
                       pid: 9000, class: "Alacritty", floating: false,
-                      workspace: {id: 1, name: "1"}} ]' >"$WG_TMP/clients-heat.json"
+                      workspace: {id: 1, name: $g}} ]' >"$WG_TMP/clients-heat.json"
   export WG_FIXTURE_CLIENTS="$WG_TMP/clients-heat.json"
-  jq --arg g "$group" --argjson i "$idle" '
-    .overrides = (reduce range(0; $i) as $n ({}; .["0xbb\($n)"] = $g))' \
-    "$WG_STATE_DIR/state.json" >"$WG_TMP/state.heat"
-  mv -f "$WG_TMP/state.heat" "$WG_STATE_DIR/state.json"
 }

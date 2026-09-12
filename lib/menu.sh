@@ -51,13 +51,26 @@ wg_menu_build() {
   # Those totals count a window in no group at all, so they are taken before an
   # ungrouped row is skipped -- a session waiting for you is a session waiting
   # for you whether or not a group has claimed its project.
+  # Which workspaces are groups, so that a window can be said to be in one.
+  # Keyed lookups rather than a list, because this is asked once per window.
+  local -A is_group=()
+  local gname
+  while IFS= read -r gname; do
+    [[ -n $gname ]] || continue
+    is_group[$gname]=1
+  done < <(jq -r '.groups[]?.name // empty' <<<"$state")
+
   local -A wins=() idles=() busies=()
   local key idle_total=0 busy_total=0
   while IFS= read -r line; do
     [[ -n $line ]] || continue
     wg_row_split "$line"
+    # Column 3, the workspace it is on, and not column 5, the group that owns
+    # its project. A group is a named workspace, so a window is in the group it
+    # is sitting on -- see the long note in bin/wingroup-waybar. Counting by
+    # owner let a window be visibly in a group the numbers said was empty.
     key=""
-    [[ -z ${WG_ROW[5]} ]] || key="g:${WG_ROW[5]}"
+    [[ -z ${is_group[${WG_ROW[3]}]:-} ]] || key="g:${WG_ROW[3]}"
     [[ -z $key ]] || wins[$key]=$(( ${wins[$key]:-0} + 1 ))
     case ${WG_ROW[6]} in
       idle)
@@ -115,8 +128,17 @@ wg_menu_build() {
     wg_row_split "$line"
     glyph="$(wg_status_glyph "${WG_ROW[6]}")"
     shown="$(wg_title_text "${WG_ROW[9]}")"
-    # Column 5 is the group, column 8 the worktree.
-    wg_menu_where "${WG_ROW[5]}" "${WG_ROW[8]}"
+    # Where the window *is*, which is the workspace when that workspace is a
+    # group, and nowhere otherwise. Column 8 is the worktree.
+    #
+    # Not column 5, the owning group: this row sits next to the group rows above
+    # it, and a window counted under one group while labelled with another is
+    # the contradiction this whole change is about.
+    if [[ -n ${is_group[${WG_ROW[3]}]:-} ]]; then
+      wg_menu_where "${WG_ROW[3]}" "${WG_ROW[8]}"
+    else
+      wg_menu_where "" "${WG_ROW[8]}"
+    fi
     printf 'window:%s\t  %s %-44s %s\n' "${WG_ROW[1]}" "$glyph" "$shown" "$WG_WHERE"
   done <<<"$table"
 

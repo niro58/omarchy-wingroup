@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # Requires lib/state.sh to be sourced first (for the corrupt-file handling this
-# mirrors) and, for wg_crashed_group, lib/resolve.sh.
+# mirrors), lib/hypr.sh for wg_scope_workspaces, and lib/resolve.sh for
+# wg_crashed_group.
 #
 # Two runtime files, both keyed by systemd scope.
 #
@@ -157,6 +158,33 @@ wg_proc_scope() {
   printf '%s\n' "$line"
 }
 
+# Which workspace each scope's window is on, as "scope<TAB>workspace" lines.
+#
+# A window and the claude session inside it are in the same systemd scope --
+# the terminal was launched into it and everything it spawns inherits it -- so
+# the window's own cgroup names the session it is showing, with no walking of
+# the process tree and no guessing from working directories.
+#
+# This is what lets a restore put a session back where it was rather than where
+# its project says it belongs. The two are not the same thing: a session in a
+# project no group claims still sits somewhere, and that somewhere is what the
+# user arranged and expects to get back.
+#
+# Failure here is not fatal to anything. No compositor, no window for a session,
+# a scope that cannot be read: the entry simply carries no workspace, and the
+# restore falls back to letting the daemon file it by project.
+wg_scope_workspaces() {
+  local pid ws
+  wg_hypr_query clients 2>/dev/null \
+    | jq -r '.[] | select(.pid != null) | "\(.pid)\t\(.workspace.name // "")"' 2>/dev/null \
+    | while IFS=$'\t' read -r pid ws; do
+        [[ -n $pid && -n $ws ]] || continue
+        scope="$(wg_proc_scope "$pid")"
+        [[ -n $scope ]] || continue
+        printf '%s\t%s\n' "$scope" "$ws"
+      done
+}
+
 # Records the session running in $1. $2 is its id (empty when the caller cannot
 # know it), $3 its directory, $4 how we found out -- "hook" or "scan".
 #
@@ -165,10 +193,13 @@ wg_proc_scope() {
 # whatever is already there alone, and "hook" wins the source field only when it
 # actually supplies one.
 # $5 is the controlling terminal of the process this was learned from, as
-# /proc/<pid>/stat reports it: 0 for a session with no terminal at all. Only the
-# scan can know it, so a caller without one leaves the field alone.
+# /proc/<pid>/stat reports it: 0 for a session with no terminal at all. $6 is
+# the workspace its window is on. Only the scan can know either, so a caller
+# without them leaves those fields alone -- which is why both are appended
+# conditionally rather than merged in with the rest.
 wg_sessions_record() {
-  local scope="$1" session="$2" cwd="$3" source="${4:-scan}" tty="${5:-}" now
+  local scope="$1" session="$2" cwd="$3" source="${4:-scan}" tty="${5:-}" \
+        workspace="${6:-}" now
   [[ -n $scope ]] || return 0
   now="$(date +%s)"
   # Read the merge left to right: the empty defaults a brand-new entry needs,
@@ -183,8 +214,9 @@ wg_sessions_record() {
       + {cwd: $cwd, seen: ($now | tonumber)}
       + (if $session == "" then {} else {session: $session, source: $source} end)
       + (if $tty == "" then {} else {tty: ($tty | tonumber)} end)
+      + (if $ws == "" then {} else {workspace: $ws} end)
   ' --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" \
-    --arg source "$source" --arg now "$now" --arg tty "$tty"
+    --arg source "$source" --arg now "$now" --arg tty "$tty" --arg ws "$workspace"
 }
 
 # Refreshes the map from every live claude process.
@@ -201,6 +233,14 @@ wg_sessions_record() {
 wg_sessions_scan() {
   local dir pid comm scope cwd tty found=0
   local -a stat=()
+  # One compositor query for the whole pass, not one per session: the answer is
+  # the same for every scope and asking per process would be a fork each.
+  local -A ws_of=()
+  local wscope wsname
+  while IFS=$'\t' read -r wscope wsname; do
+    [[ -n $wscope ]] || continue
+    ws_of[$wscope]="$wsname"
+  done < <(wg_scope_workspaces)
   for dir in "$WG_PROC_DIR"/[0-9]*; do
     [[ -d $dir ]] || continue
     pid="${dir##*/}"
@@ -234,7 +274,7 @@ wg_sessions_scan() {
       tty="${stat[6]:-}"
     fi
     [[ $tty =~ ^[0-9]+$ ]] || tty=""
-    wg_sessions_record "$scope" "" "$cwd" scan "$tty"
+    wg_sessions_record "$scope" "" "$cwd" scan "$tty" "${ws_of[$scope]:-}"
     found=$(( found + 1 ))
   done
   wg_sessions_expire
@@ -507,7 +547,14 @@ wg_snapshot_may_empty() {
 }
 
 # The sessions that were open when this machine last went down, one per line:
-# session id, cwd, tab separated. Empty when there is no such record.
+# session id, cwd, workspace, tab separated. Empty when there is no such record.
+#
+# The workspace is what makes a restore reproduce the desktop rather than
+# reconstruct it. Filing a restored terminal by its project puts it where the
+# project says it belongs, which is not where it was: a session in a project no
+# group claims was still somewhere, and a session deliberately moved somewhere
+# else was somewhere else on purpose. Both are arrangements the user made and
+# expects back.
 #
 # Both files are considered, and only a boot id that is not this one counts. A
 # snapshot stamped with the current boot describes what is open *now*, which is
@@ -544,7 +591,8 @@ wg_snapshot_previous_rows() {
     [[ -n $boot && $boot != "$current" ]] || continue
     jq -r '.sessions | to_entries[]
            | select((.value.cwd // "") != "")
-           | [.value.session // "", .value.cwd] | @tsv' "$file" 2>/dev/null || true
+           | [.value.session // "", .value.cwd, .value.workspace // ""] | @tsv' \
+      "$file" 2>/dev/null || true
     return 0
   done
   return 1

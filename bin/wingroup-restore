@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Restore the Claude sessions that were open at shutdown, then make sure every
-# restored terminal ends up in its project's group. The daemon files them as
-# they open; this tidy pass makes the result independent of that race.
+# Restore the Claude sessions that were open at shutdown, then put every
+# restored terminal back where it was. The daemon files them by project as they
+# open; the tidy pass makes that result independent of the race, and the
+# placement pass after it overrides both with the one thing the user actually
+# arranged -- the workspace each session was on.
 #
 # There are two ways to know what was open, and they are not equally good.
 #
@@ -20,6 +22,8 @@ set -euo pipefail
 WG_LIB_DIR="${WG_LIB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib" && pwd)}"
 # shellcheck source=lib/state.sh
 source "$WG_LIB_DIR/state.sh"
+# shellcheck source=lib/hypr.sh
+source "$WG_LIB_DIR/hypr.sh"
 # shellcheck source=lib/sessions.sh
 source "$WG_LIB_DIR/sessions.sh"
 
@@ -32,6 +36,30 @@ source "$WG_LIB_DIR/sessions.sh"
 # to keep quiet; the trap clears it however this script ends, so a crashed or
 # killed restore cannot leave following switched off for the session.
 : "${WG_RESTORE_FLAG:=${XDG_RUNTIME_DIR:-/tmp}/wingroup-restoring}"
+
+# One snapshot row, peeled into the three facts it carries. The workspace is
+# empty for a session no compositor answered for when the snapshot was written.
+#
+# By parameter expansion, never `IFS=$'\t' read -r session cwd workspace`: the
+# session id is empty for anything that predates the hook, tab is IFS
+# whitespace, and read collapses a leading run of it -- so the directory would
+# land in $session and every column after it would shift too. Exactly the trap
+# wg_row_split exists for.
+WG_ROW_SESSION=""
+WG_ROW_CWD=""
+WG_ROW_WORKSPACE=""
+
+wg_restore_row_split() {
+  local row="$1" rest
+  WG_ROW_SESSION="${row%%$'\t'*}"
+  rest="${row#*$'\t'}"
+  WG_ROW_CWD="${rest%%$'\t'*}"
+  # Only when a third column was actually there: ${rest#*<tab>} on a row without
+  # one hands back the directory again, and a directory is not a workspace.
+  WG_ROW_WORKSPACE=""
+  [[ $rest == *$'\t'* ]] && WG_ROW_WORKSPACE="${rest#*$'\t'}"
+  return 0
+}
 
 wg_restore_dry() {
   local arg
@@ -51,13 +79,9 @@ wg_restore_from_snapshot() {
   local dry="$1" rows="$2" row session cwd count=0
   [[ -n $rows ]] || { printf '0\n'; return 0; }
   while IFS= read -r row; do
-    # Peeled apart by expansion, not `IFS=$'\t' read -r session cwd`: the
-    # session id is empty for anything that predates the hook, tab is IFS
-    # whitespace, and read collapses a leading run of it -- so the directory
-    # would land in $session and the row would be dropped as having no
-    # directory at all. Exactly the trap wg_row_split exists for.
-    session="${row%%$'\t'*}"
-    cwd="${row#*$'\t'}"
+    wg_restore_row_split "$row"
+    session="$WG_ROW_SESSION"
+    cwd="$WG_ROW_CWD"
     [[ -n $cwd ]] || continue
     if [[ ! -d $cwd ]]; then
       printf 'skip   %s  (directory is gone)\n' "$cwd"
@@ -84,6 +108,124 @@ wg_restore_from_snapshot() {
     disown 2>/dev/null || true
   done <<<"$rows"
   printf '%s\n' "$count"
+}
+
+# The pids of every process's children, keyed by the parent's pid, from a
+# single pass over the process table.
+#
+# A terminal has exactly one child, but the pass is a glob and a read per
+# process and answers for every window at once, where asking per window would
+# be a pgrep each -- a full walk of the table per terminal.
+declare -A WG_RESTORE_KIDS=()
+
+wg_restore_children() {
+  local dir pid line rest ppid
+  WG_RESTORE_KIDS=()
+  for dir in "$WG_PROC_DIR"/[0-9]*; do
+    [[ -d $dir ]] || continue
+    pid="${dir##*/}"
+    read -r line < "$dir/stat" 2>/dev/null || continue
+    # /proc/<pid>/stat is "<pid> (<comm>) <state> <ppid> ...", and comm can hold
+    # spaces and parentheses of its own -- so cut at the last ") " rather than
+    # counting words from the front.
+    rest="${line##*) }"
+    rest="${rest#* }"
+    ppid="${rest%% *}"
+    [[ -n $ppid ]] || continue
+    # Read back unquoted and word split, so the leading space the first append
+    # leaves on a parent costs nothing.
+    WG_RESTORE_KIDS[$ppid]+=" $pid"
+  done
+}
+
+# Puts each restored terminal back on the workspace its session was recorded on.
+#
+# Matching a new window to the session it is showing goes through the command
+# line the relaunch used: the terminal runs `bash -c '...' <session id>`, so the
+# id is one of the arguments of the window's child shell. Nothing else would do
+# -- the address is new at every launch, and the title belongs to Claude.
+#
+# A row with no workspace is left exactly as it is. No compositor answered for
+# that session when the snapshot was written, so there is nothing to put it
+# back to, and the daemon's filing by project is the right fallback.
+wg_restore_place() {
+  local dry="$1" rows="$2" row addr pid ws want dir kid arg kidcwd
+  local -a args=()
+  local -A ws_by_id=() dir_by_id=() ws_by_dir=()
+  [[ -n $rows ]] || return 0
+  while IFS= read -r row; do
+    wg_restore_row_split "$row"
+    [[ -n $WG_ROW_CWD && -n $WG_ROW_WORKSPACE ]] || continue
+    # A scratchpad is not an arrangement. Hyprland reports those workspaces as
+    # "special:<name>" -- Omarchy ships special:magic as the default -- and
+    # "movetoworkspacesilent name:special:magic" does not mean what it looks
+    # like: it makes an ordinary workspace whose name happens to be
+    # "special:magic" and leaves the terminal somewhere the user can only reach
+    # by typing that. A session that was tucked away on the scratchpad is left
+    # to the daemon to file by project, which is the sane place for it to land.
+    [[ $WG_ROW_WORKSPACE != special:* ]] || continue
+    if [[ -n $WG_ROW_SESSION ]]; then
+      ws_by_id[$WG_ROW_SESSION]="$WG_ROW_WORKSPACE"
+      dir_by_id[$WG_ROW_SESSION]="$WG_ROW_CWD"
+    else
+      # Weaker, and only for a row that has nothing better: a session from
+      # before the hook has no id to match on, so the directory is all there is.
+      #
+      # Be honest about how blunt that is. It matches *any* window whose shell
+      # sits in that directory -- not only a session this restore launched, but
+      # a terminal the user opened there by hand, and one that was never in the
+      # snapshot at all. Two such rows for one directory keep only the last, so
+      # one of the two arrangements is silently lost.
+      #
+      # Kept anyway, because the alternative is leaving a pre-hook session
+      # wherever it happens to land, and these rows disappear on their own as
+      # sessions are restarted under the hook.
+      ws_by_dir[$WG_ROW_CWD]="$WG_ROW_WORKSPACE"
+    fi
+  done <<<"$rows"
+  (( ${#ws_by_id[@]} + ${#ws_by_dir[@]} )) || return 0
+
+  wg_restore_children
+  # The workspace name is the only column that can be empty, and it is last, so
+  # nothing can shift into it: an address and a pid are what makes a window a
+  # window, and jq drops any client without them.
+  while IFS=$'\t' read -r addr pid ws; do
+    [[ -n $addr && -n $pid ]] || continue
+    want=""
+    dir=""
+    for kid in ${WG_RESTORE_KIDS[$pid]:-}; do
+      # cmdline is NUL separated; mapfile -d '' gives one argument per element
+      # and forks nothing.
+      mapfile -d '' -t args < "$WG_PROC_DIR/$kid/cmdline" 2>/dev/null || continue
+      for arg in ${args[@]+"${args[@]}"}; do
+        [[ -n ${ws_by_id[$arg]:-} ]] || continue
+        want="${ws_by_id[$arg]}"
+        dir="${dir_by_id[$arg]}"
+        break
+      done
+      [[ -z $want ]] || break
+      kidcwd="$(readlink "$WG_PROC_DIR/$kid/cwd" 2>/dev/null)" || kidcwd=""
+      if [[ -n $kidcwd && -n ${ws_by_dir[$kidcwd]:-} ]]; then
+        want="${ws_by_dir[$kidcwd]}"
+        dir="$kidcwd"
+        break
+      fi
+    done
+    # Some window that was already open, or one whose session the snapshot never
+    # recorded. Not this restore's to move.
+    [[ -n $want ]] || continue
+    # Already where it belongs. Dispatching anyway would be a no-op to the
+    # compositor and a lie to anyone reading the output.
+    [[ $want != "$ws" ]] || continue
+    printf 'place  %s  %s\n' "$dir" "$want"
+    (( ! dry )) || continue
+    # Silently, for the same reason the restore holds WG_RESTORE_FLAG: a login
+    # that drags the desktop from workspace to workspace is the thing being
+    # avoided, and a placement pass must not undo that at the last moment.
+    wg_hypr_dispatch movetoworkspacesilent "name:$want,address:$addr"
+  done < <(wg_hypr_query clients 2>/dev/null \
+           | jq -r '.[] | select(.pid != null and .address != null)
+                    | [.address, (.pid | tostring), (.workspace.name // "")] | @tsv' 2>/dev/null)
 }
 
 wg_restore_unflag() { rm -f "$WG_RESTORE_FLAG"; }
@@ -120,9 +262,27 @@ else
 fi
 
 # A dry run spawns nothing, so there is nothing to file.
-(( ! WG_DRY )) || exit 0
+#
+# It still runs the placement pass, but be clear about what that can and cannot
+# show: the terminals a real run would have opened do not exist here, so this
+# reports only what it would do to windows that happen to be open already. On a
+# machine that has just booted that is usually nothing. It is a preview of the
+# rule, not of the result.
+if (( WG_DRY )); then
+  wg_restore_place "$WG_DRY" "$WG_SNAPSHOT_ROWS"
+  exit 0
+fi
 
-# Terminals need a moment to spawn their shells before cwd resolution works.
+# Terminals need a moment to spawn their shells before cwd resolution works,
+# and before the compositor has a window to be asked about at all.
 [[ $WG_RESTORE_SETTLE == 0 ]] || sleep "$WG_RESTORE_SETTLE"
 
 wingroup tidy --yes
+
+# After tidy, and that order is the whole point. tidy files a window by the
+# project its directory sits in; where the window was is a different question,
+# and for a session whose project some group owns but which the user had
+# deliberately parked elsewhere the two disagree. Placing first would have tidy
+# overwrite it. The workspace the session was actually on is what the user
+# arranged, so it goes last and has the last word.
+wg_restore_place "$WG_DRY" "$WG_SNAPSHOT_ROWS"

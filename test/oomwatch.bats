@@ -440,9 +440,12 @@ wg_snapshot_from_boot() {
   [ "$(jq -r '.boot' "$WG_SNAPSHOT_PREV")" = "$WG_BOOT_BEFORE" ]
 
   # And what the restore will ask for is still the sessions from before the
-  # reboot, not the one this boot is running.
+  # reboot, not the one this boot is running. Three columns now: the workspace
+  # the session was on rides along so the restore can put it back there, and is
+  # empty when no compositor answered for it.
   run wg_snapshot_previous_rows
-  [ "$output" = "$(printf 'sess-1\t%s' "$WG_TMP/projects/shop-web")" ]
+  [[ "$output" == "$(printf 'sess-1\t%s' "$WG_TMP/projects/shop-web")"* ]]
+  [ "$(printf '%s' "$output" | awk -F'\t' '{print NF}')" -eq 3 ]
 }
 
 # --- telling the user --------------------------------------------------------
