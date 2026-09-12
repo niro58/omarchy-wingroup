@@ -68,6 +68,12 @@ wg_fake_proc() {
   printf '%s\n' "$comm" >"$dir/comm"
   printf '0::/user.slice/user-1000.slice/app.slice/app-graphical.slice/%s\n' "$scope" >"$dir/cgroup"
   ln -sfn "$cwd" "$dir/cwd"
+  # Field 7 is the controlling terminal, which is what tells a session running
+  # in a terminal from one running in the browser. $5 sets it; the default is a
+  # plausible terminal, because that is what almost every test means by "a
+  # session". Pass 0 for one that has none.
+  printf '%s (%s) S 1 1 1 %s 1 0 0 0 0 0 0 0 0 20 0 1 0 100 0 0\n' \
+    "$pid" "$comm" "${5:-34816}" >"$dir/stat"
 }
 
 # The scope name a terminal launched through uwsm/xdg-terminal-exec ends up in.

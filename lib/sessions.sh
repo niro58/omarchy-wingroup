@@ -55,6 +55,12 @@ WG_SNAPSHOT_PREV="$WG_STATE_DIR/sessions-snapshot.prev.json"
 # has: were these sessions open *before* this machine came up?
 : "${WG_BOOT_ID_FILE:=/proc/sys/kernel/random/boot_id}"
 
+# How recently the scan must have seen a session for the snapshot to count it as
+# open. Comfortably more than one scan interval, so an entry is never dropped
+# for having been refreshed a moment late, and far less than WG_SESSIONS_TTL,
+# which is what the map keeps a dead scope around for.
+: "${WG_SNAPSHOT_FRESH:=60}"
+
 wg_sessions_default() { printf '%s\n' '{"sessions":{}}'; }
 wg_crashed_default()  { printf '%s\n' '{"crashed":[]}'; }
 
@@ -139,8 +145,11 @@ wg_proc_scope() {
 # Claude itself, and the scan has no way to work it out. So an empty id leaves
 # whatever is already there alone, and "hook" wins the source field only when it
 # actually supplies one.
+# $5 is the controlling terminal of the process this was learned from, as
+# /proc/<pid>/stat reports it: 0 for a session with no terminal at all. Only the
+# scan can know it, so a caller without one leaves the field alone.
 wg_sessions_record() {
-  local scope="$1" session="$2" cwd="$3" source="${4:-scan}" now
+  local scope="$1" session="$2" cwd="$3" source="${4:-scan}" tty="${5:-}" now
   [[ -n $scope ]] || return 0
   now="$(date +%s)"
   # Read the merge left to right: the empty defaults a brand-new entry needs,
@@ -154,8 +163,9 @@ wg_sessions_record() {
       + (.sessions[$scope] // {})
       + {cwd: $cwd, seen: ($now | tonumber)}
       + (if $session == "" then {} else {session: $session, source: $source} end)
+      + (if $tty == "" then {} else {tty: ($tty | tonumber)} end)
   ' --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" \
-    --arg source "$source" --arg now "$now"
+    --arg source "$source" --arg now "$now" --arg tty "$tty"
 }
 
 # Refreshes the map from every live claude process.
@@ -170,7 +180,8 @@ wg_sessions_record() {
 # *something* was running in that scope, and in which directory -- enough to
 # tell you which project you lost.
 wg_sessions_scan() {
-  local dir pid comm scope cwd found=0
+  local dir pid comm scope cwd tty found=0
+  local -a stat=()
   for dir in "$WG_PROC_DIR"/[0-9]*; do
     [[ -d $dir ]] || continue
     pid="${dir##*/}"
@@ -180,7 +191,31 @@ wg_sessions_scan() {
     [[ -n $scope ]] || continue
     cwd="$(readlink "$dir/cwd" 2>/dev/null)" || continue
     [[ -n $cwd ]] || continue
-    wg_sessions_record "$scope" "" "$cwd" scan
+    # Field 7 of /proc/<pid>/stat is the controlling terminal, and 0 means there
+    # is none. That is what tells a session running in a terminal from one that
+    # is not -- Claude in the browser, or inside another app -- and only the
+    # first kind can be handed back by opening a terminal. Measured on a real
+    # desktop: every terminal session had one, the browser's and the pen app's
+    # were both 0.
+    #
+    # Read positionally rather than with awk, because this runs once per process
+    # on the machine every scan and a fork each would be a fork per process.
+    #
+    # Positional splitting of /proc/<pid>/stat is only safe because field 2 is
+    # the command name in brackets and this loop has already established it is
+    # "claude": a name with a space in it would shift every field after it.
+    # Readable first, and not `read ... 2>/dev/null`: redirections are applied
+    # left to right, so the shell has already printed its complaint about the
+    # missing file by the time stderr is silenced -- onto the stdout this
+    # function's own count is read from.
+    tty=""
+    if [[ -r $dir/stat ]]; then
+      # shellcheck disable=SC2034  # only field 7 is wanted, by position
+      read -r -a stat < "$dir/stat" || true
+      tty="${stat[6]:-}"
+    fi
+    [[ $tty =~ ^[0-9]+$ ]] || tty=""
+    wg_sessions_record "$scope" "" "$cwd" scan "$tty"
     found=$(( found + 1 ))
   done
   wg_sessions_expire
@@ -343,8 +378,44 @@ wg_snapshot_write() {
   fi
 
   tmp="$(mktemp "$WG_STATE_DIR/.snap.XXXXXX")" || return 1
-  if jq --arg boot "$boot" '{boot: $boot, sessions: .sessions}' \
-       <<<"$(wg_sessions_read)" >"$tmp" 2>/dev/null && mv -f "$tmp" "$WG_SNAPSHOT_FILE"; then
+  # What was open, not what has been open.
+  #
+  # The map is a six-hour history on purpose -- an entry outlives its process so
+  # that a kill can still be matched to it -- and writing that out whole is what
+  # made a restore open sessions twice. Measured on the snapshot that drove one
+  # real reboot: fifteen entries refreshed by the last scan, and nine between
+  # three and six hours stale, dead scopes the TTL had not reached yet. Two
+  # conversations appeared under both an old scope and a new one, because
+  # resuming a session gives it a new terminal and the old entry lingers. The
+  # restore dutifully opened each of them twice.
+  #
+  # So: only entries the last scan actually saw. WG_SESSIONS_TTL keeps the map
+  # forgiving for crash matching; the snapshot has the opposite job and wants
+  # the live set.
+  #
+  # And only sessions that were in a terminal. A restore hands a session back by
+  # opening one, which is the wrong thing to do with Claude running in the
+  # browser or inside another app -- three such entries were restored as
+  # terminals on that same reboot. A missing tty field means no scan has
+  # classified it yet, which is treated as a terminal rather than dropped: the
+  # cost of being wrong that way is a spare window, and the other way is a lost
+  # session.
+  #
+  # Deduplicated by session id last, newest kept, so that two live terminals
+  # somehow holding the same conversation still only come back once.
+  if jq --arg boot "$boot" \
+        --arg now "$(date +%s)" \
+        --arg fresh "$WG_SNAPSHOT_FRESH" '
+      {boot: $boot,
+       sessions: (.sessions
+         | with_entries(select(
+             (($now | tonumber) - (.value.seen // 0)) <= ($fresh | tonumber)
+             and ((.value.tty // 1) != 0)))
+         | to_entries
+         | group_by(if .value.session == "" then .key else .value.session end)
+         | map(max_by(.value.seen // 0))
+         | from_entries)}
+     ' <<<"$(wg_sessions_read)" >"$tmp" 2>/dev/null && mv -f "$tmp" "$WG_SNAPSHOT_FILE"; then
     return 0
   fi
   rm -f "$tmp"
