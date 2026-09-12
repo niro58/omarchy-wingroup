@@ -691,3 +691,70 @@ notified_twice() { (( $(notifies) >= 2 )); }
   # first stuck notification and went on reading.
   [ "$(crashes)" -eq 2 ]
 }
+
+# What was open, not what has been open.
+#
+# The map deliberately keeps an entry for WG_SESSIONS_TTL -- six hours -- after
+# its process is gone, so that a kill can still be matched to a session. Writing
+# that whole history into the snapshot is what made a restore open sessions
+# twice. Measured on the snapshot that drove one real reboot: fifteen entries
+# the last scan had seen, and nine between three and six hours stale.
+@test "the snapshot leaves out sessions the last scan did not see" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  # A scope whose process died hours ago: still in the map, not open any more.
+  wg_sessions_record "$WG_SCOPE_TWO" "long-gone" "$WG_TMP/projects/site-platform" hook
+  local stale=$(( $(date +%s) - 4000 ))
+  jq --arg s "$WG_SCOPE_TWO" --arg t "$stale" \
+     '.sessions[$s].seen = ($t | tonumber)' "$WG_SESSIONS_FILE" >"$WG_TMP/patched"
+  mv -f "$WG_TMP/patched" "$WG_SESSIONS_FILE"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 1 ]
+  [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "false" ]
+  # and the map itself still remembers it, because a crash still has to match
+  [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions | has($s)' "$WG_SESSIONS_FILE")" = "true" ]
+}
+
+# Resuming a session gives it a new terminal and a new scope, and the old entry
+# lingers until the TTL. Both carry the same conversation, so a snapshot holding
+# both opens it twice -- which is exactly what happened: two conversations came
+# back as four terminals.
+@test "one conversation under two scopes is one entry in the snapshot" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_fake_proc 1002 claude "$WG_SCOPE_TWO" "$WG_TMP/projects/shop-web"
+  wg_sessions_record "$WG_SCOPE" "same-session" "$WG_TMP/projects/shop-web" hook
+  wg_sessions_record "$WG_SCOPE_TWO" "same-session" "$WG_TMP/projects/shop-web" hook
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 1 ]
+  [ "$(jq -r '.sessions | to_entries[0].value.session' "$WG_SNAPSHOT_FILE")" = "same-session" ]
+}
+
+# A restore hands a session back by opening a terminal, so a session that was
+# not in one has no business in the snapshot. Claude in the browser and Claude
+# inside another app both report no controlling terminal; on the reboot that
+# prompted this, three browser sessions were restored as terminals.
+@test "a session with no controlling terminal is left out of the snapshot" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_fake_proc 1002 claude "$WG_SCOPE_TWO" "$WG_TMP/projects/in-a-browser" 0
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 1 ]
+  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "true" ]
+  [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "false" ]
+}
+
+# A session the hook has recorded but no scan has classified yet has no tty
+# field at all. Dropping it would lose a session over a field that is merely
+# late; keeping it costs at worst one spare window.
+@test "a session no scan has classified yet is kept in the snapshot" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_sessions_record "$WG_SCOPE_TWO" "just-hooked" "$WG_TMP/projects/site-platform" hook
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions[$s].session' "$WG_SNAPSHOT_FILE")" = "just-hooked" ]
+}
