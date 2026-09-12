@@ -93,6 +93,41 @@ wg_teardown_tmp() {
   return 0
 }
 
+# Puts fixture windows on chosen workspaces, as "pid:workspace" pairs.
+#
+# The client fixture is an *untidied* desktop -- everything on workspace 1 or 3,
+# nothing filed -- because that is what the filing tests are about: tidy and the
+# daemon exist to move those windows, and a fixture that arrives already sorted
+# gives them nothing to do.
+#
+# The counting tests need the opposite, since a group counts the windows sitting
+# on its workspace. Rather than pick one arrangement and make the other suite
+# wrong, each test says which desktop it means. The fixture stays the untidied
+# one because that is the state a machine is in before wingroup has acted.
+# Written to a copy under $WG_TMP and served through WG_FIXTURE_CLIENTS, so the
+# shared fixture on disk is never touched by a test that ran before this one.
+wg_place_windows() {
+  local pair pid ws src="$WG_FIXTURES/clients.json"
+  [[ -f ${WG_FIXTURE_CLIENTS:-} ]] && src="$WG_FIXTURE_CLIENTS"
+  cp "$src" "$WG_TMP/clients.json"
+  for pair in ${@+"$@"}; do
+    pid="${pair%%:*}"
+    ws="${pair#*:}"
+    jq --arg p "$pid" --arg w "$ws" \
+      '[ .[] | if (.pid | tostring) == $p then .workspace.name = $w else . end ]' \
+      "$WG_TMP/clients.json" >"$WG_TMP/clients.next"
+    mv -f "$WG_TMP/clients.next" "$WG_TMP/clients.json"
+  done
+  export WG_FIXTURE_CLIENTS="$WG_TMP/clients.json"
+}
+
+# The fixture desktop, filed the way wingroup would leave it: every window whose
+# project a group owns, sitting on that group's workspace. The two strays in
+# /home/dev stay on 1, because no group claims them and nothing would move them.
+wg_tidy_desktop() {
+  wg_place_windows 1001:shop 1002:shop 1003:shop 1004:site 1005:site
+}
+
 # Seed the state file from a fixture.
 wg_seed_state() {
   mkdir -p "$WG_STATE_DIR"

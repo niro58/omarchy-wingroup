@@ -5,6 +5,10 @@ load helper
 setup() {
   wg_setup_tmp
   wg_seed_state
+  # These tests are about what each group is showing, and a group shows what is
+  # on its workspace -- so the desktop here has to be a filed one. The fixture
+  # itself is the unfiled desktop that tidy and the daemon exist to act on.
+  wg_tidy_desktop
 }
 
 teardown() { wg_teardown_tmp; }
@@ -15,6 +19,21 @@ teardown() { wg_teardown_tmp; }
 # space-separated list, so a single assertion covers the whole set.
 wg_class_list() {
   jq -r 'if (.class | type) == "array" then (.class | join(" ")) else .class end'
+}
+
+# The fixture desktop with window $1 dragged onto workspace $2 -- the one thing
+# a user does by hand that counting by project owner could never see. Only the
+# name is touched: the fixture's workspace ids are arbitrary and nothing here
+# reads them.
+#
+# Reads whatever client list is currently in force, so two moves compose, and
+# writes through a temporary rather than into the file it is reading.
+wg_move_window() {
+  jq --arg a "$1" --arg w "$2" \
+    'map(if .address == $a then .workspace.name = $w else . end)' \
+    "${WG_FIXTURE_CLIENTS:-$WG_FIXTURES/clients.json}" >"$WG_TMP/clients-moved.tmp"
+  mv -f "$WG_TMP/clients-moved.tmp" "$WG_TMP/clients-moved.json"
+  export WG_FIXTURE_CLIENTS="$WG_TMP/clients-moved.json"
 }
 
 @test "slot 0 renders the first group with its idle count as a superscript" {
@@ -30,8 +49,13 @@ wg_class_list() {
 
 # The superscript is the idle count, not the busy one: what the bar is for is
 # spotting a session that has finished and can be given the next thing.
+#
+# Narrowing the group's project list used to be how this desktop was arranged;
+# it no longer arranges anything, because what a group holds is what is on its
+# workspace. So the idle session is moved off it instead, leaving shop's
+# workspace holding two busy ones.
 @test "a group whose sessions are all busy gets no superscript" {
-  wg_patch_state '.groups[0].projects = ["shop-core"]'
+  wg_move_window 0xaaa1 site
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$(jq -r '.text' <<<"$output")" = "shop" ]
 }
@@ -56,10 +80,22 @@ wg_class_list() {
   [ "$(wg_class_list <<<"$output")" = "busy idle1" ]
 }
 
+# --- where the group is ----------------------------------------------------
+#
+# The group in these is "template", whose workspace no window on the fixture
+# desktop is sitting on -- so its counts are all zero and the only class left is
+# the one saying where the group is, which is what each of them is about. The
+# heat that used to ride along came from the two projects the template group
+# lists, and a project list no longer puts a window in a group.
+
+# The precedence is the point here, so this one still needs something for active
+# to beat: a busy session, put in the group the only way there now is, by being
+# on its workspace.
 @test "the group on the focused monitor gets the active class, which beats busy" {
   cp "$WG_FIXTURES/state-template.json" "$WG_STATE_DIR/state.json"
+  wg_move_window 0xaaa2 template
   run "$WG_ROOT/bin/wingroup-waybar" 0
-  [ "$(wg_class_list <<<"$output")" = "active idle1" ]
+  [ "$(wg_class_list <<<"$output")" = "active" ]
 }
 
 # The bug: `hyprctl activeworkspace` answers for the focused monitor only, so
@@ -67,9 +103,11 @@ wg_class_list() {
 # look like it was nowhere at all.
 @test "a group on screen on an unfocused monitor is visible, not inactive" {
   cp "$WG_FIXTURES/state-template.json" "$WG_STATE_DIR/state.json"
+  # A busy session on its workspace, so this says visible beats busy too.
+  wg_move_window 0xaaa2 template
   export WG_FIXTURE_MONITORS="$WG_FIXTURES/monitors-laptop-focused.json"
   run "$WG_ROOT/bin/wingroup-waybar" 0
-  [ "$(wg_class_list <<<"$output")" = "visible idle1" ]
+  [ "$(wg_class_list <<<"$output")" = "visible" ]
 }
 
 @test "a group on no monitor at all is not visible" {
@@ -85,14 +123,14 @@ wg_class_list() {
   cp "$WG_FIXTURES/state-template.json" "$WG_STATE_DIR/state.json"
   export WAYBAR_OUTPUT_NAME=DP-1
   run "$WG_ROOT/bin/wingroup-waybar" 0
-  [ "$(wg_class_list <<<"$output")" = "active idle1" ]
+  [ "$(wg_class_list <<<"$output")" = "active" ]
 }
 
 @test "with WAYBAR_OUTPUT_NAME the other screen's bar calls it visible, not active" {
   cp "$WG_FIXTURES/state-template.json" "$WG_STATE_DIR/state.json"
   export WAYBAR_OUTPUT_NAME=eDP-2
   run "$WG_ROOT/bin/wingroup-waybar" 0
-  [ "$(wg_class_list <<<"$output")" = "visible idle1" ]
+  [ "$(wg_class_list <<<"$output")" = "visible" ]
 }
 
 @test "with WAYBAR_OUTPUT_NAME a group on no screen at all still has no class" {
@@ -108,10 +146,10 @@ wg_class_list() {
   cp "$WG_FIXTURES/state-template.json" "$WG_STATE_DIR/state.json"
   unset WAYBAR_OUTPUT_NAME
   run "$WG_ROOT/bin/wingroup-waybar" 0
-  [ "$(wg_class_list <<<"$output")" = "active idle1" ]
+  [ "$(wg_class_list <<<"$output")" = "active" ]
   export WG_FIXTURE_MONITORS="$WG_FIXTURES/monitors-laptop-focused.json"
   run "$WG_ROOT/bin/wingroup-waybar" 0
-  [ "$(wg_class_list <<<"$output")" = "visible idle1" ]
+  [ "$(wg_class_list <<<"$output")" = "visible" ]
 }
 
 # A bar on an output the compositor does not list -- a monitor unplugged between
@@ -121,28 +159,94 @@ wg_class_list() {
   export WAYBAR_OUTPUT_NAME=HDMI-A-9
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$status" -eq 0 ]
-  [ "$(wg_class_list <<<"$output")" = "visible idle1" ]
+  [ "$(wg_class_list <<<"$output")" = "visible" ]
 }
 
 @test "on a single monitor the focused group is still active" {
   cp "$WG_FIXTURES/state-template.json" "$WG_STATE_DIR/state.json"
   export WG_FIXTURE_MONITORS="$WG_FIXTURES/monitors-single.json"
   run "$WG_ROOT/bin/wingroup-waybar" 0
-  [ "$(wg_class_list <<<"$output")" = "active idle1" ]
+  [ "$(wg_class_list <<<"$output")" = "active" ]
 }
 
+# Three, not the two this used to say, and the third is 0xaaa3: an override
+# files it under site, and it is sitting on shop's workspace. The count follows
+# the window, so shop is a session busier than its project list would suggest --
+# and the projects line underneath still comes from state, unchanged.
 @test "the tooltip breaks the windows down into idle and busy, and lists the projects" {
   run "$WG_ROOT/bin/wingroup-waybar" 0
-  [[ "$(jq -r '.tooltip' <<<"$output")" == *"2 windows · 1 idle · 1 busy"* ]]
+  [[ "$(jq -r '.tooltip' <<<"$output")" == *"3 windows · 1 idle · 2 busy"* ]]
   [[ "$(jq -r '.tooltip' <<<"$output")" == *"shop-web, shop-core, shop-api"* ]]
 }
 
 # A plain terminal is a window of the group, but it is not a session waiting.
+# Being in the group is now being on its workspace, so the terminal is dragged
+# there rather than claimed by an override.
 @test "a window with no Claude session counts as neither idle nor busy" {
-  wg_patch_state '.overrides["0xaaa6"] = "shop"'
+  wg_move_window 0xaaa6 shop
   run "$WG_ROOT/bin/wingroup-waybar" 0
-  [[ "$(jq -r '.tooltip' <<<"$output")" == *"3 windows · 1 idle · 1 busy"* ]]
+  [[ "$(jq -r '.tooltip' <<<"$output")" == *"4 windows · 1 idle · 2 busy"* ]]
   [ "$(jq -r '.text' <<<"$output")" = "shop¹" ]
+}
+
+# --- which group a window is in --------------------------------------------
+#
+# A group is a named workspace, so a window is in the group whose workspace it
+# is on -- not the group that happens to own the directory it was opened in.
+# The fixture desktop is tidy, every window on the workspace of the group that
+# owns its project, which is exactly the arrangement in which the two rules
+# agree and neither of them is being tested. These three are the cases where
+# they part company.
+
+# The reported bug, in the form it was reported: a session running in a project
+# no group has ever claimed, sitting in plain sight on a group's workspace, and
+# the button saying the group held nothing.
+@test "a window whose project no group owns counts for the workspace it is on" {
+  jq -n '[{address: "0xdd1", pid: 9100, class: "Alacritty", floating: false,
+           title: "✳ 3dprint slicer profile",
+           workspace: {id: -99, name: "shop"}}]' >"$WG_TMP/clients-unclaimed.json"
+  export WG_FIXTURE_CLIENTS="$WG_TMP/clients-unclaimed.json"
+  # cwd.map holds the fixture pids and nothing else, and what this window needs
+  # is a directory that is a real project and is in no group's project list, so
+  # it brings its own lookup.
+  cat >"$WG_TMP/stub-unclaimed.sh" <<'EOF'
+# shellcheck shell=bash
+wg_children_load() { WG_CHILDREN_LOADED=1; }
+WG_CHILDREN_LOADED=1
+wg_window_cwd() { printf '%s\n' "$WG_PROJECTS_DIR/3dprint"; }
+EOF
+  export WG_TEST_STUB_CWD="$WG_TMP/stub-unclaimed.sh"
+
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [ "$status" -eq 0 ]
+  [[ "$(jq -r '.tooltip' <<<"$output")" == *"1 windows · 1 idle · 0 busy"* ]]
+  [ "$(jq -r '.text' <<<"$output")" = "shop¹" ]
+}
+
+# The other half of the same rule: a window a group does own, dragged onto a
+# different group's workspace, is counted where it is and not where it belongs.
+# Both buttons are asked, because the count has to move rather than be shared.
+@test "a window on another group's workspace counts there, not for its owner" {
+  # 0xaaa5 is busy and its project, site-platform, belongs to site.
+  wg_move_window 0xaaa5 shop
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [[ "$(jq -r '.tooltip' <<<"$output")" == *"4 windows · 1 idle · 3 busy"* ]]
+  run "$WG_ROOT/bin/wingroup-waybar" 1
+  [[ "$(jq -r '.tooltip' <<<"$output")" == *"1 windows · 1 idle · 0 busy"* ]]
+}
+
+# And a window on a numbered workspace is in no group, whoever owns its project
+# -- which is the honest answer while it waits to be filed, and the price of the
+# rule. Nobody else picks it up: not the group that owns the project, and not
+# the group whose workspace it was dragged off.
+@test "a window on a numbered workspace counts for no group at all" {
+  # 0xaaa1 is idle and its project, shop-web, belongs to shop.
+  wg_move_window 0xaaa1 1
+  run "$WG_ROOT/bin/wingroup-waybar" 0
+  [[ "$(jq -r '.tooltip' <<<"$output")" == *"2 windows · 0 idle · 2 busy"* ]]
+  [ "$(jq -r '.text' <<<"$output")" = "shop" ]
+  run "$WG_ROOT/bin/wingroup-waybar" 1
+  [[ "$(jq -r '.tooltip' <<<"$output")" == *"2 windows · 1 idle · 1 busy"* ]]
 }
 
 @test "slot 7 lists overflow groups in its tooltip" {
@@ -173,22 +277,22 @@ wg_class_list() {
 # idle1..idle4 -- and style.css ramps it from warm to red. The count is capped:
 # past a handful the exact number stops changing what you do about it.
 
-# A client list of $2 idle and $3 busy Claude windows, all of them sent to
-# group $1 by an override. An override owns a window outright, which saves
-# inventing a project and a fixture cwd for every window just to get a count up.
+# A client list of $2 idle and $3 busy Claude windows, all of them sitting on
+# group $1's workspace -- which is the whole of putting a window in a group now,
+# so there is no state to patch: no overrides, and no project or fixture cwd to
+# invent for each window just to get a count up.
+#
+# These windows carry a pid cwd.map has never heard of, so every one of them
+# resolves to no project and no owning group at all. They are counted here
+# purely because of where they are.
 wg_group_windows() {
   local group="$1" idle="$2" busy="${3:-0}"
-  jq -n --argjson i "$idle" --argjson b "$busy" '
+  jq -n --arg g "$group" --argjson i "$idle" --argjson b "$busy" '
     [ range(0; $i) | {address: "0xbb\(.)", title: "✳ waiting for the next thing"} ]
     + [ range(0; $b) | {address: "0xcc\(.)", title: "◐ working on it"} ]
     | map(. + {pid: 9000, class: "Alacritty", floating: false,
-               workspace: {id: 1, name: "1"}})' >"$WG_TMP/clients-heat.json"
+               workspace: {id: -99, name: $g}})' >"$WG_TMP/clients-heat.json"
   export WG_FIXTURE_CLIENTS="$WG_TMP/clients-heat.json"
-  jq --arg g "$group" --argjson i "$idle" --argjson b "$busy" '
-    .overrides = (reduce range(0; $i) as $n ({}; .["0xbb\($n)"] = $g)
-                  | reduce range(0; $b) as $n (.; .["0xcc\($n)"] = $g))' \
-    "$WG_STATE_DIR/state.json" >"$WG_TMP/state.heat"
-  mv -f "$WG_TMP/state.heat" "$WG_STATE_DIR/state.json"
 }
 
 # Nothing waiting on you is the common case and has to look exactly as it
@@ -343,7 +447,7 @@ wg_crash_clear() {
   [[ "$tooltip" == *"/home/dev/projects/shop-core"* ]]
   [[ "$tooltip" == *"09-10 11:02"* ]]
   # The line the tooltip has always opened with is still the line it opens with.
-  [ "$(head -n1 <<<"$tooltip")" = "shop — 2 windows · 1 idle · 1 busy" ]
+  [ "$(head -n1 <<<"$tooltip")" = "shop — 3 windows · 1 idle · 2 busy" ]
 }
 
 # A crash record carries a directory, not a group: a session that died in a

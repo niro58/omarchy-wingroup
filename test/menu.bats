@@ -11,9 +11,28 @@ setup() {
   source "$WG_ROOT/lib/menu.sh"
   wg_stub_cwd
   export WG_WALKER="$WG_ROOT/test/bin/walker-stub"
+  # The picker reports what is in each group, and a group holds what is on its
+  # workspace -- so this suite, like the bar's, means a filed desktop. The
+  # fixture is the unfiled one the filing tests act on.
+  wg_tidy_desktop
 }
 
 teardown() { wg_teardown_tmp; }
+
+# The fixture desktop with window $1 dragged onto workspace $2 -- the one thing
+# a user does by hand that counting by project owner could never see. Only the
+# name is touched: the fixture's workspace ids are arbitrary and nothing here
+# reads them.
+#
+# Reads whatever client list is currently in force, so two moves compose, and
+# writes through a temporary rather than into the file it is reading.
+wg_move_window() {
+  jq --arg a "$1" --arg w "$2" \
+    'map(if .address == $a then .workspace.name = $w else . end)' \
+    "${WG_FIXTURE_CLIENTS:-$WG_FIXTURES/clients.json}" >"$WG_TMP/clients-moved.tmp"
+  mv -f "$WG_TMP/clients-moved.tmp" "$WG_TMP/clients-moved.json"
+  export WG_FIXTURE_CLIENTS="$WG_TMP/clients-moved.json"
+}
 
 @test "the menu opens with one entry per group, in state order" {
   count="$(wg_menu_build | grep -c '^group:')"
@@ -22,19 +41,73 @@ teardown() { wg_teardown_tmp; }
   [ "$first" = "group:shop" ]
 }
 
+# Three windows, not the two this used to say, and the third is 0xaaa3: an
+# override files it under site, and it is sitting on shop's workspace. The row
+# counts what is in the group, and what is in the group is what is on it.
 @test "a group entry shows its window, idle and busy counts" {
   display="$(wg_menu_build | head -n1 | cut -f2)"
   [[ "$display" == *"shop"* ]]
-  [[ "$display" == *"2 windows"* ]]
+  [[ "$display" == *"3 windows"* ]]
   [[ "$display" == *"1 idle"* ]]
-  [[ "$display" == *"1 busy"* ]]
+  [[ "$display" == *"2 busy"* ]]
 }
 
-# A plain terminal is neither idle nor busy, but it is still a window.
+# A plain terminal is neither idle nor busy, but it is still a window. Being in
+# the group is now being on its workspace, so the terminal is dragged there
+# rather than claimed by an override.
 @test "a group entry counts a window with no Claude session as neither idle nor busy" {
-  wg_patch_state '.overrides["0xaaa6"] = "shop"'
+  wg_move_window 0xaaa6 shop
   display="$(wg_menu_build | head -n1 | cut -f2)"
-  [[ "$display" == *"3 windows · 1 idle · 1 busy"* ]]
+  [[ "$display" == *"4 windows · 1 idle · 2 busy"* ]]
+}
+
+# --- which group a window is in --------------------------------------------
+#
+# A group is a named workspace, so a window is in the group whose workspace it
+# is on -- not the group that happens to own the directory it was opened in.
+# The fixture desktop is tidy, every window on the workspace of the group that
+# owns its project, which is exactly the arrangement in which the two rules
+# agree and neither of them is being tested. These are the cases where they
+# part company.
+
+# The reported bug, in the form it was reported: a session running in a project
+# no group has ever claimed, sitting in plain sight on a group's workspace, and
+# the picker saying the group held nothing.
+@test "a group counts a window on its workspace whose project no group owns" {
+  jq -n '[{address: "0xdd1", pid: 9100, class: "Alacritty", floating: false,
+           title: "✳ 3dprint slicer profile",
+           workspace: {id: -99, name: "shop"}}]' >"$WG_TMP/clients-unclaimed.json"
+  export WG_FIXTURE_CLIENTS="$WG_TMP/clients-unclaimed.json"
+  # cwd.map holds the fixture pids and nothing else, and what this window needs
+  # is a directory that is a real project and is in no group's project list.
+  wg_window_cwd() { printf '%s\n' "$WG_PROJECTS_DIR/3dprint"; }
+
+  [[ "$(wg_menu_build | grep '^group:shop' | cut -f2)" == *"1 windows · 1 idle · 0 busy"* ]]
+  [[ "$(wg_menu_build | grep '^group:site' | cut -f2)" == *"0 windows · 0 idle · 0 busy"* ]]
+  # And the row for the window itself agrees with the group row above it.
+  [[ "$(wg_menu_build | grep '^window:0xdd1' | cut -f2)" == *"shop"* ]]
+}
+
+# The other half of the same rule: a window a group does own, dragged onto a
+# different group's workspace, is counted where it is and not where it belongs.
+# Both rows are read, because the count has to move rather than be shared.
+@test "a window on another group's workspace counts there, not for its owner" {
+  # 0xaaa5 is busy and its project, site-platform, belongs to site.
+  wg_move_window 0xaaa5 shop
+  [[ "$(wg_menu_build | grep '^group:shop' | cut -f2)" == *"4 windows · 1 idle · 3 busy"* ]]
+  [[ "$(wg_menu_build | grep '^group:site' | cut -f2)" == *"1 windows · 1 idle · 0 busy"* ]]
+}
+
+# And a window on a numbered workspace is in no group, whoever owns its project
+# -- which is the honest answer while it waits to be filed. It has not stopped
+# existing, though: the footer counts every Claude session on the desktop,
+# grouped or not, and that number does not move.
+@test "a window on a numbered workspace counts for no group, but still for the desktop" {
+  # 0xaaa1 is idle and its project, shop-web, belongs to shop.
+  wg_move_window 0xaaa1 1
+  [[ "$(wg_menu_build | grep '^group:shop' | cut -f2)" == *"2 windows · 0 idle · 2 busy"* ]]
+  [[ "$(wg_menu_build | grep '^group:site' | cut -f2)" == *"2 windows · 1 idle · 1 busy"* ]]
+  [ "$(wg_menu_build | tail -n1 | cut -f2)" = "── 5 Claude sessions · 2 idle · 3 busy" ]
 }
 
 @test "the menu lists every window" {
@@ -65,18 +138,21 @@ teardown() { wg_teardown_tmp; }
   [[ "$display" != *"shop:"* ]]
 }
 
-# The whole point of the column: same repo, same project, same group, two rows
-# that used to be indistinguishable.
+# The whole point of the column: same repo, same workspace, two rows that used
+# to be indistinguishable. The pair is 0xaaa1 and 0xaaa2, both of them on shop's
+# workspace -- what the row says before the colon is where the window is, so two
+# windows on one workspace is the case where the worktree is all that is left to
+# tell them apart.
 @test "two windows in different worktrees of one repo are told apart" {
   wg_window_cwd() {
     case "$1" in
       1001) printf '%s\n' "$WG_PROJECTS_DIR/shop-web/.claude/worktrees/price-units" ;;
-      1005) printf '%s\n' "$WG_PROJECTS_DIR/shop-web/.claude/worktrees/vat-rounding" ;;
+      1002) printf '%s\n' "$WG_PROJECTS_DIR/shop-web/.claude/worktrees/vat-rounding" ;;
       *) return 0 ;;
     esac
   }
   [[ "$(wg_menu_build | grep '^window:0xaaa1' | cut -f2)" == *"shop:price-units"* ]]
-  [[ "$(wg_menu_build | grep '^window:0xaaa5' | cut -f2)" == *"shop:vat-rounding"* ]]
+  [[ "$(wg_menu_build | grep '^window:0xaaa2' | cut -f2)" == *"shop:vat-rounding"* ]]
 }
 
 @test "wg_menu_where joins the group and the worktree, and falls back to ungrouped" {
@@ -102,6 +178,29 @@ teardown() { wg_teardown_tmp; }
 @test "an ungrouped window says so" {
   display="$(wg_menu_build | grep '^window:0xaaa6' | cut -f2)"
   [[ "$display" == *"ungrouped"* ]]
+}
+
+# The label in front of the colon is where the window is, and a window that has
+# been dragged somewhere else is somewhere else. It has to agree with the group
+# rows above it: a window counted under one group and labelled with another is
+# the contradiction the whole change is about.
+@test "the where label names the workspace the window is on, not its owner's group" {
+  # 0xaaa5's project, site-platform, belongs to site; the window is on shop's.
+  wg_move_window 0xaaa5 shop
+  display="$(wg_menu_build | grep '^window:0xaaa5' | cut -f2)"
+  [[ "$display" == *"shop"* ]]
+  [[ "$display" != *"site"* ]]
+}
+
+# Ungrouped is about where the window is too, not about whether anything claims
+# its directory: on workspace 1 it is in no group yet, however well known its
+# project is.
+@test "a window on a numbered workspace says ungrouped even when a group owns its project" {
+  # 0xaaa1's project, shop-web, belongs to shop.
+  wg_move_window 0xaaa1 1
+  display="$(wg_menu_build | grep '^window:0xaaa1' | cut -f2)"
+  [[ "$display" == *"ungrouped"* ]]
+  [[ "$display" != *"shop"* ]]
 }
 
 # Order matters more than it looks. The actions used to sit below every window,

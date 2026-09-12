@@ -25,6 +25,11 @@ set -euo pipefail
 WG_LIB_DIR="${WG_LIB_DIR:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib" && pwd)}"
 # shellcheck source=lib/state.sh
 source "$WG_LIB_DIR/state.sh"
+# The scan asks the compositor which workspace each session's window is on, so
+# that a restore can put it back where it was rather than where its project
+# says it belongs.
+# shellcheck source=lib/hypr.sh
+source "$WG_LIB_DIR/hypr.sh"
 # shellcheck source=lib/sessions.sh
 source "$WG_LIB_DIR/sessions.sh"
 # shellcheck source=lib/notify.sh

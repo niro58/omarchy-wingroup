@@ -136,10 +136,26 @@ main() {
   #
   # A window is idle, busy, or neither: a plain terminal with no Claude session
   # in it counts towards the total and towards nothing else.
+  #
+  # Counted by the workspace it is on (column 3), not by the group that owns its
+  # project (column 5). A group *is* a named workspace -- that is the whole
+  # definition -- so whatever is sitting on it is in it, whoever happens to own
+  # the directory.
+  #
+  # Counting by owner made the button contradict the screen. A session in a
+  # project no group claims, moved onto a group's workspace by hand, was counted
+  # by nobody: the window was visibly there and the button said zero. This file
+  # already decides "active" and "visible" by workspace a few lines down, so the
+  # two halves of the same button were answering to different notions of which
+  # group they were describing.
+  #
+  # The cost is that a window still waiting on workspace 1 counts for no group
+  # until it is filed onto one, which is the honest answer: it is not in a group
+  # yet. The daemon files it within a moment of it opening.
   local total=0 idle=0 busy=0 line
   while IFS= read -r line; do
     wg_row_split "$line"
-    [[ ${WG_ROW[5]} == "$name" ]] || continue
+    [[ ${WG_ROW[3]} == "$name" ]] || continue
     total=$(( total + 1 ))
     case ${WG_ROW[6]} in
       idle) idle=$(( idle + 1 )) ;;
