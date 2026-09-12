@@ -61,6 +61,25 @@ WG_SNAPSHOT_PREV="$WG_STATE_DIR/sessions-snapshot.prev.json"
 # which is what the map keeps a dead scope around for.
 : "${WG_SNAPSHOT_FRESH:=60}"
 
+# How long the machine must look empty before the snapshot believes it.
+#
+# A scan that finds nothing means one of two things and cannot tell them apart:
+# the user closed every session, or the machine is shutting down and the
+# terminals have already been killed. Writing the empty answer straight out gets
+# the second one catastrophically wrong -- it wipes the record seconds before
+# the reboot that was about to read it.
+#
+# Observed: a snapshot written at 20:38:21 with zero sessions, nine seconds
+# before the boot ended at 20:38:30, after a boot that had fourteen sessions
+# open. The restore at the next boot did exactly as it was told and opened
+# nothing.
+#
+# Shutdown does not leave two minutes between killing the terminals and cutting
+# the power, so waiting that long before believing an empty machine costs
+# nothing there. A user who really has closed everything and carries on working
+# passes the same two minutes and the snapshot empties.
+: "${WG_SNAPSHOT_EMPTY_GRACE:=120}"
+
 wg_sessions_default() { printf '%s\n' '{"sessions":{}}'; }
 wg_crashed_default()  { printf '%s\n' '{"crashed":[]}'; }
 
@@ -415,10 +434,75 @@ wg_snapshot_write() {
          | group_by(if .value.session == "" then .key else .value.session end)
          | map(max_by(.value.seen // 0))
          | from_entries)}
-     ' <<<"$(wg_sessions_read)" >"$tmp" 2>/dev/null && mv -f "$tmp" "$WG_SNAPSHOT_FILE"; then
+     ' <<<"$(wg_sessions_read)" >"$tmp" 2>/dev/null; then
+    :
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+
+  # An empty answer has to hold still before it is believed. See the note on
+  # WG_SNAPSHOT_EMPTY_GRACE: at shutdown the terminals die first and the watcher
+  # gets one more scan, so writing "nothing is open" straight out destroys the
+  # record the next boot is about to restore from.
+  #
+  # While the wait runs, the sessions already on file stay exactly as they are
+  # and only a timestamp is added -- so a reboot in the middle of it archives a
+  # snapshot that still knows what was open, which is the whole point.
+  if ! wg_snapshot_may_empty "$tmp" "$boot"; then
+    rm -f "$tmp"
+    return 0
+  fi
+
+  if mv -f "$tmp" "$WG_SNAPSHOT_FILE"; then
     return 0
   fi
   rm -f "$tmp"
+  return 1
+}
+
+# True when the document in $1 may replace the current snapshot for boot $2.
+#
+# Only ever false for the one case worth guarding: a newly empty set replacing a
+# non-empty one from this same boot, before the grace period is up. Anything
+# else -- a set with sessions in it, a boot change, no snapshot yet, an empty
+# set replacing an empty one -- goes straight through.
+#
+# The first empty scan stamps empty_since onto the *existing* file and keeps its
+# sessions. That stamp is what makes the wait survive the watcher restarting,
+# and it is dropped the moment a scan finds a session again, because the new
+# document is written without it.
+wg_snapshot_may_empty() {
+  local candidate="$1" boot="$2" existing_boot new_n old_n since now
+
+  [[ -f $WG_SNAPSHOT_FILE ]] || return 0
+  existing_boot="$(jq -r '.boot // ""' "$WG_SNAPSHOT_FILE" 2>/dev/null || true)"
+  [[ $existing_boot == "$boot" ]] || return 0
+
+  new_n="$(jq -r '.sessions | length' "$candidate" 2>/dev/null || echo 1)"
+  [[ $new_n == 0 ]] || return 0
+  old_n="$(jq -r '.sessions | length' "$WG_SNAPSHOT_FILE" 2>/dev/null || echo 0)"
+  [[ $old_n != 0 ]] || return 0
+
+  now="$(date +%s)"
+  since="$(jq -r '.empty_since // ""' "$WG_SNAPSHOT_FILE" 2>/dev/null || true)"
+  if [[ $since =~ ^[0-9]+$ ]] && (( now - since >= WG_SNAPSHOT_EMPTY_GRACE )); then
+    return 0
+  fi
+
+  # Still waiting. Stamp the start of the wait if this is the first empty scan,
+  # and leave the sessions where they are.
+  if [[ ! $since =~ ^[0-9]+$ ]]; then
+    local stamp
+    if stamp="$(mktemp "$WG_STATE_DIR/.snap.XXXXXX")"; then
+      if jq --arg t "$now" '.empty_since = ($t | tonumber)' \
+           "$WG_SNAPSHOT_FILE" >"$stamp" 2>/dev/null; then
+        mv -f "$stamp" "$WG_SNAPSHOT_FILE" || rm -f "$stamp"
+      else
+        rm -f "$stamp"
+      fi
+    fi
+  fi
   return 1
 }
 

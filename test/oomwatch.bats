@@ -758,3 +758,88 @@ notified_twice() { (( $(notifies) >= 2 )); }
   [ "$status" -eq 0 ]
   [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions[$s].session' "$WG_SNAPSHOT_FILE")" = "just-hooked" ]
 }
+
+# The regression that lost a whole desktop.
+#
+# At shutdown Hyprland kills the terminals first and the watcher gets one more
+# scan. Once the snapshot held only live sessions, that scan wrote "nothing is
+# open" over the record the next boot was about to restore from. Observed: a
+# snapshot written at 20:38:21 with zero sessions, nine seconds before the boot
+# ended, after a session with fourteen terminals open. The restore obeyed it and
+# opened nothing.
+#
+# An empty answer now has to hold still before it is believed.
+@test "the last scan before shutdown does not wipe the snapshot" {
+  export WG_SNAPSHOT_FRESH=1
+  export WG_SNAPSHOT_EMPTY_GRACE=30
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_sessions_record "$WG_SCOPE" "sess-a" "$WG_TMP/projects/shop-web" hook
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 1 ]
+
+  # The terminals are gone and the entry has aged past the freshness window,
+  # which is exactly the state the dying machine is in.
+  rm -rf "${WG_PROC_DIR:?}/1001"
+  sleep 2
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 1 ]
+  # and it has started counting, so the wait survives the watcher restarting
+  [ "$(jq -r '.empty_since // "unset"' "$WG_SNAPSHOT_FILE")" != "unset" ]
+}
+
+# The half that makes the guard worth having: a reboot landing in the middle of
+# the wait still hands the restore a record of what was open.
+@test "a reboot during the wait still archives the sessions" {
+  export WG_SNAPSHOT_FRESH=1
+  export WG_SNAPSHOT_EMPTY_GRACE=30
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_sessions_record "$WG_SCOPE" "sess-a" "$WG_TMP/projects/shop-web" hook
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  rm -rf "${WG_PROC_DIR:?}/1001"
+  sleep 2
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+
+  printf 'a-brand-new-boot\n' >"$WG_BOOT_ID_FILE"
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq '.sessions | length' "$WG_SNAPSHOT_PREV")" -eq 1 ]
+  [ "$(jq -r '.sessions | to_entries[0].value.session' "$WG_SNAPSHOT_PREV")" = "sess-a" ]
+}
+
+# And the guard must not become a permanent refusal to empty: a user who really
+# has closed everything and carried on working gets an empty snapshot, so the
+# next boot opens nothing rather than resurrecting what they shut.
+@test "closing everything does empty the snapshot once the wait is over" {
+  export WG_SNAPSHOT_FRESH=1
+  export WG_SNAPSHOT_EMPTY_GRACE=2
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_sessions_record "$WG_SCOPE" "sess-a" "$WG_TMP/projects/shop-web" hook
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  rm -rf "${WG_PROC_DIR:?}/1001"
+  sleep 2
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once   # starts the wait, keeps the record
+  sleep 3
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once   # wait is over
+  [ "$status" -eq 0 ]
+  [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 0 ]
+}
+
+# A session appearing again cancels the wait outright, rather than leaving a
+# stale stamp that would empty the snapshot the moment it expired.
+@test "a session coming back clears the pending wait" {
+  export WG_SNAPSHOT_FRESH=1
+  export WG_SNAPSHOT_EMPTY_GRACE=30
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_sessions_record "$WG_SCOPE" "sess-a" "$WG_TMP/projects/shop-web" hook
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  rm -rf "${WG_PROC_DIR:?}/1001"
+  sleep 2
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$(jq -r '.empty_since // "unset"' "$WG_SNAPSHOT_FILE")" != "unset" ]
+
+  wg_fake_proc 1002 claude "$WG_SCOPE_TWO" "$WG_TMP/projects/site-platform"
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 1 ]
+  [ "$(jq -r '.empty_since // "unset"' "$WG_SNAPSHOT_FILE")" = "unset" ]
+}
