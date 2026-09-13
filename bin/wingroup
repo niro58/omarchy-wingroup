@@ -14,6 +14,8 @@ source "$WG_LIB_DIR/menu.sh"
 source "$WG_LIB_DIR/sessions.sh"
 # shellcheck source=lib/notify.sh
 source "$WG_LIB_DIR/notify.sh"
+# shellcheck source=lib/place.sh
+source "$WG_LIB_DIR/place.sh"
 
 # Tests point this at a stub that replaces /proc lookups with a fixture map.
 if [[ -n ${WG_TEST_STUB_CWD:-} ]]; then
@@ -432,9 +434,18 @@ cmd_toggle_auto() {
 # here it would relaunch `claude --resume /home/me/project`.
 declare -ga WG_CRASH=()
 
+# One crash row into WG_CRASH[1..4]: session id, cwd, killed_at, workspace.
+#
+# Peeled a column at a time rather than read into four variables: the session id
+# is empty for anything that predates the hook, tab is IFS whitespace, and read
+# collapses a leading run of it -- which would slide the directory into the id
+# and the whole row one place left. The workspace is last because it is the
+# other column that can be empty, and nothing can shift into the end.
 wg_crash_split() {
   local rest="$1"
   WG_CRASH=("" "${rest%%$'\t'*}")
+  rest="${rest#*$'\t'}"
+  WG_CRASH+=("${rest%%$'\t'*}")
   rest="${rest#*$'\t'}"
   WG_CRASH+=("${rest%%$'\t'*}" "${rest#*$'\t'}")
 }
@@ -603,6 +614,13 @@ cmd_crashed_menu() {
         wg_warn "the launch failed — keeping the record so the session id is not lost"
         return 1
       fi
+      # Same three columns --restore hands over, and only when there is an id to
+      # match on -- see the note there about what the directory fallback would
+      # drag along on a desktop that is already full.
+      if [[ -n ${WG_CRASH[1]} ]]; then
+        wg_place_wait "${WG_CRASH[1]}"
+        wg_place_rows 0 "${WG_CRASH[1]}"$'\t'"${WG_CRASH[2]}"$'\t'"${WG_CRASH[4]}"
+      fi
       wg_crashed_remove "$index"
       wg_refresh
       ;;
@@ -686,12 +704,30 @@ cmd_crashed() {
   fi
 
   local launched=0 skipped=0
-  local -a pids=()
+  local -a pids=() place=() place_ids=()
   for row in "${rows[@]}"; do
     wg_crash_split "$row"
     if wg_crash_launch "${WG_CRASH[1]}" "${WG_CRASH[2]}"; then
       pids+=("$WG_CRASH_PID")
       launched=$(( launched + 1 ))
+      # The crash record has four columns and the placement wants three:
+      # session, directory, workspace. When it died is the column it has no use
+      # for, so it is dropped here rather than taught to lib/place.sh -- the
+      # snapshot restore feeds that same function rows of exactly three.
+      #
+      # A record with no workspace still gets a row: lib/place.sh skips it, and
+      # leaving it out here would only say the same thing twice.
+      #
+      # A record with no *session id* does not. lib/place.sh falls back to
+      # matching on the directory, which finds any window whose shell sits
+      # there -- including a terminal the user opened by hand and one this
+      # command never launched. At login, on an empty desktop, that was a fair
+      # trade for placing a pre-hook session; here the desktop is full and the
+      # trade is the wrong way round, especially as a record with no id comes
+      # back as a fresh claude anyway, so the match buys nothing and risks
+      # dragging an unrelated window across the screen.
+      [[ -z ${WG_CRASH[1]} ]] \
+        || { place+=("${WG_CRASH[1]}"$'\t'"${WG_CRASH[2]}"$'\t'"${WG_CRASH[4]}"); place_ids+=("${WG_CRASH[1]}"); }
     else
       skipped=$(( skipped + 1 ))
     fi
@@ -708,6 +744,26 @@ cmd_crashed() {
   # the other. wg_crash_settle is where that distinction lives.
   wg_crash_settle ${pids[@]+"${pids[@]}"}
   local failed="$WG_CRASH_FAILED"
+
+  # Then, and only then, put them back where they were.
+  #
+  # It cannot happen any earlier. The launches are backgrounded so a dozen
+  # terminals start at once, which means that at the point wg_crash_launch
+  # returns there is no window for the compositor to answer for and no child
+  # shell carrying the session id on its command line -- the two things the
+  # match is made of.
+  #
+  # And it cannot ride on wg_crash_settle either, which is the mistake this
+  # comment used to describe. That settle answers "did the launcher take",
+  # in 0.4s; a window existing and having forked its shell is a later and
+  # slower event. wg_place_wait waits for the thing actually being matched.
+  local place_rows=""
+  if (( ${#place[@]} )); then
+    printf -v place_rows '%s\n' "${place[@]}"
+    place_rows="${place_rows%$'\n'}"
+    wg_place_wait "${place_ids[@]}"
+    wg_place_rows 0 "$place_rows"
+  fi
 
   if (( ! failed )); then
     # Cleared whole, skips included: a record whose directory is gone can never
