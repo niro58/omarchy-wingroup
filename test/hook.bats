@@ -66,6 +66,17 @@ wg_fake_comm() {
   [ "$(recorded source)" = "hook" ]
 }
 
+# The second directory, which is the same one at this moment and stops being so
+# the first time the session cd's anywhere. Claude finds a conversation by the
+# directory that encodes to its transcript folder, and the payload is the only
+# place on the machine that directory is ever stated: after the session has
+# moved, nothing can work out where it began.
+@test "the hook records the directory a resume has to be run from" {
+  hook '{"session_id":"11111111-2222","cwd":"/home/dev/projects/shop-web"}'
+  [ "$status" -eq 0 ]
+  [ "$(recorded resume_cwd)" = "/home/dev/projects/shop-web" ]
+}
+
 # A SessionStart hook's stdout is fed into the session as context. Anything
 # printed here would be prepended to the user's conversation.
 @test "the hook prints nothing on stdout" {
@@ -123,6 +134,46 @@ wg_fake_comm() {
   # The cwd is the scan's, though: that one the scan does know, and a session
   # that has been cd'd since it started is somewhere new.
   [ "$(recorded cwd)" = "$WG_TMP/projects/shop-web-live" ]
+}
+
+# The same rule for the other directory, and this is the one a lost conversation
+# comes down to. The scan is right about where the process is standing and has
+# to keep saying so; it is not entitled to say that is where the session can be
+# resumed from. A session that has cd'd into a worktree since it started would
+# otherwise be resumed from the worktree, find no conversation encoded under
+# that path, and quietly begin a new one -- which looks from the outside like
+# the restore worked and the history was lost. Two of twelve sessions after one
+# reboot.
+@test "a later scan moves the cwd and leaves the resume directory alone" {
+  hook '{"session_id":"11111111-2222","cwd":"/home/dev/projects/shop-web"}'
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web/.worktrees/fix"
+  run wg_sessions_scan
+  [ "$output" -eq 1 ]
+  [ "$(recorded cwd)" = "$WG_TMP/projects/shop-web/.worktrees/fix" ]
+  [ "$(recorded resume_cwd)" = "/home/dev/projects/shop-web" ]
+}
+
+# A session that predates the hook has no id and no resume directory either, and
+# the live cwd is the best that can be done for it: it is where the session is,
+# which for a session that never moved is also where it began. The row still has
+# to come out -- dropping it would lose the one thing that is known about a
+# session nobody can resume anyway, which is the project it was in.
+@test "a session the hook never saw still yields a row, off its live directory" {
+  export WG_BOOT_ID_FILE="$WG_TMP/boot-id"
+  printf 'the-boot-that-died\n' >"$WG_BOOT_ID_FILE"
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  run wg_sessions_scan
+  [ "$output" -eq 1 ]
+  [ -z "$(recorded resume_cwd)" ]
+
+  wg_snapshot_write
+  # Only a boot that is not this one is ever restored from, so the machine has
+  # to have rebooted before there is a row to read at all.
+  printf 'a-brand-new-boot\n' >"$WG_BOOT_ID_FILE"
+  run wg_snapshot_previous_rows
+  [ "$status" -eq 0 ]
+  [ -z "$(printf '%s' "$output" | cut -f1)" ]
+  [ "$(printf '%s' "$output" | cut -f2)" = "$WG_TMP/projects/shop-web" ]
 }
 
 # A session started from inside another session -- a subagent, a workflow,

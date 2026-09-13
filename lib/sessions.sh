@@ -199,13 +199,22 @@ wg_scope_workspaces() {
 # conditionally rather than merged in with the rest.
 wg_sessions_record() {
   local scope="$1" session="$2" cwd="$3" source="${4:-scan}" tty="${5:-}" \
-        workspace="${6:-}" now
+        workspace="${6:-}" resume_cwd="${7:-}" now
   [[ -n $scope ]] || return 0
   now="$(date +%s)"
   # Read the merge left to right: the empty defaults a brand-new entry needs,
   # then whatever is already recorded (so a hook's id survives a scan), then the
   # two facts every caller knows, then -- only for a caller that has an id --
   # the id and the source it came from.
+  #
+  # resume_cwd last, and it is the one field a scan must never touch. It is the
+  # directory a session can be *resumed* from, which is not the directory it is
+  # standing in: Claude finds a conversation by the directory that encodes to
+  # its transcript folder, and the hook is handed exactly that. A session that
+  # changes directory afterwards -- into a worktree, into a subdirectory -- has
+  # moved, and the scan faithfully records where to; resuming from there finds
+  # no conversation and quietly starts a new one. Two of twelve sessions after
+  # one reboot, which from the outside looks like "they all came back empty".
   # shellcheck disable=SC2016  # these are jq variables, not shell ones
   wg_runtime_update "$WG_SESSIONS_FILE" "$(wg_sessions_default)" '
     .sessions[$scope] =
@@ -215,8 +224,10 @@ wg_sessions_record() {
       + (if $session == "" then {} else {session: $session, source: $source} end)
       + (if $tty == "" then {} else {tty: ($tty | tonumber)} end)
       + (if $ws == "" then {} else {workspace: $ws} end)
+      + (if $resume == "" then {} else {resume_cwd: $resume} end)
   ' --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" \
-    --arg source "$source" --arg now "$now" --arg tty "$tty" --arg ws "$workspace"
+    --arg source "$source" --arg now "$now" --arg tty "$tty" --arg ws "$workspace" \
+    --arg resume "$resume_cwd"
 }
 
 # Refreshes the map from every live claude process.
@@ -302,18 +313,31 @@ wg_sessions_expire() {
 # Returns 1 when the scope is unknown, so a caller can tell "ignored" from
 # "recorded" without re-reading the file.
 wg_crashed_add() {
-  local scope="$1" killed_at="$2" entry session cwd
+  local scope="$1" killed_at="$2" entry session cwd workspace
   [[ -n $scope ]] || return 1
   entry="$(jq -c --arg s "$scope" '.sessions[$s] // empty' <<<"$(wg_sessions_read)")"
   [[ -n $entry ]] || return 1
   session="$(jq -r '.session // ""' <<<"$entry")"
-  cwd="$(jq -r '.cwd // ""' <<<"$entry")"
+  # Resumable directory over live directory, for the reason wg_snapshot_previous_rows
+  # gives: this is what --resume will be run from.
+  cwd="$(jq -r '.resume_cwd // .cwd // ""' <<<"$entry")"
+  # And where it was, so it can be put back there.
+  #
+  # The map knows this at the moment of the kill and nothing else ever will --
+  # the window is already gone. Without it a restored crash is filed by the
+  # project its directory sits in, which is the wrong answer whenever that is
+  # not where the user had it: a session in a project no group claims lands
+  # nowhere in particular, and one that had been moved lands back where it was
+  # moved from.
+  workspace="$(jq -r '.workspace // ""' <<<"$entry")"
   # shellcheck disable=SC2016  # jq variables
   wg_runtime_update "$WG_CRASHED_FILE" "$(wg_crashed_default)" '
     if any(.crashed[]; .scope == $scope) then .
-    else .crashed += [{scope: $scope, session: $session, cwd: $cwd, killed_at: $at}]
+    else .crashed += [({scope: $scope, session: $session, cwd: $cwd, killed_at: $at}
+                       + (if $ws == "" then {} else {workspace: $ws} end))]
     end
-  ' --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" --arg at "$killed_at"
+  ' --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" --arg at "$killed_at" \
+    --arg ws "$workspace"
 }
 
 # Empties the crash list by removing the file, not by writing an empty document.
@@ -400,7 +424,7 @@ wg_crash_when() {
 # written, and would match nothing. Nothing downstream needs it: the bar counts
 # and describes crashes, and the CLI relaunches the lot and clears the file.
 wg_crashed_rows() {
-  jq -r '.crashed[] | [.session, .cwd, .killed_at] | @tsv' <<<"$(wg_crashed_read)"
+  jq -r '.crashed[] | [.session, .cwd, .killed_at, .workspace // ""] | @tsv' <<<"$(wg_crashed_read)"
 }
 
 wg_boot_id() {
@@ -549,6 +573,16 @@ wg_snapshot_may_empty() {
 # The sessions that were open when this machine last went down, one per line:
 # session id, cwd, workspace, tab separated. Empty when there is no such record.
 #
+# The cwd here is the one to *resume from*, preferring what the hook recorded
+# over where the scan last saw the process standing. Getting that the wrong way
+# round is how a restore opens every terminal in the right place with none of
+# the conversations in them: Claude looks a session up by the directory that
+# encodes to its transcript folder, so resuming from a worktree the session
+# happened to cd into finds nothing and quietly starts afresh.
+#
+# Falls back to the live cwd for a session that predates the hook, which is the
+# best that can be done for one whose id was never recorded either.
+#
 # The workspace is what makes a restore reproduce the desktop rather than
 # reconstruct it. Filing a restored terminal by its project puts it where the
 # project says it belongs, which is not where it was: a session in a project no
@@ -591,7 +625,9 @@ wg_snapshot_previous_rows() {
     [[ -n $boot && $boot != "$current" ]] || continue
     jq -r '.sessions | to_entries[]
            | select((.value.cwd // "") != "")
-           | [.value.session // "", .value.cwd, .value.workspace // ""] | @tsv' \
+           | [.value.session // "",
+              (.value.resume_cwd // .value.cwd),
+              .value.workspace // ""] | @tsv' \
       "$file" 2>/dev/null || true
     return 0
   done

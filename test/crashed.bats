@@ -23,8 +23,10 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 # Through the library rather than by writing crashed.json by hand, so a record
 # shape lib/sessions.sh would never produce is not a record these tests trust.
 # The subshell keeps the libraries' defaults out of the test's own shell.
+# $4, when given, is the workspace the session was on -- what makes a restored
+# crash go back where it died rather than be filed by its project.
 wg_crash() {
-  local cwd="$1" session="${2:-}" at="${3:-2026-09-10T11:02:03+02:00}"
+  local cwd="$1" session="${2:-}" at="${3:-2026-09-10T11:02:03+02:00}" ws="${4:-}"
   WG_CRASH_N=$(( WG_CRASH_N + 1 ))
   # A scope of its own per crash: the list is deduped by scope, so two crashes
   # sharing one would silently become a single record.
@@ -34,7 +36,7 @@ wg_crash() {
     set -euo pipefail
     source "$WG_LIB_DIR/state.sh"
     source "$WG_LIB_DIR/sessions.sh"
-    wg_sessions_record "$scope" "$session" "$cwd" hook
+    wg_sessions_record "$scope" "$session" "$cwd" hook "" "$ws"
     wg_crashed_add "$scope" "$at"
   )
 }
@@ -497,4 +499,203 @@ wg_crash_pair() {
   [ "$status" -eq 0 ]
   run bash -c "grep -c 'proj-b' '$WG_TMP/second-picker.log'"
   [ "$output" -ge 1 ]
+}
+
+# --- putting a restored crash back where it crashed --------------------------
+#
+# The ⚠ button used to file a restored session by the project its directory
+# sits in, which is the wrong answer whenever that is not where the user had it:
+# a session in a project no group claims lands nowhere in particular, and one
+# the user had moved lands back where it was moved from. The crash record now
+# carries the workspace the session was on, and that is what wins.
+
+# A crash from a desktop where the compositor answered for the session, so the
+# map -- and therefore the record -- knows which workspace it was on.
+#
+# Separate from wg_crash rather than a fourth argument to it, but sharing its
+# counter: the list is deduped by scope, so two crashes landing on one scope
+# would silently become a single record.
+wg_crash_on() {
+  local cwd="$1" session="$2" ws="$3"
+  WG_CRASH_N=$(( WG_CRASH_N + 1 ))
+  local scope
+  scope="$(wg_fake_scope "beef0$WG_CRASH_N")"
+  (
+    set -euo pipefail
+    source "$WG_LIB_DIR/state.sh"
+    source "$WG_LIB_DIR/sessions.sh"
+    wg_sessions_record "$scope" "$session" "$cwd" hook "" "$ws"
+    wg_crashed_add "$scope" "2026-09-10T11:02:03+02:00"
+  )
+}
+
+# A relaunched terminal, in $WG_PROC_DIR: the window is the terminal process and
+# its child is the `bash -c` the relaunch handed the session id to, which is
+# where the id can be read back off the command line.
+#
+# The same shape test/restore.bats builds, because it is the same match being
+# made -- both callers now go through lib/place.sh.
+wg_fake_terminal() {
+  local pid="$1" child="$2" cwd="$3" session="${4:-}"
+  mkdir -p "$WG_PROC_DIR/$pid" "$WG_PROC_DIR/$child" "$cwd"
+  # Field 4 of /proc/<pid>/stat is the parent, and that is the only field the
+  # placement reads out of it.
+  printf '%s (Alacritty) S 1 1 1 34816 1 0\n' "$pid" >"$WG_PROC_DIR/$pid/stat"
+  printf '%s (bash) S %s 1 1 34816 1 0\n' "$child" "$pid" >"$WG_PROC_DIR/$child/stat"
+  ln -sfn "$cwd" "$WG_PROC_DIR/$child/cwd"
+  # NUL separated, the way the kernel writes it.
+  if [[ -n $session ]]; then
+    printf 'bash\0-c\0claude --resume "$0" || exec bash\0%s\0' "$session" \
+      >"$WG_PROC_DIR/$child/cmdline"
+  else
+    printf 'bash\0-c\0claude || exec bash\0' >"$WG_PROC_DIR/$child/cmdline"
+  fi
+}
+
+# The compositor's answer, written for one test: every argument is
+# "<address>:<pid>:<workspace>". The shared fixture describes a desktop that is
+# already tidy, which is the wrong one here -- a desktop of terminals that have
+# just been relaunched is not in it at all.
+wg_write_clients() {
+  local entry addr pid ws clients='[]'
+  for entry in ${@+"$@"}; do
+    addr="${entry%%:*}"
+    pid="${entry#*:}"
+    ws="${pid#*:}"
+    pid="${pid%%:*}"
+    clients="$(jq --arg a "$addr" --argjson p "$pid" --arg w "$ws" \
+                  '. + [{address: $a, pid: $p, class: "Alacritty", title: "session",
+                         floating: false, workspace: {id: 1, name: $w}}]' <<<"$clients")"
+  done
+  printf '%s\n' "$clients" >"$WG_TMP/clients.json"
+  export WG_FIXTURE_CLIENTS="$WG_TMP/clients.json"
+}
+
+@test "a restored crash is put back on the workspace it crashed on" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_crash_on "$shop" "sess-a1" misc
+  wg_fake_terminal 3001 3002 "$shop" "sess-a1"
+  wg_write_clients "0xccc1:3001:1"
+  export WG_LAUNCH_SETTLE=0.1
+
+  run wingroup crashed --restore
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"place  $shop  misc"* ]]
+  run dispatches
+  [ "$output" = "movetoworkspacesilent name:misc,address:0xccc1" ]
+}
+
+# A record filed before the workspace was ever written down, or one whose window
+# the compositor never answered for. Inventing a workspace would be worse than
+# leaving it to be filed by project, which is what happens today.
+@test "a crash with no recorded workspace is not moved at all" {
+  local shop="$WG_TMP/projects/shop-web"
+  mkdir -p "$shop"
+  wg_crash "$shop" "sess-a1"
+  wg_fake_terminal 3001 3002 "$shop" "sess-a1"
+  wg_write_clients "0xccc1:3001:1"
+  export WG_LAUNCH_SETTLE=0.1
+
+  run wingroup crashed --restore
+  [ "$status" -eq 0 ]
+  [[ "$output" != *place* ]]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# Most sessions are in a project their group owns, and for those the terminal
+# has already landed where the record says it belongs.
+@test "a crash already on its recorded workspace is not dispatched at" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_crash_on "$shop" "sess-a1" misc
+  wg_fake_terminal 3001 3002 "$shop" "sess-a1"
+  wg_write_clients "0xccc1:3001:misc"
+  export WG_LAUNCH_SETTLE=0.1
+
+  run wingroup crashed --restore
+  [ "$status" -eq 0 ]
+  [[ "$output" != *place* ]]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# The bar's ⚠ button restores one session at a time, and that is the path the
+# user actually took when they reported this. It has to place too.
+@test "the picker's single restore puts that session back as well" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_crash_on "$shop" "sess-a1" misc
+  wg_fake_terminal 3001 3002 "$shop" "sess-a1"
+  wg_write_clients "0xccc1:3001:1"
+  export WG_LAUNCH_SETTLE=0.1
+  export WG_WALKER_PICK=1
+
+  run wingroup crashed --menu
+  [ "$status" -eq 0 ]
+  run dispatches
+  [ "$output" = "movetoworkspacesilent name:misc,address:0xccc1" ]
+}
+
+# A scratchpad is not an arrangement. Hyprland reports those workspaces as
+# "special:<name>", and "movetoworkspacesilent name:special:magic" does not send
+# a window to the scratchpad -- it makes an ordinary workspace called that and
+# leaves the terminal somewhere reachable only by typing it.
+@test "a crash recorded on the scratchpad is not placed there" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_crash_on "$shop" "sess-a1" "special:magic"
+  wg_fake_terminal 3001 3002 "$shop" "sess-a1"
+  wg_write_clients "0xccc1:3001:1"
+  export WG_LAUNCH_SETTLE=0.1
+
+  run wingroup crashed --restore
+  [ "$status" -eq 0 ]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# The terminals are launched in the background, so until they exist there is no
+# window for the compositor to answer for and no child shell carrying the
+# session id -- placing first would find nothing and move nothing.
+#
+# Both halves are recorded in one log, in the order they happened: the launcher
+# writes a line of its own, and the hyprctl stub writes every invocation it gets
+# when $WG_HYPRCTL_LOG is set.
+@test "the placement happens after the launch, not before" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_crash_on "$shop" "sess-a1" misc
+  wg_fake_terminal 3001 3002 "$shop" "sess-a1"
+  wg_write_clients "0xccc1:3001:1"
+  export WG_LAUNCH_SETTLE=0.1
+  export WG_HYPRCTL_LOG="$WG_TMP/order.log"
+  : >"$WG_HYPRCTL_LOG"
+  cat >"$WG_TMP/launch-order-stub" <<EOF
+#!/usr/bin/env bash
+printf 'launch\n' >>"$WG_HYPRCTL_LOG"
+printf '%s\n' "\$(printf '%s\t' "\$@")" >>"$WG_LAUNCH_LOG"
+EOF
+  chmod +x "$WG_TMP/launch-order-stub"
+  export WG_LAUNCH_CMD="$WG_TMP/launch-order-stub"
+
+  run wingroup crashed --restore
+  [ "$status" -eq 0 ]
+  run cat "$WG_HYPRCTL_LOG"
+  [ "${lines[0]}" = "launch" ]
+  [[ "$output" == *"movetoworkspacesilent name:misc,address:0xccc1"* ]]
+}
+
+# A crash record with no session id must not move anything.
+#
+# lib/place.sh falls back to matching on the directory, which finds any window
+# whose shell sits there -- including a terminal the user opened by hand. At
+# login on an empty desktop that was a fair trade for placing a pre-hook
+# session; on a full desktop mid-session it is the wrong way round, and a no-id
+# record comes back as a fresh claude anyway, so the match buys nothing.
+@test "a crash with no session id does not drag the user's own terminal" {
+  local shop="$WG_TMP/projects/shop-web"
+  mkdir -p "$shop"
+  wg_crash "$shop" "" "2026-09-13T11:02:03+02:00" "misc"
+  # A terminal the user already had open in that same directory, elsewhere.
+  wg_fake_terminal 7001 7002 "$shop" ""
+  wg_write_clients "0xuser:7001:3"
+
+  run timeout 20 "$WG_ROOT/bin/wingroup" crashed --restore
+  [ "$status" -eq 0 ]
+  run bash -c "grep -c '0xuser' '$WG_DISPATCH_LOG' || true"
+  [ "$output" -eq 0 ]
 }

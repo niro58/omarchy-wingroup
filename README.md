@@ -254,7 +254,8 @@ project it was and whether the conversation was worth anything.
 
 `wingroup crashed` answers that. The group that lost a session is flagged on the
 bar, and one command relaunches every lost session in the directory it was
-working in — resuming the actual conversation wherever wingroup knows its id.
+working in — resuming the actual conversation wherever wingroup knows its id, and
+putting the terminal back on the workspace it died on.
 
 ### How a dead session is identified
 
@@ -284,12 +285,17 @@ Three pieces do it:
 - **`wingroup-hook`** is a Claude Code `SessionStart` hook. Claude hands it the
   session id and working directory on stdin and it files them under the scope
   the terminal is running in. This is the only source of session ids anywhere on
-  the machine; nothing else can work one out, before or after the kill.
+  the machine; nothing else can work one out, before or after the kill. It is
+  also the only source of the directory a session can be *resumed* from — see
+  [The directory a resume is run
+  from](#the-directory-a-resume-is-run-from) for why that is not the same
+  directory as the one the session is sitting in.
 - **`wingroup-oomwatch`** runs from login. It follows the user journal for
   oom-kill lines, and every 15 seconds it rescans `/proc` for live `claude`
   processes to keep the map current. That scan is the fallback for sessions that
   predate the hook: it cannot learn an id, but it does learn that *something* was
-  running in that scope, and in which directory. After every scan it also writes
+  running in that scope, in which directory, and — asking the compositor once a
+  pass — which workspace its window is on. After every scan it also writes
   the map out to disk, which is what the next boot's restore reads instead of
   guessing — see [Startup
   integration](#startup-integration-with-restore-claudesh).
@@ -304,6 +310,52 @@ reboot. A crash you have not dealt with by the time you reboot is one the boot
 restore already handles from the other end: the session was still in the map
 when the machine went down, so it is in the snapshot and comes back with
 everything else.
+
+### The directory a resume is run from
+
+A session has two working directories and they are not usually the same one.
+
+There is the directory it is *standing in* — what `/proc/<pid>/cwd` says, which
+the scan overwrites every 15 seconds, and which moves the moment the session
+`cd`s anywhere: into a worktree, into a subdirectory to run a build, anywhere at
+all. And there is the directory it was *started in*, which is the one
+`claude --resume <id>` has to be run from. Claude finds a conversation by
+encoding that directory into the name of the folder its transcript lives in, so a
+resume from anywhere else looks under a path with nothing in it. It does not
+fail: it
+starts a fresh conversation, in the right place, with nothing in it.
+
+That is what made restored sessions come back empty. Measured on a real machine
+after one reboot, two of twelve — both of them sessions that had moved into a
+worktree hours earlier — were relaunched from the worktree and quietly began
+again. From the outside it reads as the restore having lost everything, because
+you cannot tell "resumed and had nothing to say" from "never resumed".
+
+So the two directories are recorded separately. The hook is handed the starting
+directory by Claude and writes it down once, and the scan never touches it: the
+scan is right about where the process is now and is not entitled to an opinion
+about where it began. `wingroup crashed --restore` and the boot restore both
+resume from the recorded one and fall back to the live one when there is none.
+
+### Where a restored session comes back
+
+On the workspace it was on when it died, not the one its project says it belongs
+to.
+
+Those differ more often than you would think. A session in a project no group
+claims was still *somewhere*, and filing it by project puts it nowhere in
+particular. A session you moved by hand with `wingroup send` was somewhere on
+purpose, and filing it by project drags it back to where you moved it from. Both
+are arrangements you made, and a restore that reconstructs the desktop instead of
+reproducing it undoes them.
+
+The workspace comes from the scan, which asks the compositor once a pass which
+window sits where and matches windows to sessions by scope — the same scope the
+kill line names. It is therefore recorded for sessions that predate the hook too,
+unlike the session id and the resume directory. What it does not cover is a
+session whose window the compositor never answered for, and a session that was
+sitting on a scratchpad: a scratchpad is not an ordinary workspace and cannot be
+restored to by name, so both fall back to being filed by project.
 
 ### The crashed bar state
 
@@ -352,6 +404,15 @@ it prints. You get the project back, not the conversation.
 Sessions started after the hook is registered are resumable by id. In practice
 that means every session opened in a new terminal after you install — the ones
 already open when you ran `./install.sh` stay unresumable until you restart them.
+
+**Such a session has no recorded starting directory either**, for the same
+reason: the hook is the only thing that is ever told one. The restore falls back
+to where the scan last saw the process standing, which is right for a session
+that never `cd`'d and wrong for one that did — and since there is no id to resume
+with, it was going to open a fresh `claude` there in any case. Its workspace
+*is* known, because that comes from the scan rather than the hook, so a pre-hook
+session still comes back where it was even though its conversation does not come
+back at all.
 
 
 ## Keybinds
@@ -614,12 +675,19 @@ one and some do not.
 
 `--restore` relaunches all of them: one terminal per session, opened in the
 directory that session was working in, running `claude --resume <id>` where there
-is an id and a plain `claude` where there is not. A record whose directory no
-longer exists — a worktree since removed, a project since moved — is skipped and
-said so, because opening the terminal in `$HOME` instead would be a session in
-the wrong place under the right name. The list is then cleared **whole**, skips
-included: a directory that is gone can never be restored, and leaving the record
-in would flag its group on the bar forever.
+is an id and a plain `claude` where there is not, and moved back to the workspace
+the session was on when it was killed — see [Where a restored session comes
+back](#where-a-restored-session-comes-back). The directory it opens in is the one
+the session was *started* in where that was recorded, which is not necessarily
+the one it had wandered into by the time it died; [The directory a resume is run
+from](#the-directory-a-resume-is-run-from) says why that distinction is the
+difference between getting the conversation back and getting an empty one.
+
+A record whose directory no longer exists — a worktree since removed, a project
+since moved — is skipped and said so, because opening the terminal in `$HOME`
+instead would be a session in the wrong place under the right name. The list is
+then cleared **whole**, skips included: a directory that is gone can never be
+restored, and leaving the record in would flag its group on the bar forever.
 
 `--clear` is the "I have dealt with these myself" exit — nothing is relaunched,
 the list is emptied, and the bar stops flagging groups that are fine again. Given
@@ -811,6 +879,15 @@ it writes that map out, stamped with the boot it was taken on. At the next boot
 resuming by id where one was recorded and starting a fresh `claude` in the right
 directory where none was. A directory that no longer exists is skipped and said
 so, the way `wingroup crashed --restore` skips one.
+
+The record carries the same two things a crash record does, and for the same
+reasons. The directory a session is resumed from is the one it was *started* in,
+not the one the last scan saw it standing in — [The directory a resume is run
+from](#the-directory-a-resume-is-run-from) has the detail, and this is the path
+that matters most, since a reboot restores every session at once and getting it
+wrong loses every conversation that had moved. And each terminal is put back on
+the workspace it was on rather than filed by project, which is what makes this
+reproduce the desktop you shut down instead of building a tidy one from scratch.
 
 Two honest limits. The snapshot is at most one scan interval stale — 15 seconds
 by default — so a session opened in the last moments before a shutdown may not

@@ -107,7 +107,11 @@ wg_hook_record() {
   # would be a row nothing is ever able to look up.
   [[ -n $scope ]] || return 0
 
-  wg_sessions_record "$scope" "$session" "$cwd" hook
+  # The same directory twice, and they diverge later on purpose. The scan keeps
+  # the first one current as the session moves about; the second is what
+  # `claude --resume` has to be run from, which is the directory Claude hands us
+  # here and nowhere else, so it is written once and never refreshed.
+  wg_sessions_record "$scope" "$session" "$cwd" hook "" "" "$cwd"
 }
 
 wg_hook_record || true

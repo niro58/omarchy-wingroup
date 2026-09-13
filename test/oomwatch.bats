@@ -161,6 +161,35 @@ bar_refreshed() { (( $(refreshes) >= 1 )); }
   [ "$(crash_field cwd)" = "$WG_TMP/projects/shop-web" ]
 }
 
+# Where the session goes back to, which nothing can be asked about afterwards:
+# the window is gone by the time anyone reads the crash list, and the map is the
+# only thing that wrote the answer down while it was still on screen. Without it
+# a restored crash is filed by the project its directory sits in, which is the
+# wrong answer whenever that is not where the user had it -- a project no group
+# claims lands nowhere in particular, and a session moved by hand lands back
+# where it was moved from.
+@test "a crash carries the workspace the session was on" {
+  wg_sessions_record "$WG_SCOPE" "abc-123" "$WG_TMP/projects/shop-web" hook "" "infra"
+  journal_kill "$WG_SCOPE"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$(crashes)" -eq 1 ]
+  [ "$(crash_field workspace)" = "infra" ]
+}
+
+# No compositor, or a session whose window nothing answered for: the field is
+# simply absent, and must stay absent rather than become an empty string. An
+# empty workspace is not a harmless no-op downstream -- it is a name, and
+# dispatching a move to it would send the window somewhere nameless.
+@test "a crash for a session with no workspace carries none" {
+  wg_sessions_record "$WG_SCOPE" "abc-123" "$WG_TMP/projects/shop-web" hook
+  journal_kill "$WG_SCOPE"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$(crashes)" -eq 1 ]
+  [ "$(jq '.crashed[0] | has("workspace")' <<<"$(wg_crashed_read)")" = "false" ]
+}
+
 # systemd logs the same failure more than once often enough, and a watcher
 # restarted against a journal it has already seen would read it again.
 @test "a repeated kill line for the same scope does not double-record" {
@@ -389,13 +418,35 @@ bar_refreshed() { (( $(refreshes) >= 1 )); }
 # for everything else it is used for and useless to a restore. So every scan
 # also writes it out to the state directory, stamped with the boot it describes.
 
-# A snapshot as the watcher on some other boot left it behind.
+# A snapshot as the watcher on some other boot left it behind. $5 is the resume
+# directory, and it is optional because the entry a scan alone produces has no
+# such field at all -- which is the case the fallback exists for.
 wg_snapshot_from_boot() {
-  local boot="$1" scope="$2" session="$3" cwd="$4"
+  local boot="$1" scope="$2" session="$3" cwd="$4" resume="${5:-}"
   mkdir -p "$WG_STATE_DIR"
   jq -n --arg boot "$boot" --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" \
-     '{boot: $boot, sessions: {($scope): {session: $session, cwd: $cwd, source: "scan", seen: 0}}}' \
+     --arg resume "$resume" \
+     '{boot: $boot,
+       sessions: {($scope): ({session: $session, cwd: $cwd, source: "scan", seen: 0}
+                             + (if $resume == "" then {} else {resume_cwd: $resume} end))}}' \
      >"$WG_SNAPSHOT_FILE"
+}
+
+# The directory the restore will actually run `claude --resume` from. The scan
+# rewrites cwd every fifteen seconds with wherever the process is standing, so
+# the two differ for any session that has cd'd anywhere since it started -- and
+# Claude looks a conversation up by the directory that encodes to its transcript
+# folder, so resuming from the wrong one finds nothing and quietly starts
+# afresh. Measured after one reboot: two of twelve sessions came back empty,
+# which from the outside reads as the restore having lost all of them.
+@test "the snapshot row gives the resume directory, not the one it wandered to" {
+  wg_snapshot_from_boot "$WG_BOOT_BEFORE" "$WG_SCOPE" "sess-1" \
+    "$WG_TMP/projects/shop-web/.worktrees/fix" "$WG_TMP/projects/shop-web"
+
+  run wg_snapshot_previous_rows
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | cut -f1)" = "sess-1" ]
+  [ "$(printf '%s' "$output" | cut -f2)" = "$WG_TMP/projects/shop-web" ]
 }
 
 # There is no shutdown hook to be had -- a machine can lose power, and a session
