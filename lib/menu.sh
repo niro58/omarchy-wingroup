@@ -84,19 +84,42 @@ wg_menu_build() {
     esac
   done <<<"$table"
 
+  # Which monitor every workspace is on, in one query, so that a group can say
+  # where it is rather than leaving it to be worked out. A group whose workspace
+  # does not exist yet -- nobody has opened a window in it -- is on no monitor,
+  # and the lookup simply misses.
+  local -A on_monitor=()
+  local ws mon
+  while IFS=$'\t' read -r ws mon; do
+    [[ -n $ws ]] || continue
+    on_monitor[$ws]="$mon"
+  done < <(wg_hypr_query workspaces | jq -r '.[] | [.name, .monitor] | @tsv')
+
   # Groups first: switching to one is what the picker gets opened for.
   #
   # Name, label and pinned monitor together, NUL-delimited, in one jq: a label
   # is free text and could hold a tab or a newline.
-  local name label monitor entry
+  local name label monitor entry where
   while IFS= read -r -d '' name && IFS= read -r -d '' label && IFS= read -r -d '' monitor; do
     [[ -n $name ]] || continue
     entry="$(printf '▸ %-18s %d windows · %d idle · %d busy' \
       "$label" "${wins[g:$name]:-0}" "${idles[g:$name]:-0}" "${busies[g:$name]:-0}")"
-    # A group pinned to a monitor always opens there; say which, so the pin is
-    # visible somewhere other than state.json.
-    if [[ -n $monitor ]]; then
-      entry+=" · on $monitor"
+    # Which monitor the group is on, and -- when it is not the same answer --
+    # which one it is pinned to.
+    #
+    # The entry used to name the pin alone, which is the wrong half of the pair
+    # to show on a desktop with two screens: a pin says where the group will be
+    # put next, and the question being asked of a list of groups is where they
+    # are. Worse, an unpinned group said nothing at all, so the common case --
+    # no pins anywhere -- was the case that answered nothing.
+    where="${on_monitor[$name]:-}"
+    if [[ -n $where ]]; then
+      entry+=" · on $where"
+      if [[ -n $monitor && $monitor != "$where" ]]; then
+        entry+=" · pinned $monitor"
+      fi
+    elif [[ -n $monitor ]]; then
+      entry+=" · pinned $monitor"
     fi
     printf 'group:%s\t%s\n' "$name" "$entry"
   done < <(jq -j '.groups[]?
@@ -178,27 +201,36 @@ wg_group_menu_build() {
 
 # The monitors to choose between, once a group has been picked to move.
 #
-# The pin the group already has is marked rather than left out. A list of two
+# Every monitor is listed, including the one the group is on. A list of two
 # monitors showing one of them is not a shorter list, it is a list with
-# something missing, and the entry that is missing is the one that would tell
-# you where the group is pinned now.
+# something missing -- and what is missing is the entry that would have told you
+# where the group is now.
 #
-# Unpinning is only offered when there is a pin to remove: an entry that does
+# Where it is and where it is pinned are marked separately, because they are
+# separate facts and they disagree more often than not: a pin is honoured when
+# the group is next moved, so a group can sit on one screen for days with a pin
+# naming the other. Saying only "pinned" would leave the user to guess which of
+# the two the group is actually on, and guessing is the thing this is here to
+# stop.
+#
+# Unpinning is offered only when there is a pin to remove: an entry that does
 # nothing is an entry that has to be read and dismissed every time.
 wg_monitor_menu_build() {
-  local name="$1" state="${2:-$(wg_state_read)}" pinned monitor
+  local name="$1" state="${2:-$(wg_state_read)}" pinned lives_on monitor note
   pinned="$(wg_state_group_field "$name" monitor "$state")"
+  lives_on="$(wg_group_monitor "$name")"
 
   while IFS= read -r monitor; do
     [[ -n $monitor ]] || continue
+    note=""
+    [[ $monitor != "$lives_on" ]] || note="on this one now"
     if [[ $monitor == "$pinned" ]]; then
-      printf 'mon:%s\t%s\n' "$monitor" "$monitor — pinned here now"
-    else
-      printf 'mon:%s\t%s\n' "$monitor" "$monitor"
+      note="${note:+$note, }pinned here"
     fi
+    printf 'mon:%s\t%s\n' "$monitor" "$monitor${note:+ — $note}"
   done < <(wg_hypr_query monitors | jq -r '.[].name')
 
-  [[ -z $pinned ]] || printf 'mon:-\t%s\n' "Unpin — open wherever it already lives"
+  [[ -z $pinned ]] || printf 'mon:-\t%s\n' "Unpin — leave it wherever it is"
 }
 
 # The confirmation in front of removing a group.

@@ -295,17 +295,46 @@ EOF
   [[ "$display" == *"remove a group"* ]]
 }
 
-# state.json has carried a per-group monitor since the first version and
-# nothing ever read it; a pin nobody can see is a pin nobody trusts.
-@test "a group pinned to a monitor says so in its entry" {
+# The entry named the pin and nothing else, which is the wrong half of the pair:
+# a pin says where the group will be put next, and what a list of groups is
+# asked is where they are. The fixture desktop has shop on eDP-2 and site on
+# DP-1, neither of them pinned.
+@test "a group entry says which monitor it is on" {
+  display="$(wg_menu_build | grep '^group:site' | cut -f2)"
+  [[ "$display" == *"on DP-1"* ]]
+  display="$(wg_menu_build | grep '^group:shop' | cut -f2)"
+  [[ "$display" == *"on eDP-2"* ]]
+}
+
+# The two disagree until something acts on the pin, so both get said.
+@test "a group pinned away from where it is says both" {
+  wg_patch_state '.groups[1].monitor = "eDP-2"'
+  display="$(wg_menu_build | grep '^group:site' | cut -f2)"
+  [[ "$display" == *"on DP-1"* ]]
+  [[ "$display" == *"pinned eDP-2"* ]]
+}
+
+# And when they agree there is one fact, not two.
+@test "a group pinned to the monitor it is already on says it once" {
   wg_patch_state '.groups[1].monitor = "DP-1"'
   display="$(wg_menu_build | grep '^group:site' | cut -f2)"
   [[ "$display" == *"on DP-1"* ]]
+  [[ "$display" != *"pinned"* ]]
 }
 
-@test "a group with no pin says nothing about monitors" {
-  display="$(wg_menu_build | grep '^group:site' | cut -f2)"
+# fleet has no workspace in the fixture: nobody has opened a window in it, so
+# Hyprland has never heard of it and it is on no monitor at all.
+@test "a group with no workspace yet reports only its pin" {
+  wg_patch_state '.groups[2].monitor = "DP-1"'
+  display="$(wg_menu_build | grep '^group:fleet' | cut -f2)"
+  [[ "$display" == *"pinned DP-1"* ]]
   [[ "$display" != *" on "* ]]
+}
+
+@test "a group with no workspace and no pin says nothing about monitors" {
+  display="$(wg_menu_build | grep '^group:fleet' | cut -f2)"
+  [[ "$display" != *" on "* ]]
+  [[ "$display" != *"pinned"* ]]
 }
 
 # The pin could be set from a terminal and read in the picker, and nowhere in
@@ -320,14 +349,37 @@ EOF
   [ "$names" = "mon:eDP-2,mon:DP-1" ]
 }
 
-# A list of two monitors showing one of them is a list with something missing,
-# and what is missing is where the group is pinned now.
-@test "the monitor chooser marks the pin the group already has" {
+# Where the group is, which is the question someone moving it between two
+# screens is actually asking. site is on DP-1 in the fixture.
+@test "the monitor chooser says which monitor the group is on now" {
+  display="$(wg_monitor_menu_build site | grep '^mon:DP-1' | cut -f2)"
+  [[ "$display" == *"on this one now"* ]]
+  display="$(wg_monitor_menu_build site | grep '^mon:eDP-2' | cut -f2)"
+  [[ "$display" != *"now"* ]]
+}
+
+# Two separate facts about two different monitors, and no way to read one as
+# the other.
+@test "the monitor chooser marks the pin apart from where the group is" {
+  wg_patch_state '.groups[1].monitor = "eDP-2"'
+  display="$(wg_monitor_menu_build site | grep '^mon:DP-1' | cut -f2)"
+  [[ "$display" == *"on this one now"* ]]
+  [[ "$display" != *"pinned"* ]]
+  display="$(wg_monitor_menu_build site | grep '^mon:eDP-2' | cut -f2)"
+  [[ "$display" == *"pinned here"* ]]
+  [[ "$display" != *"now"* ]]
+}
+
+@test "one monitor carries both marks when the pin is where the group is" {
   wg_patch_state '.groups[1].monitor = "DP-1"'
   display="$(wg_monitor_menu_build site | grep '^mon:DP-1' | cut -f2)"
-  [[ "$display" == *"pinned here now"* ]]
-  display="$(wg_monitor_menu_build site | grep '^mon:eDP-2' | cut -f2)"
-  [[ "$display" != *"pinned"* ]]
+  [[ "$display" == *"on this one now, pinned here"* ]]
+}
+
+# A group Hyprland has never heard of is on nothing, and no entry may claim it.
+@test "the monitor chooser marks nothing for a group with no workspace" {
+  count="$(wg_monitor_menu_build fleet | grep -c "now" || true)"
+  [ "$count" -eq 0 ]
 }
 
 @test "the monitor chooser offers to unpin a group that is pinned" {

@@ -109,8 +109,7 @@ cmd_activate() {
     # is not enough on its own, the workspace has to be dragged over to it.
     # That move is the whole feature.
     wg_hypr_dispatch focusmonitor "$monitor"
-    lives_on="$(wg_hypr_query workspaces \
-      | jq -r --arg w "$target" 'first(.[] | select(.name == $w) | .monitor) // empty')"
+    lives_on="$(wg_group_monitor "$target")"
     if [[ -n $lives_on && $lives_on != "$monitor" ]]; then
       wg_hypr_dispatch moveworkspacetomonitor "name:$target $monitor"
     fi
@@ -146,6 +145,21 @@ cmd_monitor() {
   # shellcheck disable=SC2016  # $n and $m are jq variables, not shell ones
   wg_state_update '(.groups[] | select(.name == $n) | .monitor) = $m' \
     --arg n "$name" --arg m "$monitor"
+
+  # And move it now, rather than leaving the pin to be honoured by the next
+  # switch to the group. Recording where a group should be and leaving it where
+  # it was reads as a command that did nothing: asked to move a group to the
+  # other screen, the user watches that screen, and nothing arrives on it.
+  #
+  # Only when the group has a workspace to move. A group nobody has opened a
+  # window in yet is a row in state.json that Hyprland has never heard of, and
+  # dispatching at it would be an error over a group that is behaving normally:
+  # its pin is waiting for it, which is what a pin is for.
+  local lives_on
+  lives_on="$(wg_group_monitor "$name")"
+  if [[ -n $lives_on && $lives_on != "$monitor" ]]; then
+    wg_hypr_dispatch moveworkspacetomonitor "name:$name $monitor"
+  fi
   wg_refresh
 }
 
@@ -311,11 +325,23 @@ cmd_monitor_interactive() {
   [[ -n $action ]] || return 0
   monitor="${action#mon:}"
 
+  # Asked before the move, because afterwards every answer is the new monitor.
+  local lives_on
+  lives_on="$(wg_group_monitor "$name")"
+
   cmd_monitor "$name" "$monitor"
+
+  # Three different things happened and they do not read alike: the group was
+  # carried across, it was already there, or it has no windows yet and the pin
+  # is all there is to report.
   if [[ $monitor == - ]]; then
     wg_notify "wingroup" "$label is no longer pinned to a monitor."
-  else
+  elif [[ -z $lives_on ]]; then
     wg_notify "wingroup" "$label opens on $monitor from now on."
+  elif [[ $lives_on == "$monitor" ]]; then
+    wg_notify "wingroup" "$label is on $monitor, and stays there."
+  else
+    wg_notify "wingroup" "$label moved from $lives_on to $monitor."
   fi
 }
 
