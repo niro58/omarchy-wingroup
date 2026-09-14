@@ -346,26 +346,41 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 # `wingroup monitor` has existed since the first version and could only be
 # reached from a terminal, which is the one place a user who lives in SUPER+G
 # never goes. Pick the group, then the monitor.
-@test "the picker pins the group to the monitor that was chosen" {
-  export WG_WALKER_PICKS="5 1 1"
+# site is on DP-1 in the fixture, so index 0 -- eDP-2 -- is the other screen.
+@test "the picker moves the group to the monitor that was chosen" {
+  export WG_WALKER_PICKS="5 1 0"
   wingroup menu
   run bash -c "jq -r '.groups[1].monitor' '$WG_STATE_DIR/state.json'"
-  [ "$output" = "DP-1" ]
-  [[ "$(notifications)" == *"site opens on DP-1"* ]]
+  [ "$output" = "eDP-2" ]
+  [ "$(dispatches)" = "moveworkspacetomonitor name:site eDP-2" ]
 }
 
-# The pin is state, not a move: cmd_activate is what drags the workspace across,
-# the next time the group is switched to.
-@test "pinning from the picker moves no window by itself" {
+# Three things can have happened and they do not read alike.
+@test "the picker says the group was carried across, and from where" {
+  export WG_WALKER_PICKS="5 1 0"
+  wingroup menu
+  [[ "$(notifications)" == *"site moved from DP-1 to eDP-2"* ]]
+}
+
+@test "the picker says a group already on that monitor is staying" {
   export WG_WALKER_PICKS="5 1 1"
   wingroup menu
+  [[ "$(notifications)" == *"site is on DP-1, and stays there"* ]]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# fleet is index 2 in the group chooser and has no workspace to move.
+@test "the picker says a group with no windows will open there" {
+  export WG_WALKER_PICKS="5 2 1"
+  wingroup menu
+  [[ "$(notifications)" == *"fleet opens on DP-1 from now on"* ]]
   [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
 # The unpin entry is last, and only there when the group has a pin -- so with
 # two monitors it is index 2.
 @test "the picker clears a pin the group already had" {
-  wg_patch_state '.groups[1].monitor = "DP-1"'
+  wg_patch_state '.groups[1].monitor = "eDP-2"'
   export WG_WALKER_PICKS="5 1 2"
   wingroup menu
   run bash -c "jq -r '.groups[1].monitor' '$WG_STATE_DIR/state.json'"
@@ -454,6 +469,39 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 }
 
 # --- pinning a group to a monitor ---
+
+# Recording where a group should be and leaving it where it was reads as a
+# command that did nothing: asked to move a group to the other screen, the user
+# watches that screen and nothing arrives on it. shop is on eDP-2 in the fixture.
+@test "monitor moves the group to the monitor it was pinned to" {
+  wingroup monitor shop DP-1
+  [ "$(dispatches)" = "moveworkspacetomonitor name:shop DP-1" ]
+}
+
+# A group nobody has opened a window in is a row in state.json that Hyprland has
+# never heard of. Dispatching at it is an error over a group behaving normally:
+# the pin waits for it, which is what a pin is for. fleet has no workspace.
+@test "monitor moves nothing for a group with no workspace yet" {
+  wingroup monitor fleet DP-1
+  [ ! -s "$WG_DISPATCH_LOG" ]
+  run bash -c "jq -r '.groups[2].monitor' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "DP-1" ]
+}
+
+# site is already on DP-1: pinning it there is not a move.
+@test "monitor moves nothing when the group is already on that monitor" {
+  wingroup monitor site DP-1
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# Unpinning says where the group should go next, not where it is, so it moves
+# nothing at all.
+@test "clearing a pin moves nothing" {
+  wingroup monitor shop DP-1
+  : >"$WG_DISPATCH_LOG"
+  wingroup monitor shop -
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
 
 @test "monitor pins a group to a monitor that exists" {
   wingroup monitor shop DP-1
