@@ -127,6 +127,36 @@ feed() {
   [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
+# Opening a terminal on a group's workspace is how a user says which group they
+# want it in. Filing it by its project took it off the screen they were looking
+# at and put it on one they were not -- for a window they had opened a second
+# earlier, deliberately, while standing in the group it was supposed to join.
+#
+# The fixture's 0xaaa1 belongs to shop by project and sits on workspace 1, so
+# naming a *different* group "1" makes it a window opened inside a group that
+# does not own it -- exactly the case that used to be dragged away.
+@test "a window opened on another group's workspace is left where it is" {
+  wg_state_write "$(jq '.groups[1].name = "1" | .groups[1].label = "one"' "$WG_STATE_DIR/state.json")"
+  wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# And the catchall does not get to overrule it either: a window already in a
+# group is not homeless, whatever its project says.
+@test "a window opened in a group is not sent to the catchall" {
+  wg_state_write "$(jq '.groups[1].name = "1" | .catchall = "fleet"' "$WG_STATE_DIR/state.json")"
+  wg_daemon_handle_line "openwindow>>aaa6,1,Alacritty,dev@host:~"
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# The window that still needs filing is the one that opened somewhere that is
+# not a group at all, which is the case this whole path exists for.
+@test "a window opened outside every group is still filed" {
+  wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
+  run dispatches
+  [ "$output" = "movetoworkspace name:shop,address:0xaaa1" ]
+}
+
 @test "a burst of title events collapses to one refresh" {
   export WG_REFRESH_DEBOUNCE_MS=5000
   wg_daemon_handle_line "windowtitle>>aaa1"

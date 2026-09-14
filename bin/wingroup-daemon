@@ -156,6 +156,25 @@ wg_daemon_open_window() {
   floating="$(cut -f4 <<<"$row")"
   [[ $floating == "true" ]] && return 0
   workspace="$(cut -f3 <<<"$row")"
+
+  # A window that opened on a group's workspace is already in a group, and the
+  # user put it there -- by being on that workspace when they opened it. Filing
+  # it by its project would move it off the screen they are looking at to one
+  # they are not, which is the opposite of what opening a terminal is for.
+  #
+  # This is the same rule the picker and the bar count by: a group is a named
+  # workspace, so where a window is decides which group it is in, not who owns
+  # the directory it happens to be running in. The daemon was the last place
+  # still answering to the other one, and it was answering with a move.
+  #
+  # Filing is for windows that opened somewhere that is not a group -- a
+  # numbered workspace, whatever the compositor had focused at login -- which is
+  # every window that needs filing and none that does not.
+  if [[ -n $(jq -r --arg w "$workspace" \
+        'first(.groups[]? | select(.name == $w) | .name) // empty' <<<"$state") ]]; then
+    return 0
+  fi
+
   group="$(cut -f5 <<<"$row")"
 
   # Only when the shell had not spawned yet is it worth waiting and asking again.
