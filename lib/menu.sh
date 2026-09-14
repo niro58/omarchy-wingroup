@@ -110,13 +110,14 @@ wg_menu_build() {
   # windows open they used to land some twenty rows down -- far enough that
   # "+ new group…" read as something the picker did not have.
   #
-  # The two that make and unmake a group sit together, then the two that act on
+  # The three that act on one group sit together, then the two that act on
   # everything at once. "− remove a group…" only opens a chooser and then a
   # confirmation, so landing on it by mistake costs a keystroke, not a group.
   local auto
   auto="$(jq -r 'if .auto then "on" else "off" end' <<<"$state")"
   printf 'new\t%s\n' "+ new group…"
   printf 'delete\t%s\n' "− remove a group…"
+  printf 'monitor\t%s\n' "⇄ move a group to a monitor…"
   printf 'tidy\t%s\n' "⟳ tidy — file every window by its project"
   printf 'toggle-auto\t%s\n' "⏻ auto-assign: $auto"
 
@@ -173,6 +174,31 @@ wg_group_list_build() {
 wg_group_menu_build() {
   wg_group_list_build "${1:-}"
   printf 'new\t%s\n' "+ new group…"
+}
+
+# The monitors to choose between, once a group has been picked to move.
+#
+# The pin the group already has is marked rather than left out. A list of two
+# monitors showing one of them is not a shorter list, it is a list with
+# something missing, and the entry that is missing is the one that would tell
+# you where the group is pinned now.
+#
+# Unpinning is only offered when there is a pin to remove: an entry that does
+# nothing is an entry that has to be read and dismissed every time.
+wg_monitor_menu_build() {
+  local name="$1" state="${2:-$(wg_state_read)}" pinned monitor
+  pinned="$(wg_state_group_field "$name" monitor "$state")"
+
+  while IFS= read -r monitor; do
+    [[ -n $monitor ]] || continue
+    if [[ $monitor == "$pinned" ]]; then
+      printf 'mon:%s\t%s\n' "$monitor" "$monitor — pinned here now"
+    else
+      printf 'mon:%s\t%s\n' "$monitor" "$monitor"
+    fi
+  done < <(wg_hypr_query monitors | jq -r '.[].name')
+
+  [[ -z $pinned ]] || printf 'mon:-\t%s\n' "Unpin — open wherever it already lives"
 }
 
 # The confirmation in front of removing a group.

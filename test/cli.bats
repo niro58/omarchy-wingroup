@@ -154,10 +154,11 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
   [ "$(dispatches)" = "workspace name:site" ]
 }
 
-# Three groups, then new/delete/tidy/toggle-auto, then the separator: the first
-# window is index 8 now that the actions no longer sit at the bottom of the list.
+# Three groups, then new/delete/monitor/tidy/toggle-auto, then the separator:
+# the first window is index 9 now that the actions no longer sit at the bottom
+# of the list.
 @test "menu focuses the window the picker returned" {
-  export WG_WALKER_PICK=8
+  export WG_WALKER_PICK=9
   wingroup menu
   [[ "$(dispatches)" == focuswindow* ]]
 }
@@ -337,6 +338,64 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
   export WG_WALKER_PICKS="1"
   wingroup menu
   [[ "$(notifications)" == *"no groups to remove"* ]]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# --- moving a group to a monitor from the picker ---
+
+# `wingroup monitor` has existed since the first version and could only be
+# reached from a terminal, which is the one place a user who lives in SUPER+G
+# never goes. Pick the group, then the monitor.
+@test "the picker pins the group to the monitor that was chosen" {
+  export WG_WALKER_PICKS="5 1 1"
+  wingroup menu
+  run bash -c "jq -r '.groups[1].monitor' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "DP-1" ]
+  [[ "$(notifications)" == *"site opens on DP-1"* ]]
+}
+
+# The pin is state, not a move: cmd_activate is what drags the workspace across,
+# the next time the group is switched to.
+@test "pinning from the picker moves no window by itself" {
+  export WG_WALKER_PICKS="5 1 1"
+  wingroup menu
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# The unpin entry is last, and only there when the group has a pin -- so with
+# two monitors it is index 2.
+@test "the picker clears a pin the group already had" {
+  wg_patch_state '.groups[1].monitor = "DP-1"'
+  export WG_WALKER_PICKS="5 1 2"
+  wingroup menu
+  run bash -c "jq -r '.groups[1].monitor' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "null" ]
+  [[ "$(notifications)" == *"no longer pinned"* ]]
+}
+
+@test "backing out of the monitor chooser changes no pin" {
+  export WG_WALKER_PICKS="5 1"
+  wingroup menu
+  run bash -c "jq -r '.groups[1].monitor' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "null" ]
+  [ ! -s "$WG_NOTIFY_LOG" ]
+}
+
+@test "backing out of the group chooser changes no pin either" {
+  export WG_WALKER_PICKS="5"
+  wingroup menu
+  run bash -c "jq -r '[.groups[].monitor] | map(tostring) | join(\",\")' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "null,null,null" ]
+  [ ! -s "$WG_NOTIFY_LOG" ]
+}
+
+# Same empty-chooser trap the remove entry has: an empty walker reads as a
+# broken entry rather than as "there is nothing here to do".
+@test "the move entry says so when there are no groups at all" {
+  wg_patch_state '.groups = []'
+  export WG_WALKER_PICKS="2"
+  wingroup menu
+  [[ "$(notifications)" == *"no groups to move"* ]]
   [ ! -s "$WG_DISPATCH_LOG" ]
 }
 

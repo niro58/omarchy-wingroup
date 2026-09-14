@@ -285,6 +285,40 @@ cmd_delete_interactive() {
   wg_notify "wingroup" "Removed group $label. Its windows were left where they are."
 }
 
+# Pinning from the picker, in the same two steps removing a group takes and for
+# the same reason: the action on its own does not say which group it acts on.
+#
+# Choosing a monitor pins the group rather than moving it this instant -- the
+# move happens the next time the group is switched to, which is what cmd_monitor
+# has always done. The notification says "opens on" and not "moved to" so that
+# the entry does not promise something the user can see has not happened.
+cmd_monitor_interactive() {
+  local state action name label monitor
+
+  state="$(wg_state_read)"
+  if [[ -z "$(wg_state_group_names "$state")" ]]; then
+    wg_notify "wingroup" "There are no groups to move."
+    return 0
+  fi
+
+  action="$(wg_group_list_build "$state" | wg_menu_run 'Move which group?')"
+  [[ -n $action ]] || return 0
+  name="${action#group:}"
+  label="$(wg_state_group_field "$name" label "$state")"
+  [[ -n $label ]] || label="$name"
+
+  action="$(wg_monitor_menu_build "$name" "$state" | wg_menu_run "Move $label to")"
+  [[ -n $action ]] || return 0
+  monitor="${action#mon:}"
+
+  cmd_monitor "$name" "$monitor"
+  if [[ $monitor == - ]]; then
+    wg_notify "wingroup" "$label is no longer pinned to a monitor."
+  else
+    wg_notify "wingroup" "$label opens on $monitor from now on."
+  fi
+}
+
 cmd_rename() {
   local name="${1:?}" label="${2:?}" state
   state="$(wg_state_read)"
@@ -815,6 +849,7 @@ cmd_menu() {
     window:*)      wg_hypr_dispatch focuswindow "address:${action#window:}" ;;
     new)           cmd_new_interactive ;;
     delete)        cmd_delete_interactive ;;
+    monitor)       cmd_monitor_interactive ;;
     tidy)          cmd_tidy ;;
     toggle-auto)   cmd_toggle_auto ;;
   esac
