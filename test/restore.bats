@@ -50,19 +50,28 @@ teardown() { wg_teardown_tmp; }
 # row without one is a row the restore must not move.
 wg_write_snapshot() {
   local file="$1" boot="$2"; shift 2
-  local entry sessions='{}' n=0 rest cwd ws
+  local entry sessions='{}' n=0 rest cwd ws x y mon
+  # "session:dir[:workspace[:x:y[:monitor]]]" -- the later fields optional, as a
+  # record written before positions were is exactly a record without them.
   for entry in ${@+"$@"}; do
     n=$(( n + 1 ))
     rest="${entry#*:}"
     cwd="${rest%%:*}"
-    ws=""
-    [[ $rest == *:* ]] && ws="${rest#*:}"
-    # The scope keys are arbitrary here: the restore never looks at them, it
-    # reads the session, cwd and workspace out of each value.
+    ws="" x="" y="" mon=""
+    if [[ $rest == *:* ]]; then
+      ws="${rest#*:}"
+      # Only numbers after the workspace are a position: a workspace name can
+      # hold a colon of its own, and special:magic is one.
+      if [[ $ws =~ ^(.*):(-?[0-9]+):(-?[0-9]+)(:([^:]*))?$ ]]; then
+        ws="${BASH_REMATCH[1]}" x="${BASH_REMATCH[2]}" y="${BASH_REMATCH[3]}" mon="${BASH_REMATCH[5]}"
+      fi
+    fi
     sessions="$(jq --arg scope "scope-$n.scope" --arg session "${entry%%:*}" \
-                   --arg cwd "$cwd" --arg ws "$ws" \
+                   --arg cwd "$cwd" --arg ws "$ws" --arg x "$x" --arg y "$y" --arg mon "$mon" \
                    '.[$scope] = ({session: $session, cwd: $cwd, source: "scan", seen: 0}
-                                 + (if $ws == "" then {} else {workspace: $ws} end))' \
+                                 + (if $ws == "" then {} else {workspace: $ws} end)
+                                 + (if $x == "" then {} else {at: [($x | tonumber), ($y | tonumber)]} end)
+                                 + (if $mon == "" then {} else {monitor: $mon} end))' \
                    <<<"$sessions")"
   done
   mkdir -p "$WG_STATE_DIR"
@@ -70,7 +79,6 @@ wg_write_snapshot() {
      '{boot: $boot, sessions: $sessions}' >"$file"
 }
 
-# The record a previous boot left behind -- the case a restore exists for.
 wg_snapshot_from_last_boot() {
   wg_write_snapshot "$WG_SNAPSHOT" "$WG_BOOT_BEFORE" ${@+"$@"}
 }
@@ -93,25 +101,29 @@ wg_make_dirs() {
 # here: a tidy desktop gives tidy nothing to do, and a desktop of freshly
 # restored terminals is not in the fixture at all.
 wg_write_clients() {
-  local entry addr pid ws clients='[]'
+  local entry addr pid ws x y clients='[]'
+  # "address:pid:workspace[:x:y]"
   for entry in ${@+"$@"}; do
-    addr="${entry%%:*}"
-    pid="${entry#*:}"
-    ws="${pid#*:}"
-    pid="${pid%%:*}"
+    IFS=: read -r addr pid ws x y <<<"$entry"
     clients="$(jq --arg a "$addr" --argjson p "$pid" --arg w "$ws" \
+                  --argjson x "${x:-0}" --argjson y "${y:-0}" \
                   '. + [{address: $a, pid: $p, class: "Alacritty", title: "session",
-                         floating: false, workspace: {id: 1, name: $w}}]' <<<"$clients")"
+                         floating: false, at: [$x, $y], workspace: {id: 1, name: $w}}]' <<<"$clients")"
   done
   printf '%s\n' "$clients" >"$WG_TMP/clients.json"
   export WG_FIXTURE_CLIENTS="$WG_TMP/clients.json"
 }
 
-# A restored terminal, in $WG_PROC_DIR: the window is the terminal process and
-# its child is the `bash -c` the relaunch handed the session id to, which is
-# where the id can be read back off the command line. With no id given, the
-# child is the plain claude a pre-hook session comes back as, and its directory
-# is all there is to recognise it by.
+# "workspace:monitor" for every workspace the compositor should report.
+wg_write_workspaces() {
+  local entry wss='[]'
+  for entry in ${@+"$@"}; do
+    wss="$(jq --arg n "${entry%%:*}" --arg m "${entry#*:}" '. + [{id: 1, name: $n, monitor: $m}]' <<<"$wss")"
+  done
+  printf '%s\n' "$wss" >"$WG_TMP/workspaces.json"
+  export WG_FIXTURE_WORKSPACES="$WG_TMP/workspaces.json"
+}
+
 wg_fake_terminal() {
   local pid="$1" child="$2" cwd="$3" session="${4:-}"
   mkdir -p "$WG_PROC_DIR/$pid" "$WG_PROC_DIR/$child" "$cwd"
@@ -573,6 +585,189 @@ EOF
   [[ "$output" == *"place  $legacy  misc"* ]]
   run dispatches
   [ "$output" = "movetoworkspacesilent name:misc,address:0xbbb1" ]
+}
+
+# One conversation open in two terminals is two windows, and each goes back to
+# its own workspace. The placement used to keep one workspace per session id, so
+# both windows went wherever the later row said.
+@test "two terminals on one conversation are each put back where they were" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_make_dirs "abc-123:$shop:misc"
+  wg_snapshot_from_last_boot "abc-123:$shop:misc" "abc-123:$shop:ads"
+  wg_fake_terminal 2001 2002 "$shop" "abc-123"
+  wg_fake_terminal 2003 2004 "$shop" "abc-123"
+  wg_write_clients "0xbbb1:2001:1" "0xbbb2:2003:1"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run dispatches
+  [ "${lines[0]}" = "movetoworkspacesilent name:misc,address:0xbbb1" ]
+  [ "${lines[1]}" = "movetoworkspacesilent name:ads,address:0xbbb2" ]
+}
+
+# --- the monitor a group was on ----------------------------------------------
+#
+# A workspace is created on whichever monitor has focus when it is first used,
+# and at login that is one monitor for every group.
+
+@test "a workspace that came back on the wrong monitor is moved to the one it was on" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_make_dirs "abc-123:$shop"
+  wg_snapshot_from_last_boot "abc-123:$shop:misc:0:0:DP-1"
+  wg_fake_terminal 2001 2002 "$shop" "abc-123"
+  wg_write_clients "0xbbb1:2001:misc"
+  wg_write_workspaces "misc:eDP-2"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"monitor  misc  DP-1"* ]]
+  run dispatches
+  [ "$output" = "moveworkspacetomonitor name:misc DP-1" ]
+}
+
+@test "a workspace already on its recorded monitor is not moved" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_make_dirs "abc-123:$shop"
+  wg_snapshot_from_last_boot "abc-123:$shop:misc:0:0:DP-1"
+  wg_fake_terminal 2001 2002 "$shop" "abc-123"
+  wg_write_clients "0xbbb1:2001:misc"
+  wg_write_workspaces "misc:DP-1"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# Moving a group onto a screen that is not there any more would lose it.
+@test "a workspace is not sent to a monitor that is no longer plugged in" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_make_dirs "abc-123:$shop"
+  wg_snapshot_from_last_boot "abc-123:$shop:misc:0:0:HDMI-9"
+  wg_fake_terminal 2001 2002 "$shop" "abc-123"
+  wg_write_clients "0xbbb1:2001:misc"
+  wg_write_workspaces "misc:eDP-2"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# --- the order of the tiles inside a group -----------------------------------
+#
+# A restore cannot make terminals arrive in their original order, so it swaps
+# their contents until each session is in the tile it was in. Hyprland's
+# swapwindow acts on the focused window: focus the one in the tile, swap it with
+# the one that belongs there. The fixture's active window is 0xaaa1, and it is
+# given focus back once the swaps are done.
+
+@test "restored terminals are swapped back into the tiles they were in" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  wg_snapshot_from_last_boot "aaa-1:$a:misc:0:0" "bbb-2:$b:misc:800:0"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  # They came back the other way round: b on the left, a on the right.
+  wg_write_clients "0xbbb1:2001:misc:800:0" "0xbbb2:2003:misc:0:0"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"order  misc"* ]]
+  run dispatches
+  [ "${#lines[@]}" -eq 3 ]
+  [ "${lines[0]}" = "focuswindow address:0xbbb2" ]
+  [ "${lines[1]}" = "swapwindow address:0xbbb1" ]
+  [ "${lines[2]}" = "focuswindow address:0xaaa1" ]
+}
+
+@test "terminals already in their recorded tiles are not swapped" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  wg_snapshot_from_last_boot "aaa-1:$a:misc:0:0" "bbb-2:$b:misc:800:0"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_write_clients "0xbbb1:2001:misc:0:0" "0xbbb2:2003:misc:800:0"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *order* ]]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# Three tiles in reading order: a over b in the left column, c on the right.
+# The positions differ between the record and the restore on purpose -- a tile
+# is a position in the order, not a pixel coordinate.
+@test "three terminals are put back in reading order, whatever the coordinates" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform" c="$WG_TMP/projects/fleet-hub"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b" "ccc-3:$c"
+  wg_snapshot_from_last_boot "ccc-3:$c:misc:900:10" "aaa-1:$a:misc:10:10" "bbb-2:$b:misc:10:500"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_fake_terminal 2005 2006 "$c" "ccc-3"
+  # Came back as c, a, b.
+  wg_write_clients "0xccc3:2005:misc:3008:1273" "0xaaa1w:2001:misc:3008:1756" "0xbbb2:2003:misc:3804:1273"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run dispatches
+  # Tile 0 holds c and wants a; tile 1 then holds c and wants b.
+  [ "${lines[0]}" = "focuswindow address:0xccc3" ]
+  [ "${lines[1]}" = "swapwindow address:0xaaa1w" ]
+  [ "${lines[2]}" = "focuswindow address:0xccc3" ]
+  [ "${lines[3]}" = "swapwindow address:0xbbb2" ]
+  [ "${lines[4]}" = "focuswindow address:0xaaa1" ]
+  [ "${#lines[@]}" -eq 5 ]
+}
+
+# A terminal the user opened by hand is not in the record, and keeps its tile.
+@test "a terminal the record does not know keeps its tile" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform" own="$WG_TMP/projects/mine"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  mkdir -p "$own"
+  wg_snapshot_from_last_boot "aaa-1:$a:misc:0:0" "bbb-2:$b:misc:800:0"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_fake_terminal 2007 2008 "$own"
+  wg_write_clients "0xbbb2:2003:misc:0:0" "0xmine:2007:misc:400:0" "0xbbb1:2001:misc:800:0"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run dispatches
+  [ "${lines[0]}" = "focuswindow address:0xbbb2" ]
+  [ "${lines[1]}" = "swapwindow address:0xbbb1" ]
+  [[ "$output" != *0xmine* ]]
+}
+
+# A session that did not come back leaves one fewer to arrange, and the rest
+# still go in their order around the gap.
+@test "a session that did not come back does not stop the others being ordered" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform" c="$WG_TMP/projects/fleet-hub"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b" "ccc-3:$c"
+  wg_snapshot_from_last_boot "aaa-1:$a:misc:0:0" "bbb-2:$b:misc:400:0" "ccc-3:$c:misc:800:0"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2005 2006 "$c" "ccc-3"
+  wg_write_clients "0xccc3:2005:misc:0:0" "0xaaa1w:2001:misc:800:0"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run dispatches
+  [ "${lines[0]}" = "focuswindow address:0xccc3" ]
+  [ "${lines[1]}" = "swapwindow address:0xaaa1w" ]
+}
+
+@test "a dry run says how it would reorder and swaps nothing" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  wg_snapshot_from_last_boot "aaa-1:$a:misc:0:0:DP-1" "bbb-2:$b:misc:800:0:DP-1"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_write_clients "0xbbb1:2001:misc:800:0" "0xbbb2:2003:misc:0:0"
+  wg_write_workspaces "misc:eDP-2"
+
+  run "$WG_ROOT/bin/wingroup-restore" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"monitor  misc  DP-1"* ]]
+  [[ "$output" == *"order  misc  bbb-2 <-> aaa-1"* ]]
+  [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
 # The ordering is the whole point, so the order of the dispatches is what is

@@ -158,7 +158,9 @@ wg_proc_scope() {
   printf '%s\n' "$line"
 }
 
-# Which workspace each scope's window is on, as "scope<TAB>workspace" lines.
+# Where each scope's window is, as "scope<TAB>workspace<TAB>x<TAB>y<TAB>monitor"
+# lines: the workspace it is on, the top-left corner of its tile, and the
+# monitor that workspace is shown on.
 #
 # A window and the claude session inside it are in the same systemd scope --
 # the terminal was launched into it and everything it spawns inherits it -- so
@@ -170,18 +172,39 @@ wg_proc_scope() {
 # project no group claims still sits somewhere, and that somewhere is what the
 # user arranged and expects to get back.
 #
+# The position and the monitor are what a restore needs to bring back the
+# arrangement and not only the membership. Hyprland tiles windows in the order
+# they arrive, and a restore respawns them in whatever order the record happens
+# to list them, so without the position a group came back with the right
+# terminals shuffled into the wrong tiles. And a workspace is created on
+# whichever monitor has focus when it is first used, which at login is one
+# monitor for every group -- so without the monitor, the groups that lived on
+# the second screen all came back on the first.
+#
+# The monitor is looked up by the workspace, not taken from the window: a group
+# is a workspace, and the workspace is what gets moved back.
+#
 # Failure here is not fatal to anything. No compositor, no window for a session,
-# a scope that cannot be read: the entry simply carries no workspace, and the
+# a scope that cannot be read: the entry simply carries none of it, and the
 # restore falls back to letting the daemon file it by project.
 wg_scope_workspaces() {
-  local pid ws
+  local pid ws x y mon
+  # The monitor is last, because it is the one column that can be empty -- a
+  # workspace the query did not list -- and read only shifts columns into an
+  # empty field that has something after it.
   wg_hypr_query clients 2>/dev/null \
-    | jq -r '.[] | select(.pid != null) | "\(.pid)\t\(.workspace.name // "")"' 2>/dev/null \
-    | while IFS=$'\t' read -r pid ws; do
+    | jq -r --argjson wss "$(wg_hypr_query workspaces 2>/dev/null || echo '[]')" '
+        ($wss | map({key: .name, value: (.monitor // "")}) | from_entries) as $mon
+        | .[] | select(.pid != null)
+        | [(.pid | tostring), (.workspace.name // ""),
+           ((.at // [0, 0])[0] | tostring), ((.at // [0, 0])[1] | tostring),
+           ($mon[.workspace.name // ""] // "")]
+        | @tsv' 2>/dev/null \
+    | while IFS=$'\t' read -r pid ws x y mon; do
         [[ -n $pid && -n $ws ]] || continue
         scope="$(wg_proc_scope "$pid")"
         [[ -n $scope ]] || continue
-        printf '%s\t%s\n' "$scope" "$ws"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$scope" "$ws" "$x" "$y" "$mon"
       done
 }
 
@@ -196,10 +219,11 @@ wg_scope_workspaces() {
 # /proc/<pid>/stat reports it: 0 for a session with no terminal at all. $6 is
 # the workspace its window is on. Only the scan can know either, so a caller
 # without them leaves those fields alone -- which is why both are appended
-# conditionally rather than merged in with the rest.
+# conditionally rather than merged in with the rest. $8 is the window's position
+# as "x,y" and $9 the monitor its workspace is on, under the same rule.
 wg_sessions_record() {
   local scope="$1" session="$2" cwd="$3" source="${4:-scan}" tty="${5:-}" \
-        workspace="${6:-}" resume_cwd="${7:-}" now
+        workspace="${6:-}" resume_cwd="${7:-}" at="${8:-}" monitor="${9:-}" now
   [[ -n $scope ]] || return 0
   now="$(date +%s)"
   # Read the merge left to right: the empty defaults a brand-new entry needs,
@@ -225,9 +249,11 @@ wg_sessions_record() {
       + (if $tty == "" then {} else {tty: ($tty | tonumber)} end)
       + (if $ws == "" then {} else {workspace: $ws} end)
       + (if $resume == "" then {} else {resume_cwd: $resume} end)
+      + (if $at == "" then {} else {at: ($at | split(",") | map(tonumber))} end)
+      + (if $mon == "" then {} else {monitor: $mon} end)
   ' --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" \
     --arg source "$source" --arg now "$now" --arg tty "$tty" --arg ws "$workspace" \
-    --arg resume "$resume_cwd"
+    --arg resume "$resume_cwd" --arg at "$at" --arg mon "$monitor"
 }
 
 # Refreshes the map from every live claude process.
@@ -246,11 +272,13 @@ wg_sessions_scan() {
   local -a stat=()
   # One compositor query for the whole pass, not one per session: the answer is
   # the same for every scope and asking per process would be a fork each.
-  local -A ws_of=()
-  local wscope wsname
-  while IFS=$'\t' read -r wscope wsname; do
+  local -A ws_of=() at_of=() mon_of=()
+  local wscope wsname wx wy wmon
+  while IFS=$'\t' read -r wscope wsname wx wy wmon; do
     [[ -n $wscope ]] || continue
     ws_of[$wscope]="$wsname"
+    [[ -z $wx || -z $wy ]] || at_of[$wscope]="$wx,$wy"
+    mon_of[$wscope]="$wmon"
   done < <(wg_scope_workspaces)
   for dir in "$WG_PROC_DIR"/[0-9]*; do
     [[ -d $dir ]] || continue
@@ -285,7 +313,8 @@ wg_sessions_scan() {
       tty="${stat[6]:-}"
     fi
     [[ $tty =~ ^[0-9]+$ ]] || tty=""
-    wg_sessions_record "$scope" "" "$cwd" scan "$tty" "${ws_of[$scope]:-}"
+    wg_sessions_record "$scope" "" "$cwd" scan "$tty" "${ws_of[$scope]:-}" "" \
+      "${at_of[$scope]:-}" "${mon_of[$scope]:-}"
     found=$(( found + 1 ))
   done
   wg_sessions_expire
@@ -484,8 +513,14 @@ wg_snapshot_write() {
   # cost of being wrong that way is a spare window, and the other way is a lost
   # session.
   #
-  # Deduplicated by session id last, newest kept, so that two live terminals
-  # somehow holding the same conversation still only come back once.
+  # Not deduplicated by session id, and that is deliberate. It used to be --
+  # "two live terminals somehow holding the same conversation still only come
+  # back once" -- and that was a guard against the lingering scopes described
+  # above, which the freshness filter already removes on its own: an entry is
+  # only refreshed while a live claude process sits in its scope. So by the time
+  # the dedupe ran, the only duplicates left for it to remove were real windows.
+  # One conversation open in two terminals on the same workspace was recorded
+  # as one, and the group came back a terminal short.
   if jq --arg boot "$boot" \
         --arg now "$(date +%s)" \
         --arg fresh "$WG_SNAPSHOT_FRESH" '
@@ -493,11 +528,7 @@ wg_snapshot_write() {
        sessions: (.sessions
          | with_entries(select(
              (($now | tonumber) - (.value.seen // 0)) <= ($fresh | tonumber)
-             and ((.value.tty // 1) != 0)))
-         | to_entries
-         | group_by(if .value.session == "" then .key else .value.session end)
-         | map(max_by(.value.seen // 0))
-         | from_entries)}
+             and ((.value.tty // 1) != 0))))}
      ' <<<"$(wg_sessions_read)" >"$tmp" 2>/dev/null; then
     :
   else
@@ -627,7 +658,10 @@ wg_snapshot_previous_rows() {
            | select((.value.cwd // "") != "")
            | [.value.session // "",
               (.value.resume_cwd // .value.cwd),
-              .value.workspace // ""] | @tsv' \
+              .value.workspace // "",
+              ((.value.at // [])[0] // "" | tostring),
+              ((.value.at // [])[1] // "" | tostring),
+              .value.monitor // ""] | @tsv' \
       "$file" 2>/dev/null || true
     return 0
   done

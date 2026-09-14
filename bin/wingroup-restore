@@ -130,6 +130,8 @@ fi
 # rule, not of the result.
 if (( WG_DRY )); then
   wg_place_rows "$WG_DRY" "$WG_SNAPSHOT_ROWS"
+  wg_place_monitors "$WG_DRY" "$WG_SNAPSHOT_ROWS"
+  wg_place_order "$WG_DRY" "$WG_SNAPSHOT_ROWS"
   exit 0
 fi
 
@@ -146,3 +148,9 @@ wingroup tidy --yes
 # overwrite it. The workspace the session was actually on is what the user
 # arranged, so it goes last and has the last word.
 wg_place_rows "$WG_DRY" "$WG_SNAPSHOT_ROWS"
+
+# Then the arrangement, which only means anything once every terminal is on its
+# workspace: which monitor each workspace is on first, because moving a
+# workspace moves every tile in it, and the order of the tiles inside it last.
+wg_place_monitors "$WG_DRY" "$WG_SNAPSHOT_ROWS"
+wg_place_order "$WG_DRY" "$WG_SNAPSHOT_ROWS"
