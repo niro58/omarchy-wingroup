@@ -209,18 +209,19 @@ wg_move_window() {
 # switching to one is what SUPER+G is for -- and the actions come next.
 @test "the picker lists groups, then the actions, then the windows" {
   actions="$(wg_menu_build | cut -f1 | sed 's/:.*//' | tr '\n' ' ')"
-  [ "$actions" = "group group group new delete tidy toggle-auto noop window window window window window window window noop " ]
+  [ "$actions" = "group group group new delete monitor tidy toggle-auto noop window window window window window window window noop " ]
 }
 
 # The index walker returns is a position in this list, so the layout is a
 # contract, not a presentation detail.
-@test "the action entries follow the last group, at indices 3 to 6" {
+@test "the action entries follow the last group, at indices 3 to 7" {
   [ "$(wg_menu_build | sed -n '4p' | cut -f1)" = "new" ]
   [ "$(wg_menu_build | sed -n '5p' | cut -f1)" = "delete" ]
-  [ "$(wg_menu_build | sed -n '6p' | cut -f1)" = "tidy" ]
-  [ "$(wg_menu_build | sed -n '7p' | cut -f1)" = "toggle-auto" ]
-  [ "$(wg_menu_build | sed -n '8p' | cut -f1)" = "noop" ]
-  [ "$(wg_menu_build | sed -n '9p' | cut -f1)" = "window:0xaaa1" ]
+  [ "$(wg_menu_build | sed -n '6p' | cut -f1)" = "monitor" ]
+  [ "$(wg_menu_build | sed -n '7p' | cut -f1)" = "tidy" ]
+  [ "$(wg_menu_build | sed -n '8p' | cut -f1)" = "toggle-auto" ]
+  [ "$(wg_menu_build | sed -n '9p' | cut -f1)" = "noop" ]
+  [ "$(wg_menu_build | sed -n '10p' | cut -f1)" = "window:0xaaa1" ]
 }
 
 # The question that asked for this row: every group entry says how much is
@@ -235,9 +236,9 @@ wg_move_window() {
 # hands back a position in this list.
 @test "the footer sits after the last window and moves no entry above it" {
   entries="$(wg_menu_build)"
-  [ "$(wc -l <<<"$entries")" -eq 16 ]
-  [ "$(sed -n '15p' <<<"$entries" | cut -f1)" = "window:0xaaa7" ]
-  [ "$(sed -n '16p' <<<"$entries" | cut -f1)" = "noop" ]
+  [ "$(wc -l <<<"$entries")" -eq 17 ]
+  [ "$(sed -n '16p' <<<"$entries" | cut -f1)" = "window:0xaaa7" ]
+  [ "$(sed -n '17p' <<<"$entries" | cut -f1)" = "noop" ]
 }
 
 # A plain shell and a file manager are windows, not sessions. Counting them
@@ -305,6 +306,40 @@ EOF
 @test "a group with no pin says nothing about monitors" {
   display="$(wg_menu_build | grep '^group:site' | cut -f2)"
   [[ "$display" != *" on "* ]]
+}
+
+# The pin could be set from a terminal and read in the picker, and nowhere in
+# between could it be changed from the picker itself.
+@test "the picker offers a way to move a group to a monitor" {
+  display="$(wg_menu_build | grep '^monitor\b' | cut -f2)"
+  [[ "$display" == *"move a group to a monitor"* ]]
+}
+
+@test "the monitor chooser lists every monitor" {
+  names="$(wg_monitor_menu_build site | cut -f1 | paste -sd, -)"
+  [ "$names" = "mon:eDP-2,mon:DP-1" ]
+}
+
+# A list of two monitors showing one of them is a list with something missing,
+# and what is missing is where the group is pinned now.
+@test "the monitor chooser marks the pin the group already has" {
+  wg_patch_state '.groups[1].monitor = "DP-1"'
+  display="$(wg_monitor_menu_build site | grep '^mon:DP-1' | cut -f2)"
+  [[ "$display" == *"pinned here now"* ]]
+  display="$(wg_monitor_menu_build site | grep '^mon:eDP-2' | cut -f2)"
+  [[ "$display" != *"pinned"* ]]
+}
+
+@test "the monitor chooser offers to unpin a group that is pinned" {
+  wg_patch_state '.groups[1].monitor = "DP-1"'
+  display="$(wg_monitor_menu_build site | grep '^mon:-' | cut -f2)"
+  [[ "$display" == *"Unpin"* ]]
+}
+
+# An entry that would do nothing is an entry to read and dismiss every time.
+@test "the monitor chooser does not offer to unpin a group with no pin" {
+  count="$(wg_monitor_menu_build site | grep -c '^mon:-' || true)"
+  [ "$count" -eq 0 ]
 }
 
 @test "wg_menu_input returns what was typed" {
