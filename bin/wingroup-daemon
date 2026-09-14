@@ -11,7 +11,25 @@ source "$WG_LIB_DIR/resolve.sh"
 
 : "${WG_RESOLVE_RETRIES:=10}"
 : "${WG_RESOLVE_DELAY:=0.1}"
-: "${WG_REFRESH_DEBOUNCE_MS:=150}"
+# Long enough that the bar can finish drawing before it is asked again.
+#
+# A refresh signal makes waybar re-run every wingroup module -- they all listen
+# on the same signal -- and on a desktop with eight groups that measured 1.74
+# seconds of work. Asking every 150ms for something that takes 1.74s does not
+# produce a fast bar, it produces a queue: real-time signals are queued rather
+# than coalesced, and waybar was found holding twelve to sixteen of them, which
+# is a bar showing the desktop as it was twenty-odd seconds ago. Sessions that
+# had started working still read as idle, and a session just opened was missing
+# from its group, because the redraw that would have said so was still in line.
+#
+# The number to beat is the cost of a redraw, not the rate events arrive at:
+# below that, every extra ask is one the bar cannot answer. Two seconds leaves
+# room over the measured 1.74s, and the trailing edge below guarantees the last
+# state still lands rather than being dropped with the burst.
+#
+# It wants to come back down once a redraw is cheap; it is deliberately a
+# variable so that the answer lives in one place when it does.
+: "${WG_REFRESH_DEBOUNCE_MS:=2000}"
 # How long the read loop waits before taking a turn of its own. Short enough
 # that a debounced refresh is paid off without being noticed, long enough that
 # an idle desktop is not woken hundreds of times a second for nothing.
