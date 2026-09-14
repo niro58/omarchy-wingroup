@@ -177,6 +177,52 @@ bar_refreshed() { (( $(refreshes) >= 1 )); }
   [ "$(crash_field workspace)" = "infra" ]
 }
 
+# The arrangement is recorded where the membership is, by the scan, which is the
+# only thing that looks at the desktop while it is still there. Without the
+# tile's position a restore brought the right terminals back shuffled into the
+# wrong tiles; without the monitor, every group came back on the screen that had
+# focus at login.
+@test "a scan records the tile and the monitor a session's window is on" {
+  source "$WG_LIB_DIR/hypr.sh"
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  # The window's own process is in the session's scope -- that is the join.
+  printf '[{"address":"0xbbb1","pid":1001,"at":[3804,1273],"workspace":{"id":5,"name":"ads"}}]\n' \
+    >"$WG_TMP/clients.json"
+  printf '[{"id":5,"name":"ads","monitor":"DP-1"}]\n' >"$WG_TMP/workspaces.json"
+  export WG_FIXTURE_CLIENTS="$WG_TMP/clients.json" WG_FIXTURE_WORKSPACES="$WG_TMP/workspaces.json"
+
+  run wg_sessions_scan
+  [ "$output" -eq 1 ]
+  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].workspace' "$WG_SESSIONS_FILE")" = "ads" ]
+  [ "$(jq -c --arg s "$WG_SCOPE" '.sessions[$s].at' "$WG_SESSIONS_FILE")" = "[3804,1273]" ]
+  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].monitor' "$WG_SESSIONS_FILE")" = "DP-1" ]
+}
+
+# And it all reaches the rows the restore reads, in the columns it reads them
+# from.
+@test "the tile and the monitor ride along in the restore's rows" {
+  source "$WG_LIB_DIR/hypr.sh"
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_sessions_record "$WG_SCOPE" "abc-123" "$WG_TMP/projects/shop-web" hook
+  printf '[{"address":"0xbbb1","pid":1001,"at":[3804,1273],"workspace":{"id":5,"name":"ads"}}]\n' \
+    >"$WG_TMP/clients.json"
+  printf '[{"id":5,"name":"ads","monitor":"DP-1"}]\n' >"$WG_TMP/workspaces.json"
+  export WG_FIXTURE_CLIENTS="$WG_TMP/clients.json" WG_FIXTURE_WORKSPACES="$WG_TMP/workspaces.json"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$WG_BOOT_BEFORE" >"$WG_BOOT_ID_FILE"
+  # A new boot: stamp the file as the last one so there is a row to read.
+  jq --arg b "$WG_BOOT_NOW" '.boot = $b' "$WG_SNAPSHOT_FILE" >"$WG_TMP/snap" && mv -f "$WG_TMP/snap" "$WG_SNAPSHOT_FILE"
+  run wg_snapshot_previous_rows
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | cut -f1)" = "abc-123" ]
+  [ "$(printf '%s' "$output" | cut -f3)" = "ads" ]
+  [ "$(printf '%s' "$output" | cut -f4)" = "3804" ]
+  [ "$(printf '%s' "$output" | cut -f5)" = "1273" ]
+  [ "$(printf '%s' "$output" | cut -f6)" = "DP-1" ]
+}
+
 # No compositor, or a session whose window nothing answered for: the field is
 # simply absent, and must stay absent rather than become an empty string. An
 # empty workspace is not a harmless no-op downstream -- it is a name, and
@@ -491,12 +537,13 @@ wg_snapshot_from_boot() {
   [ "$(jq -r '.boot' "$WG_SNAPSHOT_PREV")" = "$WG_BOOT_BEFORE" ]
 
   # And what the restore will ask for is still the sessions from before the
-  # reboot, not the one this boot is running. Three columns now: the workspace
-  # the session was on rides along so the restore can put it back there, and is
-  # empty when no compositor answered for it.
+  # reboot, not the one this boot is running. Six columns now: the workspace the
+  # session was on, its tile's x and y, and the monitor, so the restore can put
+  # back the arrangement and not only the membership. Each is empty when no
+  # compositor answered for it.
   run wg_snapshot_previous_rows
   [[ "$output" == "$(printf 'sess-1\t%s' "$WG_TMP/projects/shop-web")"* ]]
-  [ "$(printf '%s' "$output" | awk -F'\t' '{print NF}')" -eq 3 ]
+  [ "$(printf '%s' "$output" | awk -F'\t' '{print NF}')" -eq 6 ]
 }
 
 # --- telling the user --------------------------------------------------------
@@ -770,11 +817,17 @@ notified_twice() { (( $(notifies) >= 2 )); }
   [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions | has($s)' "$WG_SESSIONS_FILE")" = "true" ]
 }
 
-# Resuming a session gives it a new terminal and a new scope, and the old entry
-# lingers until the TTL. Both carry the same conversation, so a snapshot holding
-# both opens it twice -- which is exactly what happened: two conversations came
-# back as four terminals.
-@test "one conversation under two scopes is one entry in the snapshot" {
+# One conversation open in two live terminals is two windows, and both come
+# back.
+#
+# This used to assert the opposite. It was written after resuming a session
+# left its old scope lingering in the map, so the conversation was restored
+# twice -- and the fix collapsed every entry sharing an id into one. But the
+# lingering scope is a dead one, and the test above already keeps dead scopes
+# out on freshness alone: a scope is only refreshed while a live claude process
+# sits in it. What the collapse still removed was the real thing. A group with
+# one conversation open in two of its three terminals came back with two.
+@test "one conversation open in two live terminals is two entries in the snapshot" {
   wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
   wg_fake_proc 1002 claude "$WG_SCOPE_TWO" "$WG_TMP/projects/shop-web"
   wg_sessions_record "$WG_SCOPE" "same-session" "$WG_TMP/projects/shop-web" hook
@@ -782,8 +835,26 @@ notified_twice() { (( $(notifies) >= 2 )); }
 
   run "$WG_ROOT/bin/wingroup-oomwatch" --once
   [ "$status" -eq 0 ]
+  [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 2 ]
+  [ "$(jq -r '[.sessions[].session] | unique | join(",")' "$WG_SNAPSHOT_FILE")" = "same-session" ]
+}
+
+# The case the collapse was written for is still covered, by freshness: resume a
+# conversation in a new terminal after closing the old one, and the old scope
+# stops being refreshed. It must not come back as a second terminal.
+@test "a conversation resumed after its old terminal closed comes back once" {
+  wg_fake_proc 1002 claude "$WG_SCOPE_TWO" "$WG_TMP/projects/shop-web"
+  wg_sessions_record "$WG_SCOPE" "same-session" "$WG_TMP/projects/shop-web" hook
+  wg_sessions_record "$WG_SCOPE_TWO" "same-session" "$WG_TMP/projects/shop-web" hook
+  local stale=$(( $(date +%s) - 4000 ))
+  jq --arg s "$WG_SCOPE" --arg t "$stale" \
+     '.sessions[$s].seen = ($t | tonumber)' "$WG_SESSIONS_FILE" >"$WG_TMP/patched"
+  mv -f "$WG_TMP/patched" "$WG_SESSIONS_FILE"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
   [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 1 ]
-  [ "$(jq -r '.sessions | to_entries[0].value.session' "$WG_SNAPSHOT_FILE")" = "same-session" ]
+  [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "true" ]
 }
 
 # A restore hands a session back by opening a terminal, so a session that was

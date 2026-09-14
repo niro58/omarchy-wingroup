@@ -18,28 +18,37 @@
 # and a library should stand up on its own dependencies.
 : "${WG_PROC_DIR:=/proc}"
 
-# One row, peeled into the three facts it carries: session id, directory,
-# workspace. The workspace is empty for a session no compositor answered for
-# when the record was written.
+# One row, peeled into the facts it carries: session id, directory, workspace,
+# the tile's x and y, and the monitor. Rows from a crash carry only the first
+# three, and anything recorded before positions were carries empty ones.
 #
-# By parameter expansion, never `IFS=$'\t' read -r session cwd workspace`: the
-# session id is empty for anything that predates the hook, tab is IFS
-# whitespace, and read collapses a leading run of it -- so the directory would
-# land in $session and every column after it would shift too. Exactly the trap
-# wg_row_split exists for.
+# By parameter expansion, never `IFS=$'\t' read -r session cwd workspace ...`:
+# the session id is empty for anything that predates the hook, tab is IFS
+# whitespace, and read collapses a run of it -- so the directory would land in
+# $session and every column after it would shift too. Exactly the trap
+# wg_row_split exists for. And now that the position and monitor can be empty
+# in the middle of a row as well, every column is peeled the same way.
 WG_PLACE_SESSION=""
 WG_PLACE_CWD=""
 WG_PLACE_WORKSPACE=""
+WG_PLACE_X=""
+WG_PLACE_Y=""
+WG_PLACE_MONITOR=""
 
 wg_place_row_split() {
-  local row="$1" rest
-  WG_PLACE_SESSION="${row%%$'\t'*}"
-  rest="${row#*$'\t'}"
-  WG_PLACE_CWD="${rest%%$'\t'*}"
-  # Only when a third column was actually there: ${rest#*<tab>} on a row without
-  # one hands back the directory again, and a directory is not a workspace.
-  WG_PLACE_WORKSPACE=""
-  [[ $rest == *$'\t'* ]] && WG_PLACE_WORKSPACE="${rest#*$'\t'}"
+  local row="$1"
+  local -a col=()
+  while [[ $row == *$'\t'* ]]; do
+    col+=("${row%%$'\t'*}")
+    row="${row#*$'\t'}"
+  done
+  col+=("$row")
+  WG_PLACE_SESSION="${col[0]:-}"
+  WG_PLACE_CWD="${col[1]:-}"
+  WG_PLACE_WORKSPACE="${col[2]:-}"
+  WG_PLACE_X="${col[3]:-}"
+  WG_PLACE_Y="${col[4]:-}"
+  WG_PLACE_MONITOR="${col[5]:-}"
   return 0
 }
 
@@ -159,7 +168,10 @@ wg_place_rows() {
     # to be filed by project, which is the sane place for it to land.
     [[ $WG_PLACE_WORKSPACE != special:* ]] || continue
     if [[ -n $WG_PLACE_SESSION ]]; then
-      ws_by_id[$WG_PLACE_SESSION]="$WG_PLACE_WORKSPACE"
+      # A queue, not a slot. One conversation can be open in two terminals, and
+      # the snapshot keeps both; a plain assignment here kept whichever row came
+      # last and sent both windows to it. Each matching window takes the next.
+      ws_by_id[$WG_PLACE_SESSION]+="$WG_PLACE_WORKSPACE"$'\n'
       dir_by_id[$WG_PLACE_SESSION]="$WG_PLACE_CWD"
     else
       # Weaker, and only for a row that has nothing better: a session from
@@ -193,7 +205,10 @@ wg_place_rows() {
       mapfile -d '' -t args < "$WG_PROC_DIR/$kid/cmdline" 2>/dev/null || continue
       for arg in ${args[@]+"${args[@]}"}; do
         [[ -n ${ws_by_id[$arg]:-} ]] || continue
-        want="${ws_by_id[$arg]}"
+        want="${ws_by_id[$arg]%%$'\n'*}"
+        # The last one stays: a third terminal on the same conversation than
+        # the record knew of goes where the others did, not nowhere.
+        [[ ${ws_by_id[$arg]#*$'\n'} == "" ]] || ws_by_id[$arg]="${ws_by_id[$arg]#*$'\n'}"
         dir="${dir_by_id[$arg]}"
         break
       done
@@ -220,4 +235,167 @@ wg_place_rows() {
   done < <(wg_hypr_query clients 2>/dev/null \
            | jq -r '.[] | select(.pid != null and .address != null)
                     | [.address, (.pid | tostring), (.workspace.name // "")] | @tsv' 2>/dev/null)
+}
+
+# What a window is showing, as the key a record row is matched on: "i:<id>" for
+# a session relaunched by id, "d:<dir>" for one matched only by its directory,
+# nothing for a window no row knows. $1 is the window's pid; WG_PLACE_KIDS must
+# be loaded, and WG_PLACE_KNOWN holds the keys worth answering with.
+#
+# The same matching wg_place_rows does inline -- the id among the child shell's
+# arguments, else the child's directory -- so that "this window is that
+# session" means one thing in every pass.
+declare -A WG_PLACE_KNOWN=()
+
+wg_place_key_of() {
+  local pid="$1" kid arg kidcwd
+  local -a args=()
+  for kid in ${WG_PLACE_KIDS[$pid]:-}; do
+    mapfile -d '' -t args < "$WG_PROC_DIR/$kid/cmdline" 2>/dev/null || continue
+    for arg in ${args[@]+"${args[@]}"}; do
+      [[ -n ${WG_PLACE_KNOWN[i:$arg]:-} ]] || continue
+      printf 'i:%s\n' "$arg"
+      return 0
+    done
+    kidcwd="$(readlink "$WG_PROC_DIR/$kid/cwd" 2>/dev/null)" || kidcwd=""
+    if [[ -n $kidcwd && -n ${WG_PLACE_KNOWN[d:$kidcwd]:-} ]]; then
+      printf 'd:%s\n' "$kidcwd"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# Puts each recorded workspace back on the monitor it was on. $1 is a dry run
+# flag, $2 the rows.
+#
+# A workspace is created on whichever monitor has focus when it is first used,
+# and at login that is the same monitor for every one of them: the groups that
+# lived on the second screen all came back on the first. This moves them back.
+#
+# Left alone: a workspace the record has no monitor for, a monitor that is not
+# plugged in any more -- moving a group onto a screen that is not there would
+# lose it -- and a workspace that is already where it belongs.
+wg_place_monitors() {
+  local dry="$1" rows="$2" row ws mon want
+  local -A mon_of=() present=()
+  [[ -n $rows ]] || return 0
+  while IFS= read -r row; do
+    wg_place_row_split "$row"
+    [[ -n $WG_PLACE_WORKSPACE && -n $WG_PLACE_MONITOR ]] || continue
+    [[ $WG_PLACE_WORKSPACE != special:* ]] || continue
+    [[ -n ${mon_of[$WG_PLACE_WORKSPACE]:-} ]] || mon_of[$WG_PLACE_WORKSPACE]="$WG_PLACE_MONITOR"
+  done <<<"$rows"
+  (( ${#mon_of[@]} )) || return 0
+
+  while IFS= read -r mon; do
+    [[ -z $mon ]] || present[$mon]=1
+  done < <(wg_hypr_query monitors 2>/dev/null | jq -r '.[].name' 2>/dev/null)
+
+  # The monitor is last so that an empty one cannot pull the name into it.
+  while IFS=$'\t' read -r ws mon; do
+    [[ -n $ws ]] || continue
+    want="${mon_of[$ws]:-}"
+    [[ -n $want && -n ${present[$want]:-} ]] || continue
+    [[ $mon != "$want" ]] || continue
+    printf 'monitor  %s  %s\n' "$ws" "$want"
+    (( ! dry )) || continue
+    wg_hypr_dispatch moveworkspacetomonitor "name:$ws $want"
+  done < <(wg_hypr_query workspaces 2>/dev/null \
+           | jq -r '.[] | [.name, (.monitor // "")] | @tsv' 2>/dev/null)
+}
+
+# Puts the restored terminals on each workspace back in the tiles they were in.
+# $1 is a dry run flag, $2 the rows.
+#
+# Hyprland tiles a window where it arrives, and a restore cannot make them
+# arrive in the original order -- the tree dwindle builds depends on which
+# window had focus at each arrival, which is not something a record of the
+# finished desktop can replay. So the tiles are taken as they come, and the
+# contents are swapped until each session sits where it was: the recorded
+# sessions in reading order, left to right and then top to bottom, go into the
+# current tiles in that same order.
+#
+# Only windows the record knows take part. A terminal the user opened by hand
+# keeps its tile, and a session that did not come back simply leaves one fewer
+# to arrange -- the rest still go in their order around it.
+#
+# The swaps are planned from a single look at the desktop, and the plan's own
+# model is updated as each swap is made, rather than asking the compositor where
+# everything went after each one. swapwindow acts on the focused window, so
+# focus moves while this runs; whatever had it before is given it back.
+wg_place_order() {
+  local dry="$1" rows="$2" row key ws addr pid x y active i j n swaps=0
+  local -A want_of=() have_of=()
+  [[ -n $rows ]] || return 0
+  WG_PLACE_KNOWN=()
+  while IFS= read -r row; do
+    wg_place_row_split "$row"
+    [[ -n $WG_PLACE_CWD && -n $WG_PLACE_WORKSPACE ]] || continue
+    [[ $WG_PLACE_WORKSPACE != special:* ]] || continue
+    [[ $WG_PLACE_X =~ ^-?[0-9]+$ && $WG_PLACE_Y =~ ^-?[0-9]+$ ]] || continue
+    if [[ -n $WG_PLACE_SESSION ]]; then key="i:$WG_PLACE_SESSION"; else key="d:$WG_PLACE_CWD"; fi
+    WG_PLACE_KNOWN[$key]=1
+    want_of[$WG_PLACE_WORKSPACE]+="$WG_PLACE_X"$'\t'"$WG_PLACE_Y"$'\t'"$key"$'\n'
+  done <<<"$rows"
+  (( ${#want_of[@]} )) || return 0
+
+  wg_place_children
+  while IFS=$'\t' read -r addr pid ws x y; do
+    [[ -n $addr && -n $pid && -n ${want_of[$ws]:-} ]] || continue
+    key="$(wg_place_key_of "$pid")"
+    [[ -n $key ]] || continue
+    have_of[$ws]+="$x"$'\t'"$y"$'\t'"$key"$'\t'"$addr"$'\n'
+  done < <(wg_hypr_query clients 2>/dev/null \
+           | jq -r '.[] | select(.pid != null and .address != null and (.floating | not))
+                    | [.address, (.pid | tostring), (.workspace.name // ""),
+                       ((.at // [0, 0])[0] | tostring), ((.at // [0, 0])[1] | tostring)]
+                    | @tsv' 2>/dev/null)
+
+  active="$(wg_hypr_query activewindow 2>/dev/null | jq -r '.address // empty' 2>/dev/null || true)"
+
+  for ws in "${!have_of[@]}"; do
+    local -a want=() keys=() addrs=() have_rows=()
+    local -A left=()
+    mapfile -t have_rows < <(printf '%s' "${have_of[$ws]}" | sort -t$'\t' -k1,1n -k2,2n)
+    for row in "${have_rows[@]}"; do
+      IFS=$'\t' read -r x y key addr <<<"$row"
+      keys+=("$key")
+      addrs+=("$addr")
+      left[$key]=$(( ${left[$key]:-0} + 1 ))
+    done
+    # The recorded order, keeping only as many of each session as there are
+    # windows showing it -- a session that did not come back is skipped over.
+    while IFS=$'\t' read -r x y key; do
+      [[ -n $key ]] || continue
+      (( ${left[$key]:-0} > 0 )) || continue
+      left[$key]=$(( ${left[$key]:-0} - 1 ))
+      want+=("$key")
+    done < <(printf '%s' "${want_of[$ws]}" | sort -t$'\t' -k1,1n -k2,2n)
+
+    n=${#want[@]}
+    for (( i = 0; i < n; i++ )); do
+      [[ ${keys[i]} != "${want[i]}" ]] || continue
+      for (( j = i + 1; j < ${#keys[@]}; j++ )); do
+        [[ ${keys[j]} == "${want[i]}" ]] && break
+      done
+      (( j < ${#keys[@]} )) || continue
+      printf 'order  %s  %s <-> %s\n' "$ws" "${keys[i]#?:}" "${keys[j]#?:}"
+      if (( ! dry )); then
+        wg_hypr_dispatch focuswindow "address:${addrs[i]}"
+        wg_hypr_dispatch swapwindow "address:${addrs[j]}"
+      fi
+      # The model follows the swap: the window that was in tile j is in tile i
+      # now, and the other way round.
+      key="${keys[i]}"; keys[i]="${keys[j]}"; keys[j]="$key"
+      addr="${addrs[i]}"; addrs[i]="${addrs[j]}"; addrs[j]="$addr"
+      swaps=$(( swaps + 1 ))
+    done
+    unset want keys addrs have_rows left
+  done
+
+  if (( swaps && ! dry )) && [[ -n $active ]]; then
+    wg_hypr_dispatch focuswindow "address:$active"
+  fi
+  return 0
 }
