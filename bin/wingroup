@@ -86,7 +86,7 @@ wg_group_exists() {
 
 wg_refresh() {
   [[ -n ${WG_REFRESH_CMD:-} ]] && { "$WG_REFRESH_CMD"; return 0; }
-  pkill -RTMIN+11 waybar || true
+  wg_signal_waybar 11
 }
 
 cmd_activate() {
