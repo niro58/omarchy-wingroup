@@ -70,14 +70,13 @@ wg_oomwatch_journal() {
   fi
 }
 
-# Same idiom as bin/wingroup-daemon, deliberately repeated rather than shared:
-# they are separate processes with no library between them, and this is the
-# whole of it.
+# Same idiom as bin/wingroup-daemon. The signalling itself is shared, in
+# lib/hypr.sh, because getting it wrong kills the bar.
 wg_refresh_bar() {
   if [[ -n ${WG_REFRESH_CMD:-} ]]; then
     "$WG_REFRESH_CMD"
   else
-    pkill -RTMIN+11 waybar || true
+    wg_signal_waybar 11
   fi
 }
 
