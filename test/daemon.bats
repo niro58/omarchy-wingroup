@@ -209,3 +209,59 @@ feed() {
   [ "$before" = "$after" ]
   [ "$(jq -r '.overrides["0xaaa3"]' "$WG_STATE_DIR/state.json")" = "site" ]
 }
+
+# The event a debounce turns down still has to be answered.
+#
+# Dropping one is only safe while another is sure to follow, and that is not how
+# Claude's glyph behaves: it changes when the session's state changes and then
+# sits still -- a session was observed holding ◐ for forty-five seconds without
+# a single title event. So the transition that matters, ✳ to ◐ when work starts,
+# is often one lone event. Turned down with nothing behind it, the bar keeps the
+# old answer: a group reading "two idle" while one of the two is working.
+@test "an event turned down by the debounce is still owed a refresh" {
+  export WG_REFRESH_DEBOUNCE_MS=5000
+  wg_daemon_handle_line "windowtitle>>aaa1"     # the first one goes through
+  wg_daemon_handle_line "windowtitle>>aaa2"     # this one is inside the window
+  run bash -c "wc -l <'$WG_REFRESH_LOG'"
+  [ "$output" -eq 1 ]
+  [ "$WG_REFRESH_PENDING" -eq 1 ]
+}
+
+# ...and paid off once the window has passed, by the loop's own idle tick rather
+# than by an event that may never arrive.
+@test "the owed refresh is paid off when the debounce window passes" {
+  export WG_REFRESH_DEBOUNCE_MS=100
+  wg_daemon_handle_line "windowtitle>>aaa1"
+  wg_daemon_handle_line "windowtitle>>aaa2"
+  [ "$(wc -l <"$WG_REFRESH_LOG")" -eq 1 ]
+
+  sleep 0.3
+  wg_daemon_flush_refresh
+  [ "$(wc -l <"$WG_REFRESH_LOG")" -eq 2 ]
+  [ "$WG_REFRESH_PENDING" -eq 0 ]
+}
+
+# A tick with nothing owed must not redraw the bar. The loop takes one of these
+# several times a second on a desktop that is doing nothing at all.
+@test "an idle tick with nothing pending refreshes nothing" {
+  export WG_REFRESH_DEBOUNCE_MS=0
+  wg_daemon_handle_line "windowtitle>>aaa1"
+  [ "$(wc -l <"$WG_REFRESH_LOG")" -eq 1 ]
+  wg_daemon_flush_refresh
+  wg_daemon_flush_refresh
+  [ "$(wc -l <"$WG_REFRESH_LOG")" -eq 1 ]
+}
+
+# Paying one off must not pay off two: the trailing edge answers the events that
+# were turned down, it does not add redraws of its own.
+@test "the trailing refresh fires once however many events were turned down" {
+  export WG_REFRESH_DEBOUNCE_MS=100
+  wg_daemon_handle_line "windowtitle>>aaa1"
+  wg_daemon_handle_line "windowtitle>>aaa2"
+  wg_daemon_handle_line "windowtitle>>aaa3"
+  wg_daemon_handle_line "windowtitle>>aaa4"
+  sleep 0.3
+  wg_daemon_flush_refresh
+  wg_daemon_flush_refresh
+  [ "$(wc -l <"$WG_REFRESH_LOG")" -eq 2 ]
+}
