@@ -246,7 +246,14 @@ wg_daemon_main() {
     # End of stream: socat exited. Anything held back is a last partial line.
     [[ -z "$buf$line" ]] || wg_daemon_handle_line "$buf$line" || true
     break
-  done < <(socat -U - "UNIX-CONNECT:$sock")
+  # 9>&- closes the single-instance lock in the follower, and it is not tidiness.
+  #
+  # The lock is held on file descriptor 9, an fd survives fork and exec, and
+  # socat outlives the daemon: kill the daemon and its follower is orphaned, goes
+  # on holding the lock, and the next daemon to start finds it taken and says
+  # "already running" -- so the daemon cannot be restarted at all until somebody
+  # works out that a stray socat is the reason. Observed doing exactly that.
+  done < <(socat -U - "UNIX-CONNECT:$sock" 9>&-)
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" && -z ${WG_DAEMON_NO_MAIN:-} ]]; then
