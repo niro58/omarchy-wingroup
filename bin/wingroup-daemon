@@ -224,14 +224,20 @@ wg_daemon_main() {
   # far below PIPE_BUF and arrive whole, so this is belt and braces -- but the
   # cost of being wrong is a silently mangled event, which is exactly the kind
   # that gets diagnosed months later.
-  local line buf="" rc
+  # `read && rc=0 || rc=$?`, and not `if read; then ... fi; rc=$?`: an if whose
+  # condition fails and which has no else leaves $? at 0, so the status of the
+  # read is gone by the time the next line could ask for it. Read it as zero and
+  # every timeout looks like end of stream -- the loop breaks on the first quiet
+  # tick, socat's next write gets a broken pipe, and the daemon is simply gone.
+  local line buf="" rc=0
   while :; do
-    if IFS= read -r -t "$WG_REFRESH_POLL" line; then
+    line=""
+    IFS= read -r -t "$WG_REFRESH_POLL" line && rc=0 || rc=$?
+    if (( rc == 0 )); then
       wg_daemon_handle_line "$buf$line" || true
       buf=""
       continue
     fi
-    rc=$?
     if (( rc > 128 )); then
       buf+="$line"
       wg_daemon_flush_refresh

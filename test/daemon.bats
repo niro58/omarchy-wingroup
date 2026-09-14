@@ -265,3 +265,64 @@ feed() {
   wg_daemon_flush_refresh
   [ "$(wc -l <"$WG_REFRESH_LOG")" -eq 2 ]
 }
+
+# The loop itself, which nothing else in this file runs.
+#
+# Every other test calls wg_daemon_handle_line directly, so the read loop around
+# it was never exercised -- and a bug that killed the daemon on its first idle
+# tick shipped with the suite green. `if read; then ... fi` followed by `rc=$?`
+# reads 0, because an if whose condition failed and which has no else leaves $?
+# at zero; every timeout then looked like end of stream, the loop broke, and the
+# daemon was gone a fifth of a second after starting.
+#
+# Two things this needs that the other tests do not: a real socket, because the
+# daemon refuses to start without one, and a read-write open of the fifo, because
+# a write-only open blocks until something opens the far end -- which is a
+# deadlock the moment the daemon declines to start.
+@test "the daemon survives a quiet stretch and keeps reading afterwards" {
+  local sig=testsig
+  export HYPRLAND_INSTANCE_SIGNATURE="$sig"
+  mkdir -p "$XDG_RUNTIME_DIR/hypr/$sig"
+  python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' \
+    "$XDG_RUNTIME_DIR/hypr/$sig/.socket2.sock"
+
+  local fifo="$WG_TMP/events"
+  mkfifo "$fifo"
+  printf '#!/usr/bin/env bash\nexec cat %q\n' "$fifo" >"$WG_TMP/socat"
+  chmod +x "$WG_TMP/socat"
+
+  # Read-write, so this never blocks waiting for a reader.
+  exec 9<>"$fifo"
+
+  # env -u WG_DAEMON_NO_MAIN: setup() sets it so the rest of this file can source
+  # the daemon and call its handlers without the read loop ever starting. This
+  # test wants the opposite -- the loop is the thing under test -- and with the
+  # variable still set the script would simply fall off the end and exit, which
+  # looks exactly like the crash being investigated.
+  PATH="$WG_TMP:$PATH" WG_REFRESH_POLL=0.1 \
+    env -u WG_DAEMON_NO_MAIN "$WG_ROOT/bin/wingroup-daemon" \
+    >"$WG_TMP/daemon.out" 2>&1 &
+  local daemon=$!
+
+  # Long enough that several read timeouts have come and gone -- the exact
+  # stretch the old loop did not survive.
+  sleep 1
+  if ! kill -0 "$daemon" 2>/dev/null; then
+    exec 9>&-
+    echo "daemon exited during the quiet stretch; it said:" >&2
+    tail -25 "$WG_TMP/daemon.out" | sed 's/^/    /' >&2
+    return 1
+  fi
+
+  # And it is still listening afterwards.
+  printf 'windowtitle>>aaa1\n' >&9
+  local i=0
+  while (( i++ < 50 )) && [ ! -s "$WG_REFRESH_LOG" ]; do sleep 0.1; done
+  local seen=0
+  [ -s "$WG_REFRESH_LOG" ] && seen=1
+
+  kill "$daemon" 2>/dev/null || true
+  wait "$daemon" 2>/dev/null || true
+  exec 9>&-
+  [ "$seen" -eq 1 ]
+}
