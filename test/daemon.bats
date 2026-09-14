@@ -326,3 +326,54 @@ feed() {
   exec 9>&-
   [ "$seen" -eq 1 ]
 }
+
+# Killing the daemon has to actually free the lock.
+#
+# The single-instance lock is held on file descriptor 9, and an fd survives fork
+# and exec -- so the journal follower inherited it. Kill the daemon and the
+# follower is orphaned still holding the lock, and every later start says
+# "already running" and exits. The daemon then cannot be restarted at all until
+# somebody notices a stray socat is the reason. Seen for real, on this machine,
+# while deploying the fix above.
+@test "killing the daemon frees its lock for the next one" {
+  local sig=testsig
+  export HYPRLAND_INSTANCE_SIGNATURE="$sig"
+  mkdir -p "$XDG_RUNTIME_DIR/hypr/$sig"
+  python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' \
+    "$XDG_RUNTIME_DIR/hypr/$sig/.socket2.sock"
+
+  local fifo="$WG_TMP/events"
+  mkfifo "$fifo"
+  # A follower that outlives its parent, which is what socat does.
+  printf '#!/usr/bin/env bash\nexec cat %q\n' "$fifo" >"$WG_TMP/socat"
+  chmod +x "$WG_TMP/socat"
+  exec 9<>"$fifo"
+
+  PATH="$WG_TMP:$PATH" WG_REFRESH_POLL=0.1 \
+    env -u WG_DAEMON_NO_MAIN "$WG_ROOT/bin/wingroup-daemon" \
+    >"$WG_TMP/first.out" 2>&1 &
+  local first=$!
+  local i=0
+  while (( i++ < 50 )) && ! pgrep -f "cat $fifo" >/dev/null; do sleep 0.1; done
+
+  kill "$first" 2>/dev/null || true
+  wait "$first" 2>/dev/null || true
+
+  # The follower is still around -- that is the point, it is what used to keep
+  # the lock -- so a second daemon must still be able to start.
+  PATH="$WG_TMP:$PATH" WG_REFRESH_POLL=0.1 \
+    env -u WG_DAEMON_NO_MAIN "$WG_ROOT/bin/wingroup-daemon" \
+    >"$WG_TMP/second.out" 2>&1 &
+  local second=$!
+  sleep 1
+  local alive=0
+  kill -0 "$second" 2>/dev/null && alive=1
+
+  kill "$second" 2>/dev/null || true
+  wait "$second" 2>/dev/null || true
+  for p in $(pgrep -f "cat $fifo" 2>/dev/null); do kill "$p" 2>/dev/null || true; done
+  exec 9>&-
+
+  [[ "$(cat "$WG_TMP/second.out")" != *"already running"* ]]
+  [ "$alive" -eq 1 ]
+}
