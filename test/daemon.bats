@@ -377,3 +377,17 @@ feed() {
   [[ "$(cat "$WG_TMP/second.out")" != *"already running"* ]]
   [ "$alive" -eq 1 ]
 }
+
+# A redraw runs every wingroup module in the bar, which measured 1.74s on a
+# desktop with eight groups. Asking faster than that does not make the bar
+# quicker, it makes a queue: waybar was found holding twelve to sixteen queued
+# refresh signals, drawing the desktop as it had been twenty seconds earlier.
+#
+# So the floor is the cost of a redraw. The exact number is a judgement, but a
+# default below a second is the mistake this is here to prevent.
+@test "the daemon does not ask for redraws faster than the bar can draw one" {
+  local default
+  default="$(env -u WG_REFRESH_DEBOUNCE_MS bash -c \
+    "WG_DAEMON_NO_MAIN=1 source '$WG_ROOT/bin/wingroup-daemon'; printf '%s' \"\$WG_REFRESH_DEBOUNCE_MS\"")"
+  [ "$default" -ge 1000 ]
+}
