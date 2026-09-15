@@ -872,6 +872,57 @@ notified_twice() { (( $(notifies) >= 2 )); }
   [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "false" ]
 }
 
+# A session can have more Claude processes in its terminal than itself: the
+# pen.dev CLI runs an Agent SDK child, and subagents and `claude -p` runs are
+# children too. They share the terminal's scope, but not its terminal -- they
+# have no controlling tty -- and not always its directory.
+#
+# The scan wrote every one of them into the scope's single entry in turn, so
+# whichever /proc listed last won. /proc is listed in string order, where 538572
+# comes after 2704, so a child started later usually did. The terminal was then
+# recorded as tty 0 -- "not in a terminal" -- and left out of the snapshot, and
+# the session did not come back after the reboot. Caught on a live desktop with
+# two sessions in exactly this state, both already missing from the record.
+@test "a tty-less child in a terminal does not hide the session from the snapshot" {
+  wg_fake_proc 2704 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_fake_proc 538572 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web/design" 0
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "true" ]
+  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].tty' "$WG_SESSIONS_FILE")" != "0" ]
+}
+
+# And the directory recorded is the session's, not the child's: the child is
+# standing in whatever folder its tool was pointed at.
+@test "a terminal's directory is taken from the session, not from its child" {
+  wg_fake_proc 2704 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_fake_proc 538572 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web/design" 0
+
+  run wg_sessions_scan
+  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].cwd' "$WG_SESSIONS_FILE")" = "$WG_TMP/projects/shop-web" ]
+}
+
+# Order-independent: the same answer when the child is the one /proc lists
+# first. "10001" sorts before "2704".
+@test "the session wins whichever of the two /proc lists first" {
+  wg_fake_proc 2704 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_fake_proc 10001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web/design" 0
+
+  run wg_sessions_scan
+  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].tty' "$WG_SESSIONS_FILE")" != "0" ]
+  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].cwd' "$WG_SESSIONS_FILE")" = "$WG_TMP/projects/shop-web" ]
+}
+
+# One terminal is one session, however many Claude processes are running in it.
+@test "a terminal with a child in it is counted as one session" {
+  wg_fake_proc 2704 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_fake_proc 538572 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web/design" 0
+
+  run wg_sessions_scan
+  [ "$output" -eq 1 ]
+}
+
 # A session the hook has recorded but no scan has classified yet has no tty
 # field at all. Dropping it would lose a session over a field that is merely
 # late; keeping it costs at worst one spare window.
