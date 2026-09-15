@@ -267,9 +267,28 @@ wg_sessions_record() {
 # exists at all: it cannot learn their session id, but it can still learn that
 # *something* was running in that scope, and in which directory -- enough to
 # tell you which project you lost.
+# Whether a Claude process ($3 tty, $4 pid) is a better witness for its terminal
+# than the one picked so far ($1 tty -- "unset" when nothing is picked yet -- and
+# $2 pid).
+#
+# The one with a controlling terminal wins: that is the session, and anything
+# without one in the same scope is something it started. Between two that agree
+# on that, the lower pid wins -- the older process, which is the session rather
+# than a child of it -- compared as numbers, not in the string order /proc hands
+# them out in.
+wg_sessions_scan_prefer() {
+  local have_tty="$1" have_pid="$2" tty="$3" pid="$4" have_term cand_term
+  [[ $have_tty != unset ]] || return 0
+  have_term=0; [[ -n $have_tty && $have_tty != 0 ]] && have_term=1
+  cand_term=0; [[ -n $tty && $tty != 0 ]] && cand_term=1
+  (( cand_term != have_term )) && return $(( cand_term ? 0 : 1 ))
+  (( pid < have_pid ))
+}
+
 wg_sessions_scan() {
   local dir pid comm scope cwd tty found=0
   local -a stat=()
+  local -A pick_pid=() pick_tty=() pick_cwd=()
   # One compositor query for the whole pass, not one per session: the answer is
   # the same for every scope and asking per process would be a fork each.
   local -A ws_of=() at_of=() mon_of=()
@@ -313,8 +332,30 @@ wg_sessions_scan() {
       tty="${stat[6]:-}"
     fi
     [[ $tty =~ ^[0-9]+$ ]] || tty=""
-    wg_sessions_record "$scope" "" "$cwd" scan "$tty" "${ws_of[$scope]:-}" "" \
-      "${at_of[$scope]:-}" "${mon_of[$scope]:-}"
+    # Not recorded yet: one terminal can hold several Claude processes, and only
+    # one of them is the session. See below.
+    if wg_sessions_scan_prefer "${pick_tty[$scope]-unset}" "${pick_pid[$scope]:-}" "$tty" "$pid"; then
+      pick_pid[$scope]="$pid"
+      pick_tty[$scope]="$tty"
+      pick_cwd[$scope]="$cwd"
+    fi
+  done
+
+  # One entry per terminal, written from the process that is the session.
+  #
+  # A session is not always alone in its scope. The pen.dev CLI runs an Agent
+  # SDK child, and subagents and `claude -p` runs are children too; they share
+  # the terminal's scope but have no controlling terminal of their own, and
+  # stand in whatever directory their tool was pointed at. Recording each of
+  # them in turn let whichever /proc listed last decide the entry -- and /proc
+  # is listed in string order, where 538572 comes after 2704, so a child started
+  # later usually won. The terminal was then written down as tty 0, which the
+  # snapshot reads as "not in a terminal", and the session was left out of the
+  # record and did not come back after the reboot. Two live sessions were found
+  # in exactly that state.
+  for scope in "${!pick_pid[@]}"; do
+    wg_sessions_record "$scope" "" "${pick_cwd[$scope]}" scan "${pick_tty[$scope]}" \
+      "${ws_of[$scope]:-}" "" "${at_of[$scope]:-}" "${mon_of[$scope]:-}"
     found=$(( found + 1 ))
   done
   wg_sessions_expire
