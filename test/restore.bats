@@ -921,6 +921,124 @@ EOF
   [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
+# --- the sessions oomd killed while nobody was looking -----------------------
+#
+# A crash is the one loss the snapshot cannot cover: being killed is precisely
+# not being open at shutdown. The crash list is the only record, and it used to
+# live on tmpfs -- so the reboot the user hoped would bring everything back was
+# also what threw the record away.
+
+wg_write_crashed() {
+  local boot="$1"; shift
+  local entry crashed='[]' n=0 session cwd ws
+  # "session:dir[:workspace]"
+  for entry in ${@+"$@"}; do
+    n=$(( n + 1 ))
+    session="${entry%%:*}"
+    cwd="${entry#*:}"
+    ws=""
+    [[ $cwd == *:* ]] && { ws="${cwd#*:}"; cwd="${cwd%%:*}"; }
+    crashed="$(jq --arg s "scope-c$n.scope" --arg id "$session" --arg cwd "$cwd" \
+                  --arg ws "$ws" --arg b "$boot" \
+                  '. + [({scope: $s, session: $id, cwd: $cwd, killed_at: "2026-09-17T20:00:00+0200"}
+                         + (if $ws == "" then {} else {workspace: $ws} end)
+                         + (if $b == "" then {} else {boot: $b} end))]' <<<"$crashed")"
+  done
+  mkdir -p "$WG_STATE_DIR"
+  jq -n --argjson c "$crashed" '{crashed: $c}' >"$WG_STATE_DIR/crashed.json"
+}
+
+@test "a session killed in a previous boot is opened at login" {
+  local gone="$WG_TMP/projects/shop-web"
+  mkdir -p "$gone"
+  wg_write_crashed "$WG_BOOT_BEFORE" "dead-1:$gone:misc"
+  wg_snapshot_from_last_boot
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  wait_until launched_at_least 1
+  run launched_resume "$gone" "dead-1"
+  [ "$status" -eq 0 ]
+}
+
+@test "and its record is dropped, so it is not opened again at the next login" {
+  local gone="$WG_TMP/projects/shop-web"
+  mkdir -p "$gone"
+  wg_write_crashed "$WG_BOOT_BEFORE" "dead-1:$gone:misc"
+  wg_snapshot_from_last_boot
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run bash -c "jq '.crashed | length' '$WG_STATE_DIR/crashed.json'"
+  [ "$output" -eq 0 ]
+}
+
+# The bar goes on flagging what died in this boot: the user has not dealt with
+# those yet, and nothing has restarted underneath them.
+@test "a crash from this boot is left alone" {
+  local gone="$WG_TMP/projects/shop-web"
+  mkdir -p "$gone"
+  wg_write_crashed "$WG_BOOT_NOW" "dead-now:$gone:misc"
+  wg_snapshot_from_last_boot
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  [ "$(launch_count)" -eq 0 ]
+  run bash -c "jq '.crashed | length' '$WG_STATE_DIR/crashed.json'"
+  [ "$output" -eq 1 ]
+}
+
+# A session can be killed, restored by hand, and still be on screen at
+# shutdown. Opening it twice is worse than not opening it at all.
+@test "a crashed session the snapshot already brings back is not opened twice" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_make_dirs "abc-123:$shop:misc"
+  wg_snapshot_from_last_boot "abc-123:$shop:misc"
+  wg_write_crashed "$WG_BOOT_BEFORE" "abc-123:$shop:misc"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  wait_until launched_at_least 1
+  [ "$(launch_count)" -eq 1 ]
+}
+
+@test "a crashed session whose directory is gone is skipped and its record kept" {
+  wg_write_crashed "$WG_BOOT_BEFORE" "dead-1:$WG_TMP/projects/vanished:misc"
+  wg_snapshot_from_last_boot
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  [ "$(launch_count)" -eq 0 ]
+}
+
+@test "a crashed session is put back on the workspace it died on" {
+  local gone="$WG_TMP/projects/shop-web"
+  mkdir -p "$gone"
+  wg_write_crashed "$WG_BOOT_BEFORE" "dead-1:$gone:misc"
+  wg_snapshot_from_last_boot
+  wg_fake_terminal 2001 2002 "$gone" "dead-1"
+  wg_write_clients "0xbbb1:2001:1"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run dispatches
+  [ "$output" = "movetoworkspacesilent name:misc,address:0xbbb1" ]
+}
+
+@test "a dry run says which crashed sessions it would open, and opens none" {
+  local gone="$WG_TMP/projects/shop-web"
+  mkdir -p "$gone"
+  wg_write_crashed "$WG_BOOT_BEFORE" "dead-1:$gone:misc"
+  wg_snapshot_from_last_boot
+
+  run "$WG_ROOT/bin/wingroup-restore" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"crashed $gone  dead-1"* ]]
+  [ "$(launch_count)" -eq 0 ]
+  run bash -c "jq '.crashed | length' '$WG_STATE_DIR/crashed.json'"
+  [ "$output" -eq 1 ]
+}
+
 # The ordering is the whole point, so the order of the dispatches is what is
 # asserted. tidy files this window by its project, which the shop group owns;
 # the record says the user had parked it on misc. Placing before tidy would

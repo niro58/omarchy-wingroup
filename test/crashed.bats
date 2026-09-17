@@ -114,7 +114,7 @@ wg_crash() {
   # attempted and failed, not one that never reached the launcher at all.
   run bash -c "wc -l <'$WG_LAUNCH_LOG'"
   [ "$output" -eq 1 ]
-  run jq -r '.crashed[0].session' "$WG_RUNTIME_DIR/crashed.json"
+  run jq -r '.crashed[0].session' "$WG_STATE_DIR/crashed.json"
   [ "$output" = "sess-a1" ]
   run wingroup crashed
   [[ "${lines[0]}" == "1 session(s) killed by systemd-oomd:" ]]
@@ -147,7 +147,7 @@ wg_crash() {
   [ "$output" -eq 2 ]
   # Sorted rather than indexed, for the reason the launch log is counted: the
   # launches are backgrounded, so the two records can be written in either order.
-  run jq -r '[.crashed[].session] | sort | join(",")' "$WG_RUNTIME_DIR/crashed.json"
+  run jq -r '[.crashed[].session] | sort | join(",")' "$WG_STATE_DIR/crashed.json"
   [ "$output" = "sess-a1,sess-b2" ]
 }
 
@@ -245,7 +245,7 @@ wg_crash_pair() {
   [[ "$output" == *"claude --resume"* ]]
   [[ "$output" == *"sess-a1"* ]]
   # Only its own record is gone; the other is still on file, session id and all.
-  run jq -r '[.crashed[].cwd] | join(",")' "$WG_RUNTIME_DIR/crashed.json"
+  run jq -r '[.crashed[].cwd] | join(",")' "$WG_STATE_DIR/crashed.json"
   [ "$output" = "$WG_TMP/shop-api" ]
   run bash -c "wc -l <'$WG_REFRESH_LOG'"
   [ "$output" -eq 1 ]
@@ -261,7 +261,7 @@ wg_crash_pair() {
   run cat "$WG_LAUNCH_LOG"
   [[ "$output" == *"--dir=$WG_TMP/shop-api"* ]]
   [[ "$output" != *"--resume"* ]]
-  run jq -r '[.crashed[].session] | join(",")' "$WG_RUNTIME_DIR/crashed.json"
+  run jq -r '[.crashed[].session] | join(",")' "$WG_STATE_DIR/crashed.json"
   [ "$output" = "sess-a1" ]
 }
 
@@ -274,7 +274,7 @@ wg_crash_pair() {
   export WG_WALKER_PICK=1
   run wingroup crashed --menu
   [ "$status" -ne 0 ]
-  run jq -r '[.crashed[].session] | sort | join(",")' "$WG_RUNTIME_DIR/crashed.json"
+  run jq -r '[.crashed[].session] | sort | join(",")' "$WG_STATE_DIR/crashed.json"
   [ "$output" = ",sess-a1" ]
 }
 
@@ -309,7 +309,7 @@ wg_crash_pair() {
   [ "$status" -eq 0 ]
   [ ! -s "$WG_LAUNCH_LOG" ]
   [ ! -s "$WG_REFRESH_LOG" ]
-  run jq -r '.crashed | length' "$WG_RUNTIME_DIR/crashed.json"
+  run jq -r '.crashed | length' "$WG_STATE_DIR/crashed.json"
   [ "$output" -eq 2 ]
 }
 
@@ -336,7 +336,7 @@ wg_crash_pair() {
   [[ "$output" == *"the directory is gone"* ]]
   [ ! -s "$WG_LAUNCH_LOG" ]
   [ ! -s "$WG_REFRESH_LOG" ]
-  run jq -r '[.crashed[].session] | sort | join(",")' "$WG_RUNTIME_DIR/crashed.json"
+  run jq -r '[.crashed[].session] | sort | join(",")' "$WG_STATE_DIR/crashed.json"
   [ "$output" = "sess-a1,sess-x" ]
   run cat "$WG_NOTIFY_LOG"
   [[ "$output" == *"$WG_TMP/vanished"* ]]
@@ -382,7 +382,7 @@ wg_crash_pair() {
   run wingroup crashed --menu --restore
   [ "$status" -ne 0 ]
   [ ! -s "$WG_LAUNCH_LOG" ]
-  run bash -c "jq '.crashed | length' '$WG_RUNTIME_DIR/crashed.json'"
+  run bash -c "jq '.crashed | length' '$WG_STATE_DIR/crashed.json'"
   [ "$output" -eq 1 ]
 }
 
@@ -435,7 +435,7 @@ wg_crash_pair() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"relaunched 1 session(s)"* ]]
   # the record is gone, promptly, rather than when the terminal is closed
-  run bash -c "jq '.crashed | length' '$WG_RUNTIME_DIR/crashed.json' 2>/dev/null || echo 0"
+  run bash -c "jq '.crashed | length' '$WG_STATE_DIR/crashed.json' 2>/dev/null || echo 0"
   [ "$output" -eq 0 ]
   run bash -c "wc -l <'$WG_REFRESH_LOG'"
   [ "$output" -ge 1 ]
@@ -451,7 +451,7 @@ wg_crash_pair() {
 
   run timeout 10 env WG_WALKER_PICK=1 "$WG_ROOT/bin/wingroup" crashed --menu
   [ "$status" -eq 0 ]
-  run bash -c "jq '.crashed | length' '$WG_RUNTIME_DIR/crashed.json' 2>/dev/null || echo 0"
+  run bash -c "jq '.crashed | length' '$WG_STATE_DIR/crashed.json' 2>/dev/null || echo 0"
   [ "$output" -eq 0 ]
 }
 
