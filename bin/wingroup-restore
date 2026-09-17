@@ -75,11 +75,11 @@ wg_restore_from_snapshot() {
     if [[ -n $session ]]; then
       # Keep the shell alive if the resume fails, so the error stays readable.
       # shellcheck disable=SC2016  # $0 belongs to bash -c, which expands it
-      "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
+      wg_launch_clean "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
         bash -c 'claude --resume "$0" || { echo; echo "resume failed for $0"; exec bash; }' "$session" \
         >/dev/null 2>&1 &
     else
-      "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
+      wg_launch_clean "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
         bash -c 'claude || { echo; echo "claude exited"; exec bash; }' \
         >/dev/null 2>&1 &
     fi
@@ -137,11 +137,11 @@ wg_restore_crashed_rows() {
     (( ! dry )) || continue
     if [[ -n $session ]]; then
       # shellcheck disable=SC2016  # $0 belongs to bash -c, which expands it
-      "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
+      wg_launch_clean "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
         bash -c 'claude --resume "$0" || { echo; echo "resume failed for $0"; exec bash; }' "$session" \
         >/dev/null 2>&1 &
     else
-      "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
+      wg_launch_clean "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
         bash -c 'claude || { echo; echo "claude exited"; exec bash; }' \
         >/dev/null 2>&1 &
     fi

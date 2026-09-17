@@ -588,7 +588,7 @@ wg_crash_launch() {
   if [[ -n $session ]]; then
     printf 'wingroup: resuming %s in %s\n' "$session" "$cwd"
     # shellcheck disable=SC2016  # $0 belongs to bash -c, which expands it
-    "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
+    wg_launch_clean "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
       bash -c 'claude --resume "$0" || { echo; echo "resume failed for $0"; exec bash; }' "$session" \
       >/dev/null 9>&- &
   else
@@ -597,7 +597,7 @@ wg_crash_launch() {
     # A fresh claude there is the most that can be offered, and saying so is the
     # point -- the conversation is not coming back.
     printf 'wingroup: no session id for %s — starting a fresh claude there\n' "$cwd"
-    "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
+    wg_launch_clean "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
       bash -c 'claude || { echo; echo "claude exited"; exec bash; }' \
       >/dev/null 9>&- &
   fi
