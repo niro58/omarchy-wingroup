@@ -29,7 +29,6 @@
 
 : "${WG_RUNTIME_DIR:=${XDG_RUNTIME_DIR:-/tmp}/wingroup}"
 WG_SESSIONS_FILE="$WG_RUNTIME_DIR/sessions.json"
-WG_CRASHED_FILE="$WG_RUNTIME_DIR/crashed.json"
 WG_RUNTIME_LOCK="$WG_RUNTIME_DIR/.runtime.lock"
 : "${WG_RUNTIME_LOCK_WAIT:=5}"
 
@@ -48,6 +47,17 @@ WG_RUNTIME_LOCK="$WG_RUNTIME_DIR/.runtime.lock"
 # In the state directory, not the runtime one: everything else here is about
 # processes that exist, and this is the one thing that has to survive them.
 : "${WG_STATE_DIR:=$HOME/.local/state/omarchy/wingroup}"
+
+# The crash list lives there too, for the same reason and a harder-won one.
+#
+# It used to sit in the runtime directory, which is tmpfs: a reboot emptied it.
+# A session oomd killed while nobody was looking was therefore lost twice over
+# -- it was not open at shutdown, so the snapshot never knew about it, and the
+# one record that did was thrown away by the very reboot the user was hoping
+# would bring everything back. Measured on a real desktop: nine terminals killed
+# across two days, and the only one that stayed gone was the one still waiting
+# on the bar when the machine went down.
+WG_CRASHED_FILE="$WG_STATE_DIR/crashed.json"
 WG_SNAPSHOT_FILE="$WG_STATE_DIR/sessions-snapshot.json"
 WG_SNAPSHOT_PREV="$WG_STATE_DIR/sessions-snapshot.prev.json"
 
@@ -128,7 +138,14 @@ wg_runtime_update() {
   fi
   # Written through a temporary and renamed, so a reader taking no lock -- the
   # bar, on every title change -- never sees a half-written document.
-  if ! tmp="$(mktemp "$WG_RUNTIME_DIR/.rt.XXXXXX")"; then
+  #
+  # The temporary goes beside the file it replaces, not in the runtime
+  # directory. rename(2) cannot cross a filesystem, and these two documents no
+  # longer live on the same one: the session map is on tmpfs and the crash list
+  # is in the state directory, so a temporary made in the wrong place would fail
+  # the move every time -- silently, on the path that records a lost session.
+  mkdir -p "$(dirname "$file")" || { exec {fd}>&-; return 1; }
+  if ! tmp="$(mktemp "$(dirname "$file")/.rt.XXXXXX")"; then
     exec {fd}>&-
     return 1
   fi
@@ -421,14 +438,47 @@ wg_crashed_add() {
   # nowhere in particular, and one that had been moved lands back where it was
   # moved from.
   workspace="$(jq -r '.workspace // ""' <<<"$entry")"
+  # Stamped with the boot it died in, because the list outlives the boot now.
+  # That is what lets the next login tell a session it still owes the user from
+  # one killed since -- and a scope name is not enough to tell them apart, since
+  # the scope is gone either way.
   # shellcheck disable=SC2016  # jq variables
   wg_runtime_update "$WG_CRASHED_FILE" "$(wg_crashed_default)" '
     if any(.crashed[]; .scope == $scope) then .
     else .crashed += [({scope: $scope, session: $session, cwd: $cwd, killed_at: $at}
-                       + (if $ws == "" then {} else {workspace: $ws} end))]
+                       + (if $ws == "" then {} else {workspace: $ws} end)
+                       + (if $boot == "" then {} else {boot: $boot} end))]
     end
   ' --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" --arg at "$killed_at" \
-    --arg ws "$workspace"
+    --arg ws "$workspace" --arg boot "$(wg_boot_id)"
+}
+
+# The crashes from boots that have ended: sessions oomd killed and nobody
+# brought back before the machine went down. Same four columns wg_crashed_rows
+# prints, so a caller can treat them the same way.
+#
+# A record with no boot id is left out rather than assumed old. It predates the
+# stamp, which means it was written in this boot by the version that did not
+# stamp -- relaunching it here would open a second terminal for a session that
+# is very likely still on screen.
+wg_crashed_previous_rows() {
+  local boot
+  boot="$(wg_boot_id)"
+  [[ -n $boot ]] || return 0
+  jq -r --arg b "$boot" '.crashed[]
+    | select((.boot // "") != "" and (.boot != $b))
+    | [.session, .cwd, .killed_at, .workspace // ""] | @tsv' <<<"$(wg_crashed_read)"
+}
+
+# Drops every crash from a boot that has ended, leaving this boot's alone -- the
+# bar goes on flagging those until the user deals with them.
+wg_crashed_drop_previous() {
+  local boot
+  boot="$(wg_boot_id)"
+  [[ -n $boot ]] || return 0
+  # shellcheck disable=SC2016  # jq variables
+  wg_runtime_update "$WG_CRASHED_FILE" "$(wg_crashed_default)" \
+    '.crashed |= map(select((.boot // "") == "" or .boot == $b))' --arg b "$boot"
 }
 
 # Empties the crash list by removing the file, not by writing an empty document.

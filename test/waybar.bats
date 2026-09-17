@@ -518,7 +518,7 @@ wg_crash_clear() {
   [ "$status" -eq 0 ]
   local absent
   absent="$(jq_calls)"
-  printf '%s\n' '{"crashed":[]}' >"$WG_RUNTIME_DIR/crashed.json"
+  printf '%s\n' '{"crashed":[]}' >"$WG_STATE_DIR/crashed.json"
   : >"$WG_JQ_LOG"
   run "$WG_ROOT/bin/wingroup-waybar" 0
   [ "$status" -eq 0 ]
@@ -566,7 +566,7 @@ wg_crash_clear() {
 # writer could leave behind, and it means the same thing to the bar.
 @test "an empty crash list draws nothing either" {
   mkdir -p "$WG_RUNTIME_DIR"
-  printf '%s\n' '{"crashed":[]}' >"$WG_RUNTIME_DIR/crashed.json"
+  printf '%s\n' '{"crashed":[]}' >"$WG_STATE_DIR/crashed.json"
   run "$WG_ROOT/bin/wingroup-waybar" crashed
   [ "$status" -eq 0 ]
   [ "$(jq -r '.text' <<<"$output")" = "" ]

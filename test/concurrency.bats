@@ -153,11 +153,11 @@ EOF
   # restored. One picker wins the lock and takes one; the other must find the
   # lock held and do nothing at all.
   local left launched
-  left="$(jq '.crashed | length' "$WG_RUNTIME_DIR/crashed.json" 2>/dev/null || echo 0)"
+  left="$(jq '.crashed | length' "$WG_STATE_DIR/crashed.json" 2>/dev/null || echo 0)"
   launched="$(grep -c . "$WG_LAUNCH_LOG" || true)"
   [ "$launched" -eq 1 ]
   [ "$left" -eq 1 ]
   # and the one still on file is the one that was not launched
-  run bash -c "jq -r '.crashed[0].session' '$WG_RUNTIME_DIR/crashed.json'"
+  run bash -c "jq -r '.crashed[0].session' '$WG_STATE_DIR/crashed.json'"
   [ "$output" = "sess-B" ]
 }

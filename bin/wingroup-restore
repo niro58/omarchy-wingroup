@@ -88,6 +88,69 @@ wg_restore_from_snapshot() {
   printf '%s\n' "$count"
 }
 
+# The sessions oomd killed in a boot that has ended, and nobody brought back
+# before the machine went down.
+#
+# They are not in the snapshot -- they were not open at shutdown, that is what
+# being killed means -- and until the crash list started outliving the reboot
+# they had nowhere else to come from either. So they are opened here, beside
+# everything that was open, and their records are dropped once they are.
+#
+# Rows for a session the snapshot is already bringing back are left out: a
+# session can be killed, restored by hand, and still be on screen at shutdown,
+# and opening it twice is worse than not opening it at all.
+#
+# The rows come back in the same shape wg_place_rows wants, so the arrangement
+# passes treat them like everything else -- what is known about where a crashed
+# session was is the workspace, so that is what it gets.
+wg_restore_crashed_rows() {
+  local dry="$1" snapshot_rows="$2" row rest session cwd ws count=0
+  local -a keep=()
+  while IFS= read -r row; do
+    [[ -n $row ]] || continue
+    # A crash row is session, directory, when it died, workspace -- a different
+    # shape from a snapshot row, so it is peeled here rather than handed to
+    # wg_place_row_split. By expansion, because the session id is empty for
+    # anything that predates the hook and read would collapse that column.
+    session="${row%%$'	'*}"
+    rest="${row#*$'	'}"
+    cwd="${rest%%$'	'*}"
+    rest="${rest#*$'	'}"
+    ws=""
+    [[ $rest == *$'	'* ]] && ws="${rest#*$'	'}"
+    [[ -n $cwd ]] || continue
+    if [[ -n $session && $snapshot_rows == *"$session"* ]]; then
+      printf 'skip   %s  (already coming back from the snapshot)\n' "$cwd" >&2
+      continue
+    fi
+    if [[ ! -d $cwd ]]; then
+      printf 'skip   %s  (directory is gone)\n' "$cwd" >&2
+      continue
+    fi
+    count=$(( count + 1 ))
+    if [[ -n $session ]]; then
+      printf 'crashed %s  %s\n' "$cwd" "$session" >&2
+    else
+      printf 'crashed %s  (no session id was recorded)\n' "$cwd" >&2
+    fi
+    keep+=("$session"$'\t'"$cwd"$'\t'"$ws")
+    (( ! dry )) || continue
+    if [[ -n $session ]]; then
+      # shellcheck disable=SC2016  # $0 belongs to bash -c, which expands it
+      "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
+        bash -c 'claude --resume "$0" || { echo; echo "resume failed for $0"; exec bash; }' "$session" \
+        >/dev/null 2>&1 &
+    else
+      "${WG_LAUNCH_CMD:-uwsm-app}" -- xdg-terminal-exec --dir="$cwd" -- \
+        bash -c 'claude || { echo; echo "claude exited"; exec bash; }' \
+        >/dev/null 2>&1 &
+    fi
+    disown 2>/dev/null || true
+  done < <(wg_crashed_previous_rows)
+  (( count )) && printf '%s\n' "${keep[@]}"
+  return 0
+}
+
 wg_restore_unflag() { rm -f "$WG_RESTORE_FLAG"; }
 trap wg_restore_unflag EXIT
 : >"$WG_RESTORE_FLAG"
@@ -104,6 +167,9 @@ WG_SNAPSHOT_ROWS="$(wg_snapshot_previous_rows)" || WG_HAVE_SNAPSHOT=0
 
 # Everything the snapshot prints is for the user; only the last line is the
 # count, which is this script's own business.
+# Opened together with the snapshot's own, so the settle below covers both.
+WG_CRASH_ROWS="$(wg_restore_crashed_rows "$WG_DRY" "$WG_SNAPSHOT_ROWS")"
+
 WG_SNAPSHOT_OUT="$(wg_restore_from_snapshot "$WG_DRY" "$WG_SNAPSHOT_ROWS")"
 WG_SNAPSHOT_COUNT="${WG_SNAPSHOT_OUT##*$'\n'}"
 [[ $WG_SNAPSHOT_OUT == *$'\n'* ]] && printf '%s\n' "${WG_SNAPSHOT_OUT%$'\n'*}"
@@ -148,7 +214,17 @@ wingroup tidy --yes
 # deliberately parked elsewhere the two disagree. Placing first would have tidy
 # overwrite it. The workspace the session was actually on is what the user
 # arranged, so it goes last and has the last word.
-wg_place_rows "$WG_DRY" "$WG_SNAPSHOT_ROWS"
+# The crashed sessions are placed with the rest: they know which workspace they
+# were on and nothing else, which is exactly what wg_place_rows asks for.
+WG_PLACE_INPUT="$WG_SNAPSHOT_ROWS"
+[[ -z $WG_CRASH_ROWS ]] || WG_PLACE_INPUT="${WG_SNAPSHOT_ROWS:+$WG_SNAPSHOT_ROWS$'\n'}$WG_CRASH_ROWS"
+
+wg_place_rows "$WG_DRY" "$WG_PLACE_INPUT"
+
+# Their records have served their purpose: the sessions are back on screen, and
+# leaving the entries behind would flag them on the bar for ever and open them
+# again at the next login.
+(( WG_DRY )) || [[ -z $WG_CRASH_ROWS ]] || wg_crashed_drop_previous
 
 # Then the arrangement, which only means anything once every terminal is on its
 # workspace: which monitor each workspace is on first, because moving a
