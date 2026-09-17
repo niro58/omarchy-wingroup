@@ -411,6 +411,40 @@ wg_sessions_expire() {
   ' --arg now "$now" --arg ttl "$WG_SESSIONS_TTL"
 }
 
+# Runs $@ with this process's Claude Code variables removed.
+#
+# A Claude session launched from inside another one inherits its markers --
+# CLAUDE_CODE_CHILD_SESSION above all -- and a session that believes it is a
+# child does not persist its transcript. So restoring a crash from a terminal
+# that happens to be running Claude hands back a session that quietly saves
+# nothing, with "Transcript saving is off" across the top of it. Eleven sessions
+# were reopened that way before anyone noticed.
+#
+# The login restore is safe either way -- Hyprland's autostart has no such
+# variables -- but `wingroup crashed --restore` inherits whatever shell it was
+# run from, and that shell is sometimes a Claude session.
+#
+# Read from `env` rather than /proc/self/environ: a shell that exports these
+# after it starts has them in its environment and not in the process's initial
+# image, and reading the image finds nothing to strip. Which is its own small
+# lesson in checking that a fix did anything.
+#
+# Only wingroup's own launches are cleaned. The variables stay in the calling
+# shell, where they are somebody else's business.
+wg_launch_clean() {
+  local name
+  local -a strip=()
+  while IFS= read -r name; do
+    [[ -n $name ]] || continue
+    strip+=("-u$name")
+  done < <(env | sed -E 's/=.*//' | grep -E '^(CLAUDE|ANTHROPIC)' | sort -u)
+  if (( ${#strip[@]} == 0 )); then
+    "$@"
+    return
+  fi
+  env "${strip[@]}" "$@"
+}
+
 # Files a crash for scope $1, killed at $2 (an ISO timestamp from the journal).
 #
 # Only a scope we have a session for is recorded. Every app on the desktop gets

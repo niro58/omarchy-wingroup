@@ -5,3 +5,6 @@ set -euo pipefail
 # arguments tab separated, so a test can assert the directory and the session id
 # a relaunch asked for.
 printf '%s\n' "$(printf '%s\t' "$@")" >>"$WG_LAUNCH_LOG"
+# Test-only: with $WG_LAUNCH_ENV_LOG set, record the Claude variables the
+# launcher was handed, so a test can assert what a relaunched session inherits.
+[[ -z ${WG_LAUNCH_ENV_LOG:-} ]] || env | grep -E '^(CLAUDE|ANTHROPIC)' >>"$WG_LAUNCH_ENV_LOG" || true

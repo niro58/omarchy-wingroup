@@ -699,3 +699,52 @@ EOF
   run bash -c "grep -c '0xuser' '$WG_DISPATCH_LOG' || true"
   [ "$output" -eq 0 ]
 }
+
+# A session launched from inside another Claude session inherits its markers,
+# and a session that believes it is a child does not save its transcript. The
+# login restore never sees those variables -- Hyprland's autostart has none --
+# but this command inherits whatever shell it was run from, and that shell is
+# sometimes a Claude session. Eleven sessions were reopened that way, every one
+# of them quietly saving nothing.
+@test "a relaunched session does not inherit the child-session marker" {
+  export WG_LAUNCH_ENV_LOG="$WG_TMP/launch-env"
+  : >"$WG_LAUNCH_ENV_LOG"
+  export CLAUDE_CODE_CHILD_SESSION=1
+  export CLAUDE_CODE_SESSION_ID=the-session-doing-the-restoring
+  export CLAUDECODE=1
+  mkdir -p "$WG_TMP/shop-web"
+  wg_crash "$WG_TMP/shop-web" "sess-a1"
+
+  run wingroup crashed --restore
+  [ "$status" -eq 0 ]
+  # The launch must have happened, or an empty environment log proves nothing.
+  run bash -c "grep -cF -- 'sess-a1' '$WG_LAUNCH_LOG'"
+  [ "$output" -eq 1 ]
+  run cat "$WG_LAUNCH_ENV_LOG"
+  [ -z "$output" ]
+}
+
+# And the launch still happens: stripping the environment must not become a
+# quiet way of launching nothing.
+@test "the relaunch itself still goes through with the variables stripped" {
+  export WG_LAUNCH_ENV_LOG="$WG_TMP/launch-env"
+  export CLAUDE_CODE_CHILD_SESSION=1
+  mkdir -p "$WG_TMP/shop-web"
+  wg_crash "$WG_TMP/shop-web" "sess-a1"
+
+  run wingroup crashed --restore
+  [ "$status" -eq 0 ]
+  run bash -c "grep -cF -- 'sess-a1' '$WG_LAUNCH_LOG'"
+  [ "$output" -eq 1 ]
+}
+
+# With nothing to strip, the launch is made exactly as it always was.
+@test "a shell with no Claude variables launches the same way" {
+  mkdir -p "$WG_TMP/shop-web"
+  wg_crash "$WG_TMP/shop-web" "sess-a1"
+
+  run wingroup crashed --restore
+  [ "$status" -eq 0 ]
+  run bash -c "grep -cF -- 'sess-a1' '$WG_LAUNCH_LOG'"
+  [ "$output" -eq 1 ]
+}
