@@ -239,7 +239,7 @@ wg_place_rows() {
     # Silently, for the same reason a login restore holds WG_RESTORE_FLAG: a
     # placement pass must not drag the desktop from workspace to workspace
     # while the user is watching.
-    wg_hypr_dispatch movetoworkspacesilent "name:$want,address:$addr"
+    wg_hypr_dispatch movetoworkspacesilent "$(wg_ws_selector "$want"),address:$addr"
   done < <(wg_hypr_query clients 2>/dev/null \
            | jq -r '.[] | select(.pid != null and .address != null)
                     | [.address, (.pid | tostring), (.workspace.name // "")] | @tsv' 2>/dev/null)
@@ -308,7 +308,7 @@ wg_place_monitors() {
     [[ $mon != "$want" ]] || continue
     printf 'monitor  %s  %s\n' "$ws" "$want"
     (( ! dry )) || continue
-    wg_hypr_dispatch moveworkspacetomonitor "name:$ws $want"
+    wg_hypr_dispatch moveworkspacetomonitor "$(wg_ws_selector "$ws") $want"
   done < <(wg_hypr_query workspaces 2>/dev/null \
            | jq -r '.[] | [.name, (.monitor // "")] | @tsv' 2>/dev/null)
 }

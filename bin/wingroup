@@ -111,11 +111,11 @@ cmd_activate() {
     wg_hypr_dispatch focusmonitor "$monitor"
     lives_on="$(wg_group_monitor "$target")"
     if [[ -n $lives_on && $lives_on != "$monitor" ]]; then
-      wg_hypr_dispatch moveworkspacetomonitor "name:$target $monitor"
+      wg_hypr_dispatch moveworkspacetomonitor "$(wg_ws_selector "$target") $monitor"
     fi
   fi
 
-  wg_hypr_dispatch workspace "name:$target"
+  wg_hypr_dispatch workspace "$(wg_ws_selector "$target")"
 }
 
 # monitor <group> <monitor-name> pins; monitor <group> - clears the pin.
@@ -158,7 +158,7 @@ cmd_monitor() {
   local lives_on
   lives_on="$(wg_group_monitor "$name")"
   if [[ -n $lives_on && $lives_on != "$monitor" ]]; then
-    wg_hypr_dispatch moveworkspacetomonitor "name:$name $monitor"
+    wg_hypr_dispatch moveworkspacetomonitor "$(wg_ws_selector "$name") $monitor"
   fi
   wg_refresh
 }
@@ -178,7 +178,7 @@ cmd_cycle() {
     index=$(( direction == 1 ? -1 : 0 ))
   fi
   index=$(( (index + direction + ${#names[@]}) % ${#names[@]} ))
-  wg_hypr_dispatch workspace "name:${names[index]}"
+  wg_hypr_dispatch workspace "$(wg_ws_selector "${names[index]}")"
 }
 
 # The group cmd_new last created, and how many windows it filed onto it. Its
@@ -400,7 +400,7 @@ cmd_send() {
   wg_group_exists "$group" "$state" || wg_die "no such group: $group"
   # shellcheck disable=SC2016  # $a and $g are jq variables, not shell ones
   wg_state_update '.overrides[$a] = $g' --arg a "$address" --arg g "$group"
-  wg_hypr_dispatch movetoworkspacesilent "name:$group,address:$address"
+  wg_hypr_dispatch movetoworkspacesilent "$(wg_ws_selector "$group"),address:$address"
   wg_refresh
 }
 
@@ -453,7 +453,7 @@ wg_group_file_windows() {
   [[ -n $moves ]] || { printf '0\n'; return 0; }
   while IFS=$'\t' read -r address target; do
     [[ -n $address ]] || continue
-    wg_hypr_dispatch movetoworkspacesilent "name:$target,address:$address"
+    wg_hypr_dispatch movetoworkspacesilent "$(wg_ws_selector "$target"),address:$address"
     count=$(( count + 1 ))
   done <<<"$moves"
   printf '%s\n' "$count"
@@ -474,7 +474,7 @@ cmd_tidy() {
   fi
 
   while IFS=$'\t' read -r address group; do
-    wg_hypr_dispatch movetoworkspacesilent "name:$group,address:$address"
+    wg_hypr_dispatch movetoworkspacesilent "$(wg_ws_selector "$group"),address:$address"
   done <<<"$moves"
   wg_refresh
 }

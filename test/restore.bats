@@ -628,6 +628,50 @@ EOF
   [ "${lines[1]}" = "movetoworkspacesilent name:ads,address:0xbbb2" ]
 }
 
+# A session that was on a numbered workspace goes back to that workspace, not to
+# a new one that merely has the same name. The bar counted the window on the
+# shadow; the user's own key went to the real one and found it empty.
+@test "a session recorded on a numbered workspace goes back to the numbered one" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_make_dirs "abc-123:$shop:5"
+  wg_snapshot_from_last_boot "abc-123:$shop:5"
+  wg_fake_terminal 2001 2002 "$shop" "abc-123"
+  wg_write_clients "0xbbb1:2001:1"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run dispatches
+  [ "$output" = "movetoworkspacesilent 5,address:0xbbb1" ]
+}
+
+# And a group still goes back as a named workspace, which is what it is.
+@test "a session recorded on a group goes back to the named workspace" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_make_dirs "abc-123:$shop:misc"
+  wg_snapshot_from_last_boot "abc-123:$shop:misc"
+  wg_fake_terminal 2001 2002 "$shop" "abc-123"
+  wg_write_clients "0xbbb1:2001:1"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run dispatches
+  [ "$output" = "movetoworkspacesilent name:misc,address:0xbbb1" ]
+}
+
+@test "a numbered workspace is moved to its monitor as a number too" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_make_dirs "abc-123:$shop"
+  wg_snapshot_from_last_boot "abc-123:$shop:5:0:0:DP-1"
+  wg_fake_terminal 2001 2002 "$shop" "abc-123"
+  wg_write_clients "0xbbb1:2001:5"
+  wg_write_workspaces "5:eDP-2"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run dispatches
+  [ "$output" = "moveworkspacetomonitor 5 DP-1" ]
+}
+
 # --- the monitor a group was on ----------------------------------------------
 #
 # A workspace is created on whichever monitor has focus when it is first used,
