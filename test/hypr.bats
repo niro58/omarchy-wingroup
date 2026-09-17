@@ -107,3 +107,30 @@ wg_fake_bar_ready() {
   run wg_signal_waybar 11
   [ "$status" -eq 0 ]
 }
+
+# --- naming a workspace to the compositor ------------------------------------
+
+# "name:5" is not workspace 5. Hyprland keeps named workspaces apart from
+# numbered ones, so dispatching at "name:5" makes a second workspace also called
+# 5, on whatever monitor has focus. Found on a live desktop with two of them:
+# one holding a session, one being looked at and empty.
+@test "a numbered workspace is addressed as the number it is" {
+  [ "$(wg_ws_selector 5)" = "5" ]
+  [ "$(wg_ws_selector 42)" = "42" ]
+}
+
+@test "a group is a named workspace and says so" {
+  [ "$(wg_ws_selector plat)" = "name:plat" ]
+  [ "$(wg_ws_selector 3dprint)" = "name:3dprint" ]
+}
+
+# A scratchpad names itself: "name:special:magic" would make an ordinary
+# workspace called "special:magic", which is the trap this whole function is
+# about, one level further in.
+@test "a scratchpad is passed through as it is" {
+  [ "$(wg_ws_selector special:magic)" = "special:magic" ]
+}
+
+@test "nothing in, nothing out" {
+  [ -z "$(wg_ws_selector "")" ]
+}

@@ -189,9 +189,9 @@ wg_daemon_open_window() {
   # movetoworkspace moves the window and switches to the workspace in one
   # dispatch; movetoworkspacesilent moves it and leaves the user behind.
   if wg_daemon_should_follow "$state"; then
-    wg_hypr_dispatch movetoworkspace "name:$group,address:$address"
+    wg_hypr_dispatch movetoworkspace "$(wg_ws_selector "$group"),address:$address"
   else
-    wg_hypr_dispatch movetoworkspacesilent "name:$group,address:$address"
+    wg_hypr_dispatch movetoworkspacesilent "$(wg_ws_selector "$group"),address:$address"
   fi
   wg_daemon_request_refresh
 }

@@ -56,3 +56,27 @@ wg_signal_waybar() {
   done
   return 0
 }
+
+# How to name workspace $1 to the compositor.
+#
+# "name:5" is not workspace 5. Hyprland keeps named workspaces apart from
+# numbered ones, so dispatching at "name:5" creates a *second* workspace that is
+# also called 5, with its own id, on whatever monitor has focus. The window goes
+# there and the user's own SUPER+5 goes to the numbered one, which is empty: the
+# bar counts a window nobody can find, and the screen shows nothing.
+#
+# Found on a live desktop with two workspaces called 5 -- one holding a session,
+# one being looked at.
+#
+# A workspace whose name is all digits is therefore addressed as the number it
+# is. A scratchpad names itself, and is passed through untouched. Everything
+# else -- every group -- is a named workspace and says so.
+wg_ws_selector() {
+  local ws="${1:-}"
+  [[ -n $ws ]] || return 0
+  case $ws in
+    special:*)       printf '%s\n' "$ws" ;;
+    *[!0-9]* | "")   printf 'name:%s\n' "$ws" ;;
+    *)               printf '%s\n' "$ws" ;;
+  esac
+}
