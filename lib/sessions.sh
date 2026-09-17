@@ -158,9 +158,14 @@ wg_proc_scope() {
   printf '%s\n' "$line"
 }
 
-# Where each scope's window is, as "scope<TAB>workspace<TAB>x<TAB>y<TAB>monitor"
-# lines: the workspace it is on, the top-left corner of its tile, and the
-# monitor that workspace is shown on.
+# Where each scope's window is and how big it is, as
+# "scope<TAB>workspace<TAB>x<TAB>y<TAB>w<TAB>h<TAB>monitor w<TAB>monitor h<TAB>monitor"
+# lines: the workspace it is on, its tile's corner and size, and the monitor
+# that workspace is shown on, with that monitor's own size.
+#
+# The monitor's size rides along because a tile's size means nothing without it:
+# the same split is 774 pixels on one screen and 1270 on another, and a restore
+# onto a different monitor has to scale rather than paste.
 #
 # A window and the claude session inside it are in the same systemd scope --
 # the terminal was launched into it and everything it spawns inherits it -- so
@@ -188,23 +193,30 @@ wg_proc_scope() {
 # a scope that cannot be read: the entry simply carries none of it, and the
 # restore falls back to letting the daemon file it by project.
 wg_scope_workspaces() {
-  local pid ws x y mon
-  # The monitor is last, because it is the one column that can be empty -- a
-  # workspace the query did not list -- and read only shifts columns into an
-  # empty field that has something after it.
+  local pid ws x y w h mw mh mon
+  # The monitor's name is last, because it is the one column that can be empty
+  # -- a workspace the query did not list -- and read only shifts columns into
+  # an empty field that has something after it.
   wg_hypr_query clients 2>/dev/null \
-    | jq -r --argjson wss "$(wg_hypr_query workspaces 2>/dev/null || echo '[]')" '
-        ($wss | map({key: .name, value: (.monitor // "")}) | from_entries) as $mon
+    | jq -r --argjson wss "$(wg_hypr_query workspaces 2>/dev/null || echo '[]')" \
+           --argjson mons "$(wg_hypr_query monitors 2>/dev/null || echo '[]')" '
+        ($wss | map({key: .name, value: (.monitor // "")}) | from_entries) as $on
+        | ($mons | map({key: .name, value: [(.width // 0), (.height // 0)]}) | from_entries) as $dim
         | .[] | select(.pid != null)
-        | [(.pid | tostring), (.workspace.name // ""),
+        | (.workspace.name // "") as $ws
+        | ($on[$ws] // "") as $m
+        | [(.pid | tostring), $ws,
            ((.at // [0, 0])[0] | tostring), ((.at // [0, 0])[1] | tostring),
-           ($mon[.workspace.name // ""] // "")]
+           ((.size // [0, 0])[0] | tostring), ((.size // [0, 0])[1] | tostring),
+           (($dim[$m] // [0, 0])[0] | tostring), (($dim[$m] // [0, 0])[1] | tostring),
+           $m]
         | @tsv' 2>/dev/null \
-    | while IFS=$'\t' read -r pid ws x y mon; do
+    | while IFS=$'\t' read -r pid ws x y w h mw mh mon; do
         [[ -n $pid && -n $ws ]] || continue
         scope="$(wg_proc_scope "$pid")"
         [[ -n $scope ]] || continue
-        printf '%s\t%s\t%s\t%s\t%s\n' "$scope" "$ws" "$x" "$y" "$mon"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+          "$scope" "$ws" "$x" "$y" "$w" "$h" "$mw" "$mh" "$mon"
       done
 }
 
@@ -220,10 +232,12 @@ wg_scope_workspaces() {
 # the workspace its window is on. Only the scan can know either, so a caller
 # without them leaves those fields alone -- which is why both are appended
 # conditionally rather than merged in with the rest. $8 is the window's position
-# as "x,y" and $9 the monitor its workspace is on, under the same rule.
+# as "x,y", $9 the monitor its workspace is on, ${10} the window's size as "w,h"
+# and ${11} that monitor's size, under the same rule.
 wg_sessions_record() {
   local scope="$1" session="$2" cwd="$3" source="${4:-scan}" tty="${5:-}" \
-        workspace="${6:-}" resume_cwd="${7:-}" at="${8:-}" monitor="${9:-}" now
+        workspace="${6:-}" resume_cwd="${7:-}" at="${8:-}" monitor="${9:-}" \
+        size="${10:-}" mon_size="${11:-}" now
   [[ -n $scope ]] || return 0
   now="$(date +%s)"
   # Read the merge left to right: the empty defaults a brand-new entry needs,
@@ -251,9 +265,12 @@ wg_sessions_record() {
       + (if $resume == "" then {} else {resume_cwd: $resume} end)
       + (if $at == "" then {} else {at: ($at | split(",") | map(tonumber))} end)
       + (if $mon == "" then {} else {monitor: $mon} end)
+      + (if $size == "" then {} else {size: ($size | split(",") | map(tonumber))} end)
+      + (if $msize == "" then {} else {mon_size: ($msize | split(",") | map(tonumber))} end)
   ' --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" \
     --arg source "$source" --arg now "$now" --arg tty "$tty" --arg ws "$workspace" \
-    --arg resume "$resume_cwd" --arg at "$at" --arg mon "$monitor"
+    --arg resume "$resume_cwd" --arg at "$at" --arg mon "$monitor" \
+    --arg size "$size" --arg msize "$mon_size"
 }
 
 # Refreshes the map from every live claude process.
@@ -291,13 +308,16 @@ wg_sessions_scan() {
   local -A pick_pid=() pick_tty=() pick_cwd=()
   # One compositor query for the whole pass, not one per session: the answer is
   # the same for every scope and asking per process would be a fork each.
-  local -A ws_of=() at_of=() mon_of=()
-  local wscope wsname wx wy wmon
-  while IFS=$'\t' read -r wscope wsname wx wy wmon; do
+  local -A ws_of=() at_of=() mon_of=() size_of=() monsize_of=()
+  local wscope wsname wx wy ww wh wmw wmh wmon
+  while IFS=$'\t' read -r wscope wsname wx wy ww wh wmw wmh wmon; do
     [[ -n $wscope ]] || continue
     ws_of[$wscope]="$wsname"
     [[ -z $wx || -z $wy ]] || at_of[$wscope]="$wx,$wy"
     mon_of[$wscope]="$wmon"
+    # A zero size is the compositor not answering, not a window with no width.
+    [[ -z $ww || -z $wh || $ww == 0 || $wh == 0 ]] || size_of[$wscope]="$ww,$wh"
+    [[ -z $wmw || -z $wmh || $wmw == 0 || $wmh == 0 ]] || monsize_of[$wscope]="$wmw,$wmh"
   done < <(wg_scope_workspaces)
   for dir in "$WG_PROC_DIR"/[0-9]*; do
     [[ -d $dir ]] || continue
@@ -355,7 +375,8 @@ wg_sessions_scan() {
   # in exactly that state.
   for scope in "${!pick_pid[@]}"; do
     wg_sessions_record "$scope" "" "${pick_cwd[$scope]}" scan "${pick_tty[$scope]}" \
-      "${ws_of[$scope]:-}" "" "${at_of[$scope]:-}" "${mon_of[$scope]:-}"
+      "${ws_of[$scope]:-}" "" "${at_of[$scope]:-}" "${mon_of[$scope]:-}" \
+      "${size_of[$scope]:-}" "${monsize_of[$scope]:-}"
     found=$(( found + 1 ))
   done
   wg_sessions_expire
@@ -702,7 +723,11 @@ wg_snapshot_previous_rows() {
               .value.workspace // "",
               ((.value.at // [])[0] // "" | tostring),
               ((.value.at // [])[1] // "" | tostring),
-              .value.monitor // ""] | @tsv' \
+              .value.monitor // "",
+              ((.value.size // [])[0] // "" | tostring),
+              ((.value.size // [])[1] // "" | tostring),
+              ((.value.mon_size // [])[0] // "" | tostring),
+              ((.value.mon_size // [])[1] // "" | tostring)] | @tsv' \
       "$file" 2>/dev/null || true
     return 0
   done

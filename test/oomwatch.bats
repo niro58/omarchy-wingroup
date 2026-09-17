@@ -198,6 +198,37 @@ bar_refreshed() { (( $(refreshes) >= 1 )); }
   [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].monitor' "$WG_SESSIONS_FILE")" = "DP-1" ]
 }
 
+# A tile's size means nothing without the screen it was measured on: the same
+# split is 774 pixels on the laptop and 1270 on the desk monitor. Both go in.
+@test "a scan records the tile's size and the size of its screen" {
+  source "$WG_LIB_DIR/hypr.sh"
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  printf '[{"address":"0xbbb1","pid":1001,"at":[3804,1273],"size":[774,944],"workspace":{"id":5,"name":"ads"}}]\n' \
+    >"$WG_TMP/clients.json"
+  printf '[{"id":5,"name":"ads","monitor":"DP-1"}]\n' >"$WG_TMP/workspaces.json"
+  printf '[{"id":1,"name":"DP-1","width":1920,"height":1080}]\n' >"$WG_TMP/monitors.json"
+  export WG_FIXTURE_CLIENTS="$WG_TMP/clients.json" WG_FIXTURE_WORKSPACES="$WG_TMP/workspaces.json"
+  export WG_FIXTURE_MONITORS="$WG_TMP/monitors.json"
+
+  run wg_sessions_scan
+  [ "$output" -eq 1 ]
+  [ "$(jq -c --arg s "$WG_SCOPE" '.sessions[$s].size' "$WG_SESSIONS_FILE")" = "[774,944]" ]
+  [ "$(jq -c --arg s "$WG_SCOPE" '.sessions[$s].mon_size' "$WG_SESSIONS_FILE")" = "[1920,1080]" ]
+}
+
+# A compositor that answers with zeroes is a compositor that did not answer.
+@test "a zero size is not recorded as a size" {
+  source "$WG_LIB_DIR/hypr.sh"
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  printf '[{"address":"0xbbb1","pid":1001,"at":[0,0],"size":[0,0],"workspace":{"id":5,"name":"ads"}}]\n' \
+    >"$WG_TMP/clients.json"
+  printf '[{"id":5,"name":"ads","monitor":"DP-1"}]\n' >"$WG_TMP/workspaces.json"
+  export WG_FIXTURE_CLIENTS="$WG_TMP/clients.json" WG_FIXTURE_WORKSPACES="$WG_TMP/workspaces.json"
+
+  run wg_sessions_scan
+  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s] | has("size")' "$WG_SESSIONS_FILE")" = "false" ]
+}
+
 # And it all reaches the rows the restore reads, in the columns it reads them
 # from.
 @test "the tile and the monitor ride along in the restore's rows" {
@@ -537,13 +568,13 @@ wg_snapshot_from_boot() {
   [ "$(jq -r '.boot' "$WG_SNAPSHOT_PREV")" = "$WG_BOOT_BEFORE" ]
 
   # And what the restore will ask for is still the sessions from before the
-  # reboot, not the one this boot is running. Six columns now: the workspace the
-  # session was on, its tile's x and y, and the monitor, so the restore can put
-  # back the arrangement and not only the membership. Each is empty when no
-  # compositor answered for it.
+  # reboot, not the one this boot is running. Ten columns now: the workspace the
+  # session was on, its tile's x, y, width and height, the monitor and that
+  # monitor's own size, so the restore can put back the arrangement and not only
+  # the membership. Each is empty when no compositor answered for it.
   run wg_snapshot_previous_rows
   [[ "$output" == "$(printf 'sess-1\t%s' "$WG_TMP/projects/shop-web")"* ]]
-  [ "$(printf '%s' "$output" | awk -F'\t' '{print NF}')" -eq 6 ]
+  [ "$(printf '%s' "$output" | awk -F'\t' '{print NF}')" -eq 10 ]
 }
 
 # --- telling the user --------------------------------------------------------

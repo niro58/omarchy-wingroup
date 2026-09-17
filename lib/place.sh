@@ -34,6 +34,10 @@ WG_PLACE_WORKSPACE=""
 WG_PLACE_X=""
 WG_PLACE_Y=""
 WG_PLACE_MONITOR=""
+WG_PLACE_W=""
+WG_PLACE_H=""
+WG_PLACE_MONW=""
+WG_PLACE_MONH=""
 
 wg_place_row_split() {
   local row="$1"
@@ -49,6 +53,10 @@ wg_place_row_split() {
   WG_PLACE_X="${col[3]:-}"
   WG_PLACE_Y="${col[4]:-}"
   WG_PLACE_MONITOR="${col[5]:-}"
+  WG_PLACE_W="${col[6]:-}"
+  WG_PLACE_H="${col[7]:-}"
+  WG_PLACE_MONW="${col[8]:-}"
+  WG_PLACE_MONH="${col[9]:-}"
   return 0
 }
 
@@ -397,5 +405,212 @@ wg_place_order() {
   if (( swaps && ! dry )) && [[ -n $active ]]; then
     wg_hypr_dispatch focuswindow "address:$active"
   fi
+  return 0
+}
+
+# --- putting the splits back --------------------------------------------------
+
+# How close is close enough, how many attempts per window and per axis, and how
+# long to let the compositor settle before measuring again.
+: "${WG_PLACE_SIZE_TOL:=10}"
+: "${WG_PLACE_SIZE_TRIES:=3}"
+: "${WG_PLACE_SIZE_POLL:=0.15}"
+# No window is ever asked to be smaller than this, whatever the record says.
+#
+# Not tidiness: a terminal squeezed below its own minimum can exit. That is not
+# a theory -- a resize to 65 pixels closed a live terminal and took its session
+# with it while this was being worked out. The floor is well clear of any
+# sensible terminal's minimum, and a target under it is left alone rather than
+# clamped quietly to it, because a record asking for something that small is a
+# record worth ignoring.
+: "${WG_PLACE_MIN_W:=300}"
+: "${WG_PLACE_MIN_H:=200}"
+
+# Resizes one window along one axis until it is within tolerance of $3, or the
+# attempts run out. $1 is the address, $2 the axis (w or h), $4 a dry run flag.
+#
+# Hyprland's resizewindowpixel takes an "exact" size, and what it does with it
+# depends on where the window sits in the split tree: for the first child of a
+# split it means what it says, and for the second the delta comes out inverted
+# -- asking a 1174-wide window for 900 made it 1448. The relative form is
+# ignored for a window named by address at all. So the sign is not assumed: the
+# first attempt is made the honest way, and if the window moved away from the
+# target instead of towards it, the rest of the attempts invert.
+#
+# Measured after every dispatch, never predicted: resizing one tile moves its
+# siblings, the compositor clamps, and gaps and borders mean the number that
+# comes back is rarely the number asked for.
+wg_place_resize_axis() {
+  local addr="$1" axis="$2" target="$3" dry="$4" sign=1 try cur new ask other
+  local field=0
+  [[ $axis == w ]] || field=1
+
+  for (( try = 0; try < WG_PLACE_SIZE_TRIES; try++ )); do
+    cur="$(wg_place_size_of "$addr" "$field")"
+    [[ -n $cur ]] || return 0
+    local off=$(( target - cur )); (( off < 0 )) && off=$(( -off ))
+    (( off > WG_PLACE_SIZE_TOL )) || return 0
+    ask=$(( cur + sign * (target - cur) ))
+    other="$(wg_place_size_of "$addr" "$(( 1 - field ))")"
+    if [[ $axis == w ]]; then
+      (( ! dry )) && wg_hypr_dispatch resizewindowpixel "exact $ask $other,address:$addr"
+    else
+      (( ! dry )) && wg_hypr_dispatch resizewindowpixel "exact $other $ask,address:$addr"
+    fi
+    (( dry )) && return 0
+    sleep "$WG_PLACE_SIZE_POLL"
+    new="$(wg_place_size_of "$addr" "$field")"
+    [[ -n $new ]] || return 0
+    # Moved away from the target: this window is the far side of its split, so
+    # the delta comes out inverted. Try the other way round.
+    local now_off=$(( target - new )); (( now_off < 0 )) && now_off=$(( -now_off ))
+    if (( now_off > off )); then
+      sign=$(( -sign ))
+    fi
+  done
+  return 0
+}
+
+# One dimension of one window, straight from the compositor. Prints nothing when
+# the window is gone, which is how a caller finds out.
+wg_place_size_of() {
+  wg_hypr_query clients 2>/dev/null \
+    | jq -r --arg a "$1" --argjson i "$2" \
+        'first(.[] | select(.address == $a) | .size[$i]) // empty' 2>/dev/null
+}
+
+# How many windows are on workspace $1 -- the safety check between resizes.
+wg_place_count_on() {
+  wg_hypr_query clients 2>/dev/null \
+    | jq -r --arg w "$1" '[.[] | select(.workspace.name == $w and (.floating | not))] | length' 2>/dev/null
+}
+
+# Puts the splits back: each restored window resized to the share of the screen
+# it had. $1 is a dry run flag, $2 the rows.
+#
+# Sizes are stored in pixels and applied as a share, scaled by how the monitor's
+# own size has changed. The same split is 774 pixels on the laptop and 1270 on
+# the desk monitor, and a record pasted across would be wrong on both.
+#
+# The last window on a workspace is never resized: in a tree of splits its size
+# is whatever the others leave it, and asking for it as well only fights the
+# resize before it.
+#
+# If a window disappears while this runs, the workspace is abandoned
+# immediately. Nothing here is worth more than the windows it is arranging.
+wg_place_sizes() {
+  local dry="$1" rows="$2" row key ws n i before
+  local -A want_of=() have_of=() monw_of=() monh_of=()
+  local -A firstx_of=() firsty_of=() splitw_of=() splith_of=()
+  [[ -n $rows ]] || return 0
+  WG_PLACE_KNOWN=()
+  while IFS= read -r row; do
+    wg_place_row_split "$row"
+    [[ -n $WG_PLACE_CWD && -n $WG_PLACE_WORKSPACE ]] || continue
+    [[ $WG_PLACE_WORKSPACE != special:* ]] || continue
+    [[ $WG_PLACE_X =~ ^-?[0-9]+$ && $WG_PLACE_Y =~ ^-?[0-9]+$ ]] || continue
+    [[ $WG_PLACE_W =~ ^[0-9]+$ && $WG_PLACE_H =~ ^[0-9]+$ ]] || continue
+    if [[ -n $WG_PLACE_SESSION ]]; then key="i:$WG_PLACE_SESSION"; else key="d:$WG_PLACE_CWD"; fi
+    WG_PLACE_KNOWN[$key]=1
+    want_of[$WG_PLACE_WORKSPACE]+="$WG_PLACE_X"$'\t'"$WG_PLACE_Y"$'\t'"$key"$'\t'"$WG_PLACE_W"$'\t'"$WG_PLACE_H"$'\n'
+    monw_of[$WG_PLACE_WORKSPACE]="${WG_PLACE_MONW:-0}"
+    monh_of[$WG_PLACE_WORKSPACE]="${WG_PLACE_MONH:-0}"
+    # Which axes the workspace is actually split along, from the corners the
+    # record holds: tiles at different x share the width between them, tiles at
+    # different y share the height. An axis nothing shares needs no room left on
+    # it -- a window alone in its row is full height, and a floor that assumed
+    # otherwise refused every target it was given.
+    if [[ -n ${firstx_of[$WG_PLACE_WORKSPACE]:-} ]]; then
+      [[ ${firstx_of[$WG_PLACE_WORKSPACE]} == "$WG_PLACE_X" ]] || splitw_of[$WG_PLACE_WORKSPACE]=1
+      [[ ${firsty_of[$WG_PLACE_WORKSPACE]} == "$WG_PLACE_Y" ]] || splith_of[$WG_PLACE_WORKSPACE]=1
+    else
+      firstx_of[$WG_PLACE_WORKSPACE]="$WG_PLACE_X"
+      firsty_of[$WG_PLACE_WORKSPACE]="$WG_PLACE_Y"
+    fi
+  done <<<"$rows"
+  (( ${#want_of[@]} )) || return 0
+
+  wg_place_children
+  local addr pid x y
+  while IFS=$'\t' read -r addr pid ws x y; do
+    [[ -n $addr && -n $pid && -n ${want_of[$ws]:-} ]] || continue
+    key="$(wg_place_key_of "$pid")"
+    [[ -n $key ]] || continue
+    have_of[$ws]+="$x"$'\t'"$y"$'\t'"$key"$'\t'"$addr"$'\n'
+  done < <(wg_hypr_query clients 2>/dev/null \
+           | jq -r '.[] | select(.pid != null and .address != null and (.floating | not))
+                    | [.address, (.pid | tostring), (.workspace.name // ""),
+                       ((.at // [0, 0])[0] | tostring), ((.at // [0, 0])[1] | tostring)]
+                    | @tsv' 2>/dev/null)
+
+  # The monitor each workspace is on now, and how big it is, for the scaling.
+  local -A now_w=() now_h=()
+  local wsname monname
+  while IFS=$'\t' read -r wsname monname; do
+    [[ -n $wsname && -n $monname ]] || continue
+    now_w[$wsname]="$(wg_hypr_query monitors 2>/dev/null \
+      | jq -r --arg m "$monname" 'first(.[] | select(.name == $m) | .width) // 0' 2>/dev/null)"
+    now_h[$wsname]="$(wg_hypr_query monitors 2>/dev/null \
+      | jq -r --arg m "$monname" 'first(.[] | select(.name == $m) | .height) // 0' 2>/dev/null)"
+  done < <(wg_hypr_query workspaces 2>/dev/null \
+           | jq -r '.[] | [.name, (.monitor // "")] | @tsv' 2>/dev/null)
+
+  for ws in "${!have_of[@]}"; do
+    local -a want=() haveaddr=() havekey=() wantw=() wanth=()
+    local -A left=()
+    local rw rh cw ch sw sh
+    while IFS=$'\t' read -r x y key addr; do
+      [[ -n $key ]] || continue
+      havekey+=("$key"); haveaddr+=("$addr")
+      left[$key]=$(( ${left[$key]:-0} + 1 ))
+    done < <(printf '%s' "${have_of[$ws]}" | sort -t$'\t' -k1,1n -k2,2n)
+    while IFS=$'\t' read -r x y key rw rh; do
+      [[ -n $key ]] || continue
+      (( ${left[$key]:-0} > 0 )) || continue
+      left[$key]=$(( ${left[$key]:-0} - 1 ))
+      want+=("$key"); wantw+=("$rw"); wanth+=("$rh")
+    done < <(printf '%s' "${want_of[$ws]}" | sort -t$'\t' -k1,1n -k2,2n)
+
+    # Scale by how the screen's size has changed, when both sizes are known.
+    sw="${monw_of[$ws]:-0}"; sh="${monh_of[$ws]:-0}"
+    cw="${now_w[$ws]:-0}"; ch="${now_h[$ws]:-0}"
+
+    n=${#want[@]}
+    before="$(wg_place_count_on "$ws")"
+    # The last window takes what the others leave it.
+    for (( i = 0; i + 1 < n; i++ )); do
+      local tw="${wantw[i]}" th="${wanth[i]}"
+      (( sw > 0 && cw > 0 )) && tw=$(( tw * cw / sw ))
+      (( sh > 0 && ch > 0 )) && th=$(( th * ch / sh ))
+      # A target below the floor, or wider than the screen leaves room for, is
+      # a target not worth chasing.
+      if (( tw < WG_PLACE_MIN_W || th < WG_PLACE_MIN_H )); then continue; fi
+      # Only on an axis the workspace is split along: leave the other windows
+      # sharing it room to exist.
+      if [[ -n ${splitw_of[$ws]:-} ]] && (( cw > 0 && tw > cw - WG_PLACE_MIN_W )); then continue; fi
+      if [[ -n ${splith_of[$ws]:-} ]] && (( ch > 0 && th > ch - WG_PLACE_MIN_H )); then continue; fi
+      # Nothing to say about a tile that is already the size it should be --
+      # and most of them are, because the windows that came back in order
+      # mostly came back the right size too.
+      local havew haveh offw offh
+      havew="$(wg_place_size_of "${haveaddr[i]}" 0)"
+      haveh="$(wg_place_size_of "${haveaddr[i]}" 1)"
+      [[ -n $havew && -n $haveh ]] || continue
+      offw=$(( tw - havew )); (( offw < 0 )) && offw=$(( -offw ))
+      offh=$(( th - haveh )); (( offh < 0 )) && offh=$(( -offh ))
+      (( offw > WG_PLACE_SIZE_TOL || offh > WG_PLACE_SIZE_TOL )) || continue
+
+      printf 'size   %s  %s  %sx%s\n' "$ws" "${want[i]#?:}" "$tw" "$th"
+      wg_place_resize_axis "${haveaddr[i]}" w "$tw" "$dry"
+      wg_place_resize_axis "${haveaddr[i]}" h "$th" "$dry"
+      (( dry )) && continue
+      # A window vanished mid-resize: stop touching this workspace.
+      if [[ "$(wg_place_count_on "$ws")" != "$before" ]]; then
+        printf 'size   %s  stopped: a window closed while resizing\n' "$ws" >&2
+        break
+      fi
+    done
+    unset want haveaddr havekey wantw wanth left
+  done
   return 0
 }

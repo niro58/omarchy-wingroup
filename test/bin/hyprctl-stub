@@ -10,6 +10,19 @@ fi
 if [[ ${1:-} == dispatch ]]; then
   shift
   printf '%s\n' "$*" >>"$WG_DISPATCH_LOG"
+  # Test-only: with $WG_STUB_GEOMETRY set, a resize actually changes the client
+  # fixture, so a test can exercise a pass that measures what it just did. The
+  # sign is the honest one -- the window gets the size it asked for -- which is
+  # Hyprland's behaviour for the first child of a split.
+  if [[ -n ${WG_STUB_GEOMETRY:-} && ${1:-} == resizewindowpixel ]]; then
+    if [[ ${2:-} =~ ^exact\ ([0-9]+)\ ([0-9]+),address:(0x[0-9a-fA-F]+)$ ]]; then
+      f="${WG_FIXTURE_CLIENTS:-$WG_FIXTURES/clients.json}"
+      jq --arg a "${BASH_REMATCH[3]}" \
+         --argjson w "${BASH_REMATCH[1]}" --argjson h "${BASH_REMATCH[2]}" \
+         'map(if .address == $a then .size = [$w, $h] else . end)' "$f" >"$f.tmp" \
+        && mv -f "$f.tmp" "$f"
+    fi
+  fi
   exit 0
 fi
 
