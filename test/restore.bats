@@ -50,9 +50,10 @@ teardown() { wg_teardown_tmp; }
 # row without one is a row the restore must not move.
 wg_write_snapshot() {
   local file="$1" boot="$2"; shift 2
-  local entry sessions='{}' n=0 rest cwd ws x y mon
-  # "session:dir[:workspace[:x:y[:monitor]]]" -- the later fields optional, as a
-  # record written before positions were is exactly a record without them.
+  local entry sessions='{}' n=0 rest cwd ws x y mon w h monw monh
+  # "session:dir[:workspace[:x:y[:monitor[:w:h:monw:monh]]]]" -- the later fields
+  # optional, as a record written before positions were is exactly a record
+  # without them.
   for entry in ${@+"$@"}; do
     n=$(( n + 1 ))
     rest="${entry#*:}"
@@ -62,16 +63,23 @@ wg_write_snapshot() {
       ws="${rest#*:}"
       # Only numbers after the workspace are a position: a workspace name can
       # hold a colon of its own, and special:magic is one.
-      if [[ $ws =~ ^(.*):(-?[0-9]+):(-?[0-9]+)(:([^:]*))?$ ]]; then
+      w="" h="" monw="" monh=""
+      if [[ $ws =~ ^(.*):(-?[0-9]+):(-?[0-9]+):([^:]*):([0-9]+):([0-9]+):([0-9]+):([0-9]+)$ ]]; then
+        ws="${BASH_REMATCH[1]}" x="${BASH_REMATCH[2]}" y="${BASH_REMATCH[3]}" mon="${BASH_REMATCH[4]}"
+        w="${BASH_REMATCH[5]}" h="${BASH_REMATCH[6]}" monw="${BASH_REMATCH[7]}" monh="${BASH_REMATCH[8]}"
+      elif [[ $ws =~ ^(.*):(-?[0-9]+):(-?[0-9]+)(:([^:]*))?$ ]]; then
         ws="${BASH_REMATCH[1]}" x="${BASH_REMATCH[2]}" y="${BASH_REMATCH[3]}" mon="${BASH_REMATCH[5]}"
       fi
     fi
     sessions="$(jq --arg scope "scope-$n.scope" --arg session "${entry%%:*}" \
                    --arg cwd "$cwd" --arg ws "$ws" --arg x "$x" --arg y "$y" --arg mon "$mon" \
+                   --arg w "$w" --arg h "$h" --arg monw "$monw" --arg monh "$monh" \
                    '.[$scope] = ({session: $session, cwd: $cwd, source: "scan", seen: 0}
                                  + (if $ws == "" then {} else {workspace: $ws} end)
                                  + (if $x == "" then {} else {at: [($x | tonumber), ($y | tonumber)]} end)
-                                 + (if $mon == "" then {} else {monitor: $mon} end))' \
+                                 + (if $mon == "" then {} else {monitor: $mon} end)
+                                 + (if $w == "" then {} else {size: [($w | tonumber), ($h | tonumber)]} end)
+                                 + (if $monw == "" then {} else {mon_size: [($monw | tonumber), ($monh | tonumber)]} end))' \
                    <<<"$sessions")"
   done
   mkdir -p "$WG_STATE_DIR"
@@ -101,17 +109,32 @@ wg_make_dirs() {
 # here: a tidy desktop gives tidy nothing to do, and a desktop of freshly
 # restored terminals is not in the fixture at all.
 wg_write_clients() {
-  local entry addr pid ws x y clients='[]'
-  # "address:pid:workspace[:x:y]"
+  local entry addr pid ws x y sw sh clients='[]'
+  # "address:pid:workspace[:x:y[:w:h]]"
   for entry in ${@+"$@"}; do
-    IFS=: read -r addr pid ws x y <<<"$entry"
+    IFS=: read -r addr pid ws x y sw sh <<<"$entry"
     clients="$(jq --arg a "$addr" --argjson p "$pid" --arg w "$ws" \
                   --argjson x "${x:-0}" --argjson y "${y:-0}" \
+                  --argjson sw "${sw:-800}" --argjson sh "${sh:-900}" \
                   '. + [{address: $a, pid: $p, class: "Alacritty", title: "session",
-                         floating: false, at: [$x, $y], workspace: {id: 1, name: $w}}]' <<<"$clients")"
+                         floating: false, at: [$x, $y], size: [$sw, $sh],
+                         workspace: {id: 1, name: $w}}]' <<<"$clients")"
   done
   printf '%s\n' "$clients" >"$WG_TMP/clients.json"
   export WG_FIXTURE_CLIENTS="$WG_TMP/clients.json"
+}
+
+# "monitor:width:height" for every monitor the compositor should report.
+wg_write_monitors() {
+  local entry mons='[]' name w h
+  for entry in ${@+"$@"}; do
+    IFS=: read -r name w h <<<"$entry"
+    mons="$(jq --arg n "$name" --argjson w "$w" --argjson h "$h" \
+               '. + [{id: 0, name: $n, width: $w, height: $h, focused: true,
+                      activeWorkspace: {id: 1, name: "1"}}]' <<<"$mons")"
+  done
+  printf '%s\n' "$mons" >"$WG_TMP/monitors.json"
+  export WG_FIXTURE_MONITORS="$WG_TMP/monitors.json"
 }
 
 # "workspace:monitor" for every workspace the compositor should report.
@@ -767,6 +790,134 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"monitor  misc  DP-1"* ]]
   [[ "$output" == *"order  misc  bbb-2 <-> aaa-1"* ]]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# --- the size of each tile ---------------------------------------------------
+#
+# Order alone is not the arrangement: a group can come back with the right
+# windows in the right places and every split even, when the user had one pane
+# twice the size of the other. The record carries each tile's size and its
+# monitor's size, and this pass resizes towards it.
+#
+# $WG_STUB_GEOMETRY makes the stub actually apply a resize to the client
+# fixture, so the pass measures the result of its own dispatch the way it does
+# against a real compositor.
+
+@test "restored terminals are resized to the splits they had" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  # a had 1000 of the 1600, b had 600.
+  wg_snapshot_from_last_boot "aaa-1:$a:misc:0:0:eDP-2:1000:900:1600:900" \
+                             "bbb-2:$b:misc:1000:0:eDP-2:600:900:1600:900"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  # They came back evenly split.
+  wg_write_clients "0xbbb1:2001:misc:0:0:800:900" "0xbbb2:2003:misc:800:0:800:900"
+  wg_write_monitors "eDP-2:1600:900"
+  wg_write_workspaces "misc:eDP-2"
+  export WG_STUB_GEOMETRY=1 WG_PLACE_SIZE_POLL=0
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"size   misc  aaa-1  1000x900"* ]]
+  [ "$(jq -r '.[] | select(.address == "0xbbb1") | .size[0]' "$WG_TMP/clients.json")" -eq 1000 ]
+}
+
+# The last window takes whatever the others leave it: asking for it as well only
+# fights the resize before it.
+@test "the last window on a workspace is not resized" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  wg_snapshot_from_last_boot "aaa-1:$a:misc:0:0:eDP-2:1000:900:1600:900" \
+                             "bbb-2:$b:misc:1000:0:eDP-2:600:900:1600:900"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_write_clients "0xbbb1:2001:misc:0:0:800:900" "0xbbb2:2003:misc:800:0:800:900"
+  wg_write_monitors "eDP-2:1600:900"
+  wg_write_workspaces "misc:eDP-2"
+  export WG_STUB_GEOMETRY=1 WG_PLACE_SIZE_POLL=0
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run grep -c 'resizewindowpixel.*0xbbb2' "$WG_DISPATCH_LOG"
+  [ "$output" -eq 0 ]
+}
+
+@test "a window already the size it should be is not resized" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  wg_snapshot_from_last_boot "aaa-1:$a:misc:0:0:eDP-2:800:900:1600:900" \
+                             "bbb-2:$b:misc:800:0:eDP-2:800:900:1600:900"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_write_clients "0xbbb1:2001:misc:0:0:800:900" "0xbbb2:2003:misc:800:0:800:900"
+  wg_write_monitors "eDP-2:1600:900"
+  wg_write_workspaces "misc:eDP-2"
+  export WG_STUB_GEOMETRY=1 WG_PLACE_SIZE_POLL=0
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *size* ]]
+  run grep -c resizewindowpixel "$WG_DISPATCH_LOG"
+  [ "$output" -eq 0 ]
+}
+
+# A terminal squeezed below its own minimum can exit -- a resize to 65 pixels
+# closed a live terminal while this was being written -- so a target that small
+# is refused outright rather than clamped quietly.
+@test "a tile too small for a terminal is left alone" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  wg_snapshot_from_last_boot "aaa-1:$a:misc:0:0:eDP-2:100:900:1600:900" \
+                             "bbb-2:$b:misc:100:0:eDP-2:1500:900:1600:900"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_write_clients "0xbbb1:2001:misc:0:0:800:900" "0xbbb2:2003:misc:800:0:800:900"
+  wg_write_monitors "eDP-2:1600:900"
+  wg_write_workspaces "misc:eDP-2"
+  export WG_STUB_GEOMETRY=1 WG_PLACE_SIZE_POLL=0
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run grep -c resizewindowpixel "$WG_DISPATCH_LOG"
+  [ "$output" -eq 0 ]
+}
+
+# The same split is 774 pixels on the laptop and 1270 on the desk monitor, so
+# the size is applied as a share of the screen, not pasted across.
+@test "a tile is scaled when the screen is a different size now" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  # Recorded on an 800-wide screen, half of it; now on a 1600-wide one.
+  wg_snapshot_from_last_boot "aaa-1:$a:misc:0:0:eDP-2:500:450:800:450" \
+                             "bbb-2:$b:misc:500:0:eDP-2:300:450:800:450"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_write_clients "0xbbb1:2001:misc:0:0:800:900" "0xbbb2:2003:misc:800:0:800:900"
+  wg_write_monitors "eDP-2:1600:900"
+  wg_write_workspaces "misc:eDP-2"
+  export WG_STUB_GEOMETRY=1 WG_PLACE_SIZE_POLL=0
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"size   misc  aaa-1  1000x900"* ]]
+}
+
+@test "a dry run says what it would resize and resizes nothing" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  wg_snapshot_from_last_boot "aaa-1:$a:misc:0:0:eDP-2:1000:900:1600:900" \
+                             "bbb-2:$b:misc:1000:0:eDP-2:600:900:1600:900"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_write_clients "0xbbb1:2001:misc:0:0:800:900" "0xbbb2:2003:misc:800:0:800:900"
+  wg_write_monitors "eDP-2:1600:900"
+  wg_write_workspaces "misc:eDP-2"
+
+  run "$WG_ROOT/bin/wingroup-restore" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"size   misc  aaa-1  1000x900"* ]]
   [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
