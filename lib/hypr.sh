@@ -8,8 +8,91 @@ wg_hypr_query() {
   "$WG_HYPRCTL" -j "$@"
 }
 
+# Whether this compositor takes its dispatches as Lua. Empty until asked.
+#
+# Hyprland 0.56 replaced the dispatch string with a Lua API: "hyprctl dispatch
+# movetoworkspacesilent name:plat,address:0x..." is now read as Lua source and
+# fails to parse, and every move wingroup makes went that way at once when
+# Omarchy 4 landed. The terminals came back from the snapshot and then piled up
+# on whatever workspace they opened on, because nothing could place them.
+#
+# Probed rather than read off the version, because the version that matters is
+# the one that answers this socket, not the one a package manager mentions.
+# hl.dsp.no_op() is the harmless end of the new API: it exists to do nothing.
+# Inherited when the caller has already decided -- the tests pin it, and a
+# desktop that wants to force one dialect can export it too.
+WG_HYPR_LUA="${WG_HYPR_LUA-}"
+
+wg_hypr_lua() {
+  [[ -z $WG_HYPR_LUA ]] || { [[ $WG_HYPR_LUA == 1 ]]; return; }
+  if "$WG_HYPRCTL" dispatch 'hl.dsp.no_op()' 2>/dev/null | grep -q '^ok'; then
+    WG_HYPR_LUA=1
+  else
+    WG_HYPR_LUA=0
+  fi
+  [[ $WG_HYPR_LUA == 1 ]]
+}
+
+# A dispatch, in whichever language the compositor speaks.
+#
+# The old spelling is the one written here and the one the tests read, because
+# it says what it does in one line. On a compositor that has moved on, it is
+# translated on the way out.
+#
+# Only the dispatches wingroup makes are translated. Anything else is passed
+# through untouched: guessing at a translation for a dispatcher nobody here
+# calls would be inventing an API by extrapolation.
 wg_hypr_dispatch() {
+  if wg_hypr_lua; then
+    local lua
+    if lua="$(wg_hypr_lua_form "$@")"; then
+      "$WG_HYPRCTL" dispatch "$lua"
+      return
+    fi
+  fi
   "$WG_HYPRCTL" dispatch "$@"
+}
+
+# The Lua form of one dispatch, or nothing (and non-zero) when there is none.
+#
+# The workspace keeps its old selector -- "name:plat" for a group, "5" for a
+# numbered workspace -- because the new API parses the same grammar. That is
+# not a guess: "plat" on its own is accepted and silently moves nothing, which
+# is how seventeen windows were dispatched at and stayed where they were.
+wg_hypr_lua_form() {
+  local what="${1:-}" arg="${2:-}" ws rest addr mon w h
+  case $what in
+    workspace)
+      printf 'hl.dsp.focus({ workspace = "%s" })\n' "$arg" ;;
+    movetoworkspace | movetoworkspacesilent)
+      ws="${arg%%,*}"
+      addr="${arg#*address:}"
+      local follow=true
+      [[ $what == movetoworkspace ]] || follow=false
+      printf 'hl.dsp.window.move({ workspace = "%s", window = "address:%s", follow = %s })\n' \
+        "$ws" "$addr" "$follow" ;;
+    moveworkspacetomonitor)
+      ws="${arg%% *}"
+      mon="${arg#* }"
+      printf 'hl.dsp.workspace.move({ workspace = "%s", monitor = "%s" })\n' "$ws" "$mon" ;;
+    focuswindow)
+      printf 'hl.dsp.focus({ window = "%s" })\n' "$arg" ;;
+    swapwindow)
+      # Swaps the focused window with this one, as the old dispatcher did.
+      printf 'hl.dsp.window.swap({ target = "%s" })\n' "$arg" ;;
+    resizewindowpixel)
+      # "exact <w> <h>,address:0x..."
+      rest="${arg#exact }"
+      w="${rest%% *}"
+      rest="${rest#* }"
+      h="${rest%%,*}"
+      addr="${arg#*address:}"
+      printf 'hl.dsp.window.resize({ x = "%s", y = "%s", window = "address:%s", exact = true })\n' \
+        "$w" "$h" "$addr" ;;
+    *)
+      return 1 ;;
+  esac
+  return 0
 }
 
 # The monitor a group's workspace is on at this moment, or nothing when the

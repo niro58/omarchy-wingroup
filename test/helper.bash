@@ -3,6 +3,11 @@ WG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export WG_ROOT
 export WG_FIXTURES="$WG_ROOT/test/fixtures"
 export WG_HYPRCTL="$WG_ROOT/test/bin/hyprctl-stub"
+# Which dispatch language the compositor is assumed to speak, pinned rather than
+# probed: the probe is itself a dispatch, and against the stub it would land in
+# the log every test reads. The tests that care about the translation set this
+# themselves, and the probe has its own stub.
+export WG_HYPR_LUA=0
 export WG_PROJECTS_DIR="/home/dev/projects"
 export WG_LIB_DIR="$WG_ROOT/lib"
 # Never the real one. If this machine has Omarchy installed, the picker would
