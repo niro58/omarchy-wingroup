@@ -61,6 +61,7 @@ wg_refresh_bar() {
     "$WG_REFRESH_CMD"
   else
     wg_signal_waybar 11
+    wg_signal_shell
   fi
 }
 

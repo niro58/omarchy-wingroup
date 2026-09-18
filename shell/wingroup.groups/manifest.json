@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "wingroup.groups",
+  "name": "Window groups",
+  "version": "1.0.0",
+  "author": "wingroup",
+  "description": "One button per wingroup group, with its idle Claude sessions, and a warning when a session was killed",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Widget.qml" },
+  "barWidget": {
+    "displayName": "Window groups",
+    "description": "wingroup's groups, their idle sessions, and crashed sessions",
+    "category": "Compositor",
+    "allowMultiple": false,
+    "defaultSection": "left"
+  }
+}

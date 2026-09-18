@@ -24,6 +24,11 @@ source "$WG_ROOT/lib/constants.sh"
 # sat in a file nobody reads: the daemon, the watcher and the restore never
 # started, and every session came back to a desktop that could not file it.
 : "${WG_HYPR_AUTOSTART_LUA:=$HOME/.config/hypr/autostart.lua}"
+# Omarchy 4's shell: where its plugins live, and the commands that tell it about
+# a new one. Variables so the tests can point them somewhere harmless.
+: "${WG_OMARCHY_PLUGINS_DIR:=$HOME/.config/omarchy/plugins}"
+: "${WG_SHELL_CMD:=omarchy-shell}"
+: "${WG_PLUGIN_ENABLE:=omarchy-plugin-enable}"
 : "${WG_STATE_DIR:=$HOME/.local/state/omarchy/wingroup}"
 : "${WG_RESTORE_SCRIPT:=$HOME/restore-claude.sh}"
 : "${WG_CLAUDE_SETTINGS:=$HOME/.claude/settings.json}"
@@ -653,6 +658,40 @@ EOF
 WG_AUTOSTART_FILE="$WG_HYPR_AUTOSTART"
 wg_autostart_line() { printf 'exec-once = %s' "$1"; }
 
+# The groups on Omarchy 4's bar: a bar-widget plugin for its shell.
+#
+# Omarchy 4 replaced waybar with a shell of its own, so the waybar modules above
+# have nothing to live in there. The shell loads plugins from a directory; the
+# widget is linked in rather than copied, so a `git pull` updates it the way it
+# updates the binaries. Then the shell is told to look again, and the widget is
+# enabled -- plugins arrive disabled, so a user can read one before running it.
+# This one is wingroup's own and was asked for by installing wingroup.
+#
+# Only on Omarchy 4's layout, which the Lua autostart marks. A machine on
+# waybar gets the waybar modules and no plugin directory it never asked for.
+#
+# The enable is best-effort: with the shell not running -- an install from a
+# text console -- the link is still made and the summary says how to finish.
+WG_WIDGET_RESULT=""
+
+install_shell_widget() {
+  [[ -f $WG_HYPR_AUTOSTART_LUA ]] || return 0
+  local target="$WG_OMARCHY_PLUGINS_DIR/wingroup.groups"
+  mkdir -p "$WG_OMARCHY_PLUGINS_DIR" || return 0
+  # A real directory there is a copy -- an earlier hand install of this same
+  # plugin -- and would shadow the link. It is only ever ours: the id is.
+  if [[ -d $target && ! -L $target ]] && grep -q '"id": *"wingroup.groups"' "$target/manifest.json" 2>/dev/null; then
+    rm -rf "$target"
+  fi
+  ln -sfn "$WG_ROOT/shell/wingroup.groups" "$target"
+  "$WG_SHELL_CMD" -q shell rescanPlugins >/dev/null 2>&1 || true
+  if "$WG_PLUGIN_ENABLE" wingroup.groups >/dev/null 2>&1; then
+    WG_WIDGET_RESULT="enabled"
+  else
+    WG_WIDGET_RESULT="linked"
+  fi
+}
+
 install_autostart() {
   # Omarchy 4 and later: the Lua file is the one Hyprland reads.
   if [[ -f $WG_HYPR_AUTOSTART_LUA ]]; then
@@ -818,16 +857,30 @@ else
 fi
 install_bindings
 install_autostart
+install_shell_widget
 install_claude_hook
 seed_state
 
 if (( WG_WAYBAR_SKIPPED )); then
   printf 'wingroup installed. Reload with: hyprctl reload\n'
-  printf 'Bar (%s): no waybar config, so the group buttons were not added.\n' "$WG_WAYBAR_CONFIG"
-  printf '  Omarchy 4 replaced waybar with its own shell; everything else wingroup does works without it.\n'
 else
   printf 'wingroup installed. Reload with: hyprctl reload && pkill -SIGUSR2 waybar\n'
 fi
+# The shell widget is its own line, whatever happened with waybar: a machine can
+# have both a waybar config left over and Omarchy 4's layout, and the widget
+# being installed on it is not something to leave unsaid.
+case $WG_WIDGET_RESULT in
+  enabled)
+    printf 'Bar (Omarchy shell): the "Window groups" widget is installed and enabled.\n' ;;
+  linked)
+    printf 'Bar (Omarchy shell): the "Window groups" widget is installed but could not be enabled now.\n'
+    printf '  Enable it once the shell is running: omarchy plugin enable wingroup.groups\n' ;;
+  *)
+    if (( WG_WAYBAR_SKIPPED )); then
+      printf 'Bar (%s): no waybar config, so the group buttons were not added.\n' "$WG_WAYBAR_CONFIG"
+      printf '  Everything else wingroup does works without a bar.\n'
+    fi ;;
+esac
 case $WG_AUTOSTART_ADDED in
   both)
     printf 'Autostart (%s): added "%s", "%s" and "%s".\n' "$WG_AUTOSTART_FILE" \

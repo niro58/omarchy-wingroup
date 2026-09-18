@@ -161,7 +161,7 @@ main() {
       idle) idle=$(( idle + 1 )) ;;
       busy) busy=$(( busy + 1 )) ;;
     esac
-  done < <(wg_window_table)
+  done < <(if [[ -n ${WG_BAR_TABLE+x} ]]; then printf '%s\n' "$WG_BAR_TABLE"; else wg_window_table; fi)
 
   # Sessions systemd-oomd killed, narrowed to this group.
   #
@@ -282,4 +282,40 @@ main() {
   wg_emit "$label$(wg_superscript "$idle")" "$tooltip" ${classes[@]+"${classes[@]}"}
 }
 
-main "$@"
+# Every group, and the crash button's state, as one JSON document:
+#
+#   {"groups": [{"name": ..., "text": ..., "tooltip": ..., "class": ...}, ...],
+#    "crashed": {"text": ..., "tooltip": ..., "class": ...}}
+#
+# For a bar that draws all the groups itself, which is what Omarchy 4's shell
+# does -- it replaced waybar, and a bar-widget plugin asks once and draws every
+# button from the answer.
+#
+# Once is the point. Waybar ran this script once per slot, and every run built
+# the whole window table to describe a single group: eight slots, the same
+# table eight times, 1.74 seconds of work per redraw on a desktop with eight
+# groups. Here the table is built once and handed to every slot.
+wg_bar_all() {
+  local state name i out slot_json crashed_json
+  local -a names=()
+  state="$(wg_state_read)"
+  mapfile -t names < <(wg_state_group_names "$state")
+
+  WG_BAR_TABLE="$(wg_window_table)"
+  export WG_BAR_TABLE
+
+  out='[]'
+  for i in "${!names[@]}"; do
+    name="${names[i]}"
+    slot_json="$(main "$i")"
+    out="$(jq -c --arg n "$name" --argjson s "$slot_json" '. + [($s + {name: $n})]' <<<"$out")"
+  done
+  crashed_json="$(main crashed)"
+  jq -cn --argjson g "$out" --argjson c "$crashed_json" '{groups: $g, crashed: $c}'
+}
+
+if [[ ${1:-} == --all ]]; then
+  wg_bar_all
+else
+  main "$@"
+fi

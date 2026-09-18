@@ -240,3 +240,18 @@ wg_fake_bar_ready() {
   run grep -c 'no_op' "$WG_TMP/probes"
   [ "$output" -eq 1 ]
 }
+
+# --- asking Omarchy 4's shell to redraw --------------------------------------
+
+@test "the shell is asked to redraw wingroup's groups" {
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s"\n' "$WG_TMP/shell-calls" >"$WG_TMP/shell-stub"
+  chmod +x "$WG_TMP/shell-stub"
+  WG_SHELL_CMD="$WG_TMP/shell-stub" wg_signal_shell
+  [ "$(cat "$WG_TMP/shell-calls")" = "-q wingroup.groups refresh" ]
+}
+
+# A machine on waybar has no such shell, and that is not an error.
+@test "with no shell to ask, asking is not an error" {
+  WG_SHELL_CMD=wg-no-such-shell run wg_signal_shell
+  [ "$status" -eq 0 ]
+}

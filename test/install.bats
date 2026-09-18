@@ -43,6 +43,9 @@ setup() {
 # it is on the older layout, which is what most of these tests are about. The
 # Lua tests make it themselves.
 export WG_HYPR_AUTOSTART_LUA="$WG_TMP/autostart.lua"
+# And the shell's plugin directory, which the Lua layout now installs into --
+# never the real one.
+export WG_OMARCHY_PLUGINS_DIR="$WG_TMP/omarchy-plugins"
   # Never the real one: whether it exists decides what install writes.
   export WG_RESTORE_SCRIPT="$WG_TMP/restore-claude.sh"
   # Never the real ~/.claude/settings.json. Install writes into this file, so a
@@ -1355,11 +1358,22 @@ LUA
 
 @test "without a waybar config, install still succeeds" {
   rm -f "$WG_WAYBAR_CONFIG" "$WG_WAYBAR_STYLE"
-  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
 
   run "$WG_ROOT/install.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"no waybar config"* ]]
+}
+
+# With the shell's layout there, the widget is what the bar gets, and the
+# summary says so instead of saying there is no bar.
+@test "without a waybar config but with Omarchy 4, the summary reports the widget" {
+  rm -f "$WG_WAYBAR_CONFIG" "$WG_WAYBAR_STYLE"
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"Window groups" widget is installed'* ]]
+  [[ "$output" != *"no waybar config"* ]]
 }
 
 @test "without a waybar config, the autostart is still written" {
@@ -1400,4 +1414,103 @@ LUA
 
   run "$WG_ROOT/uninstall.sh"
   [ "$status" -eq 0 ]
+}
+
+# --- the groups on Omarchy 4's bar -------------------------------------------
+#
+# Omarchy 4 replaced waybar with a shell of its own, and the groups were all
+# still there after the upgrade with nothing on screen saying so. A bar-widget
+# plugin draws them there.
+
+wg_recorder() {
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s"\n' "$2" >"$WG_TMP/$1"
+  chmod +x "$WG_TMP/$1"
+}
+
+@test "on Omarchy 4 the widget is linked into the shell's plugins, not copied" {
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [ -L "$WG_OMARCHY_PLUGINS_DIR/wingroup.groups" ]
+  [ "$(readlink "$WG_OMARCHY_PLUGINS_DIR/wingroup.groups")" = "$WG_ROOT/shell/wingroup.groups" ]
+}
+
+@test "and it is enabled, since installing wingroup is asking for it" {
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+  wg_recorder enable-stub "$WG_TMP/enabled"
+  export WG_PLUGIN_ENABLE="$WG_TMP/enable-stub"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$WG_TMP/enabled")" = "wingroup.groups" ]
+  [[ "$output" == *'"Window groups" widget is installed and enabled'* ]]
+}
+
+# The shell may not be running -- an install from a text console. The link is
+# still made, and the summary says how to finish.
+@test "when it cannot be enabled now, the summary says how to finish" {
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+  export WG_PLUGIN_ENABLE=false
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [ -L "$WG_OMARCHY_PLUGINS_DIR/wingroup.groups" ]
+  [[ "$output" == *"omarchy plugin enable wingroup.groups"* ]]
+}
+
+# A machine on waybar gets the waybar modules, and no plugin directory it never
+# asked for.
+@test "without Omarchy 4's layout no plugin is installed" {
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$WG_OMARCHY_PLUGINS_DIR" ]
+}
+
+# An earlier hand install of this same plugin is a copy, and would shadow the
+# link -- so it is replaced. Only ours: the manifest id says so.
+@test "a copy of this plugin already there is replaced by the link" {
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+  mkdir -p "$WG_OMARCHY_PLUGINS_DIR/wingroup.groups"
+  cp "$WG_ROOT/shell/wingroup.groups/manifest.json" "$WG_OMARCHY_PLUGINS_DIR/wingroup.groups/"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [ -L "$WG_OMARCHY_PLUGINS_DIR/wingroup.groups" ]
+}
+
+@test "installing twice leaves one link" {
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+  "$WG_ROOT/install.sh" >/dev/null
+  "$WG_ROOT/install.sh" >/dev/null
+  [ -L "$WG_OMARCHY_PLUGINS_DIR/wingroup.groups" ]
+  [ "$(find "$WG_OMARCHY_PLUGINS_DIR" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]
+}
+
+@test "uninstall disables the widget and removes the link" {
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+  "$WG_ROOT/install.sh" >/dev/null
+  wg_recorder disable-stub "$WG_TMP/disabled"
+  export WG_PLUGIN_DISABLE="$WG_TMP/disable-stub"
+
+  run "$WG_ROOT/uninstall.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$WG_OMARCHY_PLUGINS_DIR/wingroup.groups" ]
+  [ "$(cat "$WG_TMP/disabled")" = "wingroup.groups" ]
+}
+
+# Something under that name that is not a link is somebody's own.
+@test "uninstall leaves a directory that is not its link alone" {
+  mkdir -p "$WG_OMARCHY_PLUGINS_DIR/wingroup.groups"
+  printf 'mine\n' >"$WG_OMARCHY_PLUGINS_DIR/wingroup.groups/notes"
+
+  run "$WG_ROOT/uninstall.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$WG_OMARCHY_PLUGINS_DIR/wingroup.groups/notes" ]
+}
+
+@test "the widget's manifest is one Omarchy's schema accepts" {
+  run jq -e '.id == "wingroup.groups" and (.kinds | index("bar-widget")) and .entryPoints.barWidget == "Widget.qml"' \
+    "$WG_ROOT/shell/wingroup.groups/manifest.json"
+  [ "$status" -eq 0 ]
+  [ -f "$WG_ROOT/shell/wingroup.groups/Widget.qml" ]
 }

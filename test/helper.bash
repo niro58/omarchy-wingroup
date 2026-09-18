@@ -8,6 +8,12 @@ export WG_HYPRCTL="$WG_ROOT/test/bin/hyprctl-stub"
 # the log every test reads. The tests that care about the translation set this
 # themselves, and the probe has its own stub.
 export WG_HYPR_LUA=0
+# Omarchy 4's shell, never the real one. HOME being the test's own keeps the
+# plugin directory safe, but these reach the shell that is actually running over
+# its IPC socket -- a rescan, an enable, a refresh -- whatever HOME says. `true`
+# accepts any arguments and does nothing; the tests about these calls point them
+# at recorders themselves.
+export WG_SHELL_CMD=true WG_PLUGIN_ENABLE=true WG_PLUGIN_DISABLE=true
 export WG_PROJECTS_DIR="/home/dev/projects"
 export WG_LIB_DIR="$WG_ROOT/lib"
 # Never the real one. If this machine has Omarchy installed, the picker would

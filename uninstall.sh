@@ -15,6 +15,8 @@ source "$WG_ROOT/lib/constants.sh"
 : "${WG_HYPR_AUTOSTART:=$HOME/.config/hypr/autostart.conf}"
 # Omarchy 4's Lua autostart, where the block goes on that layout.
 : "${WG_HYPR_AUTOSTART_LUA:=$HOME/.config/hypr/autostart.lua}"
+: "${WG_OMARCHY_PLUGINS_DIR:=$HOME/.config/omarchy/plugins}"
+: "${WG_PLUGIN_DISABLE:=omarchy-plugin-disable}"
 : "${WG_STATE_DIR:=$HOME/.local/state/omarchy/wingroup}"
 : "${WG_CLAUDE_SETTINGS:=$HOME/.claude/settings.json}"
 
@@ -178,6 +180,15 @@ strip_block "$WG_HYPR_AUTOSTART" '# >>> wingroup' '# <<< wingroup'
 # the Omarchy 4 upgrade and again after it has a block in each file, and leaving
 # either behind would start a daemon the user has just removed.
 [[ ! -f $WG_HYPR_AUTOSTART_LUA ]] || strip_block "$WG_HYPR_AUTOSTART_LUA" '-- >>> wingroup' '-- <<< wingroup'
+
+# The bar widget on Omarchy 4: disabled first, so the shell lets go of it, then
+# the link removed. Only a link is removed -- a directory under that name that
+# is not a link is somebody's own, and not this script's to delete.
+WG_WIDGET_LINK="$WG_OMARCHY_PLUGINS_DIR/wingroup.groups"
+if [[ -L $WG_WIDGET_LINK ]]; then
+  "$WG_PLUGIN_DISABLE" wingroup.groups >/dev/null 2>&1 || true
+  rm -f "$WG_WIDGET_LINK"
+fi
 strip_claude_hook
 
 printf 'wingroup uninstalled. Your groups are kept in %s\n' "$WG_STATE_DIR"
