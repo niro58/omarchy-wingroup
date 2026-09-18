@@ -1514,3 +1514,71 @@ wg_recorder() {
   [ "$status" -eq 0 ]
   [ -f "$WG_ROOT/shell/wingroup.groups/Widget.qml" ]
 }
+
+# --- keybindings on Omarchy 4 ------------------------------------------------
+#
+# bindings.lua replaced bindings.conf the way autostart.lua replaced
+# autostart.conf: the old file is not read at all.
+
+@test "with Lua bindings, SUPER+G is bound there" {
+  printf -- '-- Keep only your personal keybinding overrides here.\n' >"$HOME/.config/hypr/bindings.lua" 2>/dev/null \
+    || { mkdir -p "$HOME/.config/hypr"; printf -- '-- Keep only your personal keybinding overrides here.\n' >"$HOME/.config/hypr/bindings.lua"; }
+  export WG_HYPR_BINDINGS_LUA="$HOME/.config/hypr/bindings.lua"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  run grep -c 'o.bind("SUPER + G", "Window groups", "wingroup menu")' "$WG_HYPR_BINDINGS_LUA"
+  [ "$output" -eq 1 ]
+  run grep -c 'o.bind("SUPER + CTRL + G", "Send window to group", "wingroup send")' "$WG_HYPR_BINDINGS_LUA"
+  [ "$output" -eq 1 ]
+}
+
+# SUPER+G is Omarchy's own "toggle window grouping", so it has to go first.
+@test "Omarchy's own SUPER+G is unbound before it is bound again" {
+  mkdir -p "$HOME/.config/hypr"
+  printf -- '-- overrides\n' >"$HOME/.config/hypr/bindings.lua"
+  export WG_HYPR_BINDINGS_LUA="$HOME/.config/hypr/bindings.lua"
+
+  "$WG_ROOT/install.sh" >/dev/null
+  local unbind bind
+  unbind="$(grep -n 'hl.unbind("SUPER + G")' "$WG_HYPR_BINDINGS_LUA" | cut -d: -f1)"
+  bind="$(grep -n 'o.bind("SUPER + G"' "$WG_HYPR_BINDINGS_LUA" | cut -d: -f1)"
+  [ -n "$unbind" ] && [ -n "$bind" ]
+  [ "$unbind" -lt "$bind" ]
+}
+
+@test "with Lua bindings, the conf bindings are not touched" {
+  mkdir -p "$HOME/.config/hypr"
+  printf -- '-- overrides\n' >"$HOME/.config/hypr/bindings.lua"
+  export WG_HYPR_BINDINGS_LUA="$HOME/.config/hypr/bindings.lua"
+  cp "$WG_HYPR_BINDINGS" "$WG_TMP/bindings.before" 2>/dev/null || : >"$WG_TMP/bindings.before"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  if [[ -f $WG_HYPR_BINDINGS ]]; then
+    run diff "$WG_TMP/bindings.before" "$WG_HYPR_BINDINGS"
+    [ "$status" -eq 0 ]
+  fi
+}
+
+@test "installing twice binds SUPER+G once" {
+  mkdir -p "$HOME/.config/hypr"
+  printf -- '-- overrides\n' >"$HOME/.config/hypr/bindings.lua"
+  export WG_HYPR_BINDINGS_LUA="$HOME/.config/hypr/bindings.lua"
+  "$WG_ROOT/install.sh" >/dev/null
+  "$WG_ROOT/install.sh" >/dev/null
+  run grep -c 'o.bind("SUPER + G"' "$WG_HYPR_BINDINGS_LUA"
+  [ "$output" -eq 1 ]
+}
+
+@test "uninstall takes the Lua bindings away again" {
+  mkdir -p "$HOME/.config/hypr"
+  printf -- '-- overrides\n' >"$HOME/.config/hypr/bindings.lua"
+  export WG_HYPR_BINDINGS_LUA="$HOME/.config/hypr/bindings.lua"
+  "$WG_ROOT/install.sh" >/dev/null
+
+  run "$WG_ROOT/uninstall.sh"
+  [ "$status" -eq 0 ]
+  run grep -c 'wingroup' "$WG_HYPR_BINDINGS_LUA"
+  [ "$output" -eq 0 ]
+}

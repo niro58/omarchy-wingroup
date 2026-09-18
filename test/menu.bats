@@ -529,3 +529,117 @@ EOF
   [ "${lines[0]}" = "shop" ]
   [ "${lines[3]}" = "+ new group…" ]
 }
+
+# --- the picker on Omarchy 4's own menu --------------------------------------
+#
+# Omarchy 4 removed walker, and SUPER+G, send-to-group and the new-group prompt
+# all drew nothing. Omarchy 4's menu does the same two jobs. It hands back the
+# text of the row picked, not its position, which is the whole difference.
+
+wg_use_omarchy_menu() {
+  export WG_MENU_BACKEND=omarchy
+  export WG_OMARCHY_SELECT="$WG_ROOT/test/bin/omarchy-select-stub"
+  export WG_OMARCHY_INPUT="$WG_ROOT/test/bin/omarchy-input-stub"
+  export WG_SELECT_LOG="$WG_TMP/select.log"
+  : >"$WG_SELECT_LOG"
+}
+
+@test "the Omarchy menu hands back the action of the row picked" {
+  wg_use_omarchy_menu
+  export WG_SELECT_PICK=2
+  run wg_menu_run 'Groups' <<<$'group:shop\tshop\ngroup:site\tsite\ngroup:fleet\tfleet'
+  [ "$output" = "group:site" ]
+}
+
+@test "the Omarchy menu is given the prompt and every row" {
+  wg_use_omarchy_menu
+  export WG_SELECT_PICK=1
+  wg_menu_run 'Groups' <<<$'group:shop\tshop\ngroup:site\tsite' >/dev/null
+  [ "$(sed -n 1p "$WG_SELECT_LOG")" = "prompt=Groups" ]
+  [ "$(sed -n 2p "$WG_SELECT_LOG")" = "shop" ]
+  [ "$(sed -n 3p "$WG_SELECT_LOG")" = "site" ]
+}
+
+@test "cancelling the Omarchy menu picks nothing" {
+  wg_use_omarchy_menu
+  unset WG_SELECT_PICK
+  run wg_menu_run 'Groups' <<<$'group:shop\tshop'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "a separator picked in the Omarchy menu picks nothing" {
+  wg_use_omarchy_menu
+  export WG_SELECT_PICK=2
+  run wg_menu_run 'Groups' <<<$'group:shop\tshop\nnoop\t──────'
+  [ -z "$output" ]
+}
+
+# One conversation open in two terminals is two windows reading alike. Numbered,
+# they stay two, and the second one picked is the second one returned.
+@test "rows that read alike are numbered, and each maps to its own window" {
+  wg_use_omarchy_menu
+  export WG_SELECT_PICK=2
+  run wg_menu_run 'Groups' <<<$'window:0xaaa1\t  ✳ Niro 3D economics\nwindow:0xaaa2\t  ✳ Niro 3D economics'
+  [ "$output" = "window:0xaaa2" ]
+  [ "$(sed -n 3p "$WG_SELECT_LOG")" = "  ✳ Niro 3D economics (2)" ]
+}
+
+@test "a row that is unique is shown exactly as it was" {
+  wg_use_omarchy_menu
+  export WG_SELECT_PICK=1
+  wg_menu_run 'Groups' <<<$'group:shop\t▸ shop   3 windows' >/dev/null
+  [ "$(sed -n 2p "$WG_SELECT_LOG")" = "▸ shop   3 windows" ]
+}
+
+# A tab means icon or subtext to this menu, so none may reach it.
+@test "a tab inside a row is flattened before the Omarchy menu sees it" {
+  wg_use_omarchy_menu
+  export WG_SELECT_PICK=1
+  wg_menu_run 'Groups' <<<$'window:0xaaa1\tone\ttwo' >/dev/null
+  run grep -c $'\t' "$WG_SELECT_LOG"
+  [ "$output" -eq 0 ]
+}
+
+# The menu answers with the label as it drew it; padding must not decide
+# whether the answer is recognised.
+@test "an answer trimmed of its padding still finds its row" {
+  wg_use_omarchy_menu
+  export WG_SELECT_PICK=2 WG_SELECT_TRIM=1
+  run wg_menu_run 'Groups' <<<$'window:0xaaa1\t  ✳ first\nwindow:0xaaa2\t  ✳ second'
+  [ "$output" = "window:0xaaa2" ]
+}
+
+@test "the Omarchy menu's text prompt returns what was typed, trimmed" {
+  wg_use_omarchy_menu
+  export WG_INPUT_TEXT="  Niro 3D Print  "
+  [ "$(wg_menu_input 'New group')" = "Niro 3D Print" ]
+}
+
+@test "cancelling the Omarchy menu's text prompt returns nothing" {
+  wg_use_omarchy_menu
+  unset WG_INPUT_TEXT
+  [ -z "$(wg_menu_input 'New group')" ]
+}
+
+# Walker wherever it is, or wherever a caller names one; the Omarchy menu only
+# when there is no walker to use; and WG_MENU_BACKEND settles it outright.
+@test "a named walker is used over the Omarchy menu" {
+  unset WG_MENU_BACKEND
+  [ "$(wg_menu_backend)" = "walker" ]
+}
+
+@test "with no walker at all, the Omarchy menu is used" {
+  unset WG_MENU_BACKEND
+  export WG_WALKER=walker WG_OMARCHY_SELECT="$WG_ROOT/test/bin/omarchy-select-stub"
+  PATH="$WG_TMP/empty-bin:/usr/bin:/bin" run wg_menu_backend
+  command -v walker >/dev/null 2>&1 && skip "walker is installed on this machine"
+  [ "$output" = "omarchy" ]
+}
+
+@test "WG_MENU_BACKEND settles it outright" {
+  export WG_MENU_BACKEND=omarchy
+  [ "$(wg_menu_backend)" = "omarchy" ]
+  export WG_MENU_BACKEND=walker
+  [ "$(wg_menu_backend)" = "walker" ]
+}

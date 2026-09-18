@@ -3,6 +3,9 @@
 
 : "${WG_WALKER:=walker}"
 : "${WG_WALKER_LAUNCHER:=$HOME/.local/share/omarchy/bin/omarchy-launch-walker}"
+# Omarchy 4's own menu, which replaced walker there: pick one row, or type a line.
+: "${WG_OMARCHY_SELECT:=omarchy-menu-select}"
+: "${WG_OMARCHY_INPUT:=omarchy-menu-input}"
 
 wg_status_glyph() {
   case $1 in
@@ -262,7 +265,76 @@ wg_menu_picker() {
   fi
 }
 
-# Reads action<TAB>display on stdin, shows walker, prints the chosen action.
+# Which picker draws the menu: "walker" or "omarchy".
+#
+# Omarchy 4 removed walker, and every picker wingroup has -- the groups, send to
+# a group, the name of a new one -- went with it: SUPER+G drew nothing at all.
+# Omarchy 4 has a menu of its own that does the same two jobs, so a machine
+# without walker uses that.
+#
+# Walker wherever it is installed, or wherever a caller has named a particular
+# walker binary -- the tests do, and so might a user who kept it. The Omarchy
+# menu only when there is no walker to use. And WG_MENU_BACKEND settles it
+# outright, for anyone who wants the other one.
+wg_menu_backend() {
+  if [[ -n ${WG_MENU_BACKEND:-} ]]; then printf '%s\n' "$WG_MENU_BACKEND"; return; fi
+  if [[ $WG_WALKER != walker ]] || command -v walker >/dev/null 2>&1; then
+    printf 'walker\n'; return
+  fi
+  if command -v "$WG_OMARCHY_SELECT" >/dev/null 2>&1; then
+    printf 'omarchy\n'; return
+  fi
+  # Nothing better to try. walker being missing then fails the way it always did.
+  printf 'walker\n'
+}
+
+# The same row read back from the Omarchy menu, trimmed of the padding either
+# side may have added or dropped.
+wg_menu_trim() {
+  local t="$1"
+  t="${t#"${t%%[![:space:]]*}"}"
+  t="${t%"${t##*[![:space:]]}"}"
+  printf '%s' "$t"
+}
+
+# wg_menu_run for the Omarchy menu. $1 is the prompt; the rows arrive in the
+# caller's actions/displays arrays.
+#
+# Walker hands back the position of the row that was picked. This menu hands
+# back the row's text, so two rows reading alike would be indistinguishable --
+# and they can: one conversation open in two terminals is two windows with the
+# same title in the same group. So a row whose text has been seen already is
+# numbered, "(2)", "(3)", and only that row: nothing that was unique changes.
+#
+# A tab means something to this menu -- it separates an icon and a subtext from
+# the label -- so tabs in a row are flattened to spaces before it is shown.
+wg_menu_run_omarchy() {
+  local prompt="$1" i label key choice
+  local -a labels=()
+  local -A seen=()
+  for (( i = 0; i < ${#displays[@]}; i++ )); do
+    label="${displays[i]//$'\t'/ }"
+    key="$(wg_menu_trim "$label")"
+    seen[$key]=$(( ${seen[$key]:-0} + 1 ))
+    (( seen[$key] == 1 )) || label+=" (${seen[$key]})"
+    labels+=("$label")
+  done
+
+  choice="$(printf '%s\n' "${labels[@]}" \
+    | "$WG_OMARCHY_SELECT" "$prompt" -- --width 644 --maxheight 600 2>/dev/null || true)"
+  choice="$(wg_menu_trim "${choice%%$'\n'*}")"
+  [[ -n $choice ]] || return 0
+
+  for (( i = 0; i < ${#labels[@]}; i++ )); do
+    [[ "$(wg_menu_trim "${labels[i]}")" == "$choice" ]] || continue
+    [[ ${actions[i]} == noop ]] && return 0
+    printf '%s\n' "${actions[i]}"
+    return 0
+  done
+  return 0
+}
+
+# Reads action<TAB>display on stdin, shows the picker, prints the chosen action.
 wg_menu_run() {
   local prompt="${1:-}" index
   local -a actions=() displays=()
@@ -272,6 +344,11 @@ wg_menu_run() {
     actions+=("$action")
     displays+=("$display")
   done
+
+  if [[ "$(wg_menu_backend)" == omarchy ]]; then
+    wg_menu_run_omarchy "$prompt"
+    return 0
+  fi
 
   wg_menu_picker
   index="$(printf '%s\n' "${displays[@]}" | "${WG_PICKER[@]}" -d -i -p "$prompt" || true)"
@@ -289,8 +366,15 @@ wg_menu_run() {
 # reason to.
 wg_menu_input() {
   local prompt="${1:-}" text
-  wg_menu_picker
-  text="$("${WG_PICKER[@]}" -d -I -p "$prompt" </dev/null || true)"
+  if [[ "$(wg_menu_backend)" == omarchy ]]; then
+    # Prints what was typed, or nothing and a failure when it is cancelled --
+    # which is the same answer walker gives: the caller cannot tell those apart,
+    # and has no reason to.
+    text="$("$WG_OMARCHY_INPUT" "$prompt" --width 400 </dev/null 2>/dev/null || true)"
+  else
+    wg_menu_picker
+    text="$("${WG_PICKER[@]}" -d -I -p "$prompt" </dev/null || true)"
+  fi
   text="${text%%$'\n'*}"
   text="${text#"${text%%[![:space:]]*}"}"
   text="${text%"${text##*[![:space:]]}"}"
