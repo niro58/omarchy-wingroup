@@ -255,3 +255,22 @@ wg_fake_bar_ready() {
   WG_SHELL_CMD=wg-no-such-shell run wg_signal_shell
   [ "$status" -eq 0 ]
 }
+
+@test "focusing a monitor becomes a focus with a monitor" {
+  run wg_hypr_lua_form focusmonitor "eDP-2"
+  [ "$output" = 'hl.dsp.focus({ monitor = "eDP-2" })' ]
+}
+
+# The guard. #38 translated "the six dispatchers wingroup uses" -- there were
+# seven, nobody counted, and the missing one was focusmonitor: every pinned
+# group's button did nothing on Hyprland 0.56. This finds every dispatcher the
+# code sends and fails if any of them has no Lua form, so adding a dispatch
+# without its translation fails here rather than on somebody's desktop.
+@test "every dispatcher wingroup sends has a Lua translation" {
+  local name missing=""
+  while IFS= read -r name; do
+    [[ -n $name ]] || continue
+    wg_hypr_lua_form "$name" "x" >/dev/null 2>&1 || missing+=" $name"
+  done < <(grep -rhoE 'wg_hypr_dispatch [a-z]+' "$WG_ROOT/bin" "$WG_ROOT/lib" | awk '{print $2}' | sort -u)
+  [ -z "$missing" ] || { echo "no Lua form for:$missing"; false; }
+}

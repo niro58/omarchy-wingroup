@@ -77,6 +77,13 @@ wg_hypr_lua_form() {
       printf 'hl.dsp.workspace.move({ workspace = "%s", monitor = "%s" })\n' "$ws" "$mon" ;;
     focuswindow)
       printf 'hl.dsp.focus({ window = "%s" })\n' "$arg" ;;
+    focusmonitor)
+      # Missed the first time round, and it was the one that mattered to
+      # clicking: activate focuses a pinned group's monitor before switching to
+      # it, so every pinned group's button did nothing on Hyprland 0.56 while
+      # every unpinned one worked. The test beside this one now finds every
+      # dispatcher the code sends, so the next one cannot be missed the same way.
+      printf 'hl.dsp.focus({ monitor = "%s" })\n' "$arg" ;;
     swapwindow)
       # Swaps the focused window with this one, as the old dispatcher did.
       printf 'hl.dsp.window.swap({ target = "%s" })\n' "$arg" ;;
