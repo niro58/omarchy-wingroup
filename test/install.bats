@@ -39,6 +39,10 @@ setup() {
   export WG_WAYBAR_STYLE="$WG_TMP/style.css"
   export WG_HYPR_BINDINGS="$WG_TMP/bindings.conf"
   export WG_HYPR_AUTOSTART="$WG_TMP/autostart.conf"
+# Omarchy 4's Lua autostart. Deliberately not created here: a machine without
+# it is on the older layout, which is what most of these tests are about. The
+# Lua tests make it themselves.
+export WG_HYPR_AUTOSTART_LUA="$WG_TMP/autostart.lua"
   # Never the real one: whether it exists decides what install writes.
   export WG_RESTORE_SCRIPT="$WG_TMP/restore-claude.sh"
   # Never the real ~/.claude/settings.json. Install writes into this file, so a
@@ -1244,5 +1248,156 @@ JSON
   [[ "$output" == *"markers"* ]]
   [[ "$output" == *"$WG_WAYBAR_CONFIG"* ]]
   run cmp "$WG_TMP/config.unmarked" "$WG_WAYBAR_CONFIG"
+  [ "$status" -eq 0 ]
+}
+
+# --- Omarchy 4, where Hyprland reads Lua -------------------------------------
+#
+# The update moved the Hyprland config to Lua: hyprland.lua requires
+# hypr.autostart, and autostart.conf is not read at all any more. The exec-once
+# lines sat in a file nobody reads, so the daemon, the watcher and the restore
+# never started, and every session came back to a desktop that could not file
+# it. Which is how this was found.
+
+@test "with a Lua autostart, the block is written there" {
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  run grep -c 'o.launch_on_start("wingroup-daemon")' "$WG_HYPR_AUTOSTART_LUA"
+  [ "$output" -eq 1 ]
+  run grep -c 'o.launch_on_start("wingroup-oomwatch")' "$WG_HYPR_AUTOSTART_LUA"
+  [ "$output" -eq 1 ]
+}
+
+# And the conf file is left alone: writing to both would start everything twice
+# on a machine that still reads the old one.
+@test "with a Lua autostart, the conf file is not touched" {
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+  cp "$WG_HYPR_AUTOSTART" "$WG_TMP/conf.before"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  run diff "$WG_TMP/conf.before" "$WG_HYPR_AUTOSTART"
+  [ "$status" -eq 0 ]
+}
+
+@test "without a Lua autostart, the conf block is written as before" {
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  run grep -c 'exec-once = wingroup-daemon' "$WG_HYPR_AUTOSTART"
+  [ "$output" -eq 1 ]
+  [ ! -f "$WG_HYPR_AUTOSTART_LUA" ]
+}
+
+@test "installing twice does not write the Lua block twice" {
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+  "$WG_ROOT/install.sh"
+  "$WG_ROOT/install.sh"
+  run grep -c 'o.launch_on_start("wingroup-daemon")' "$WG_HYPR_AUTOSTART_LUA"
+  [ "$output" -eq 1 ]
+  run grep -c '>>> wingroup' "$WG_HYPR_AUTOSTART_LUA"
+  [ "$output" -eq 1 ]
+}
+
+# The upgrade path, in Lua: a block written before a line existed gains it,
+# without disturbing what the user put in there.
+@test "a Lua block missing a line gains it, and keeps what the user added" {
+  cat >"$WG_HYPR_AUTOSTART_LUA" <<'LUA'
+-- Extra autostart processes.
+
+-- >>> wingroup
+o.launch_on_start("wingroup-daemon")
+o.launch_on_start("my-own-thing")
+-- <<< wingroup
+LUA
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  run grep -c 'o.launch_on_start("wingroup-oomwatch")' "$WG_HYPR_AUTOSTART_LUA"
+  [ "$output" -eq 1 ]
+  run grep -c 'o.launch_on_start("my-own-thing")' "$WG_HYPR_AUTOSTART_LUA"
+  [ "$output" -eq 1 ]
+}
+
+@test "uninstall takes the Lua block away again" {
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+  "$WG_ROOT/install.sh"
+  run grep -c 'wingroup' "$WG_HYPR_AUTOSTART_LUA"
+  [ "$output" -gt 0 ]
+
+  run "$WG_ROOT/uninstall.sh"
+  [ "$status" -eq 0 ]
+  run grep -c 'wingroup' "$WG_HYPR_AUTOSTART_LUA"
+  [ "$output" -eq 0 ]
+}
+
+# A machine installed before the upgrade and again after it has a block in each
+# file. Leaving either behind would start a daemon the user has just removed.
+@test "uninstall takes both blocks away when both are there" {
+  "$WG_ROOT/install.sh"                                             # writes the conf block
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+  "$WG_ROOT/install.sh"                                             # now writes the Lua one
+  run "$WG_ROOT/uninstall.sh"
+  [ "$status" -eq 0 ]
+  run grep -c 'wingroup' "$WG_HYPR_AUTOSTART"
+  [ "$output" -eq 0 ]
+  run grep -c 'wingroup' "$WG_HYPR_AUTOSTART_LUA"
+  [ "$output" -eq 0 ]
+}
+
+# --- a machine with no waybar ------------------------------------------------
+#
+# Omarchy 4 replaced waybar with a shell of its own. The first install after the
+# upgrade died on "cannot open file .../waybar/config.jsonc" before it reached
+# the autostart -- the one step that makes everything else run at the next
+# login. A missing bar is something to say, not a reason to stop.
+
+@test "without a waybar config, install still succeeds" {
+  rm -f "$WG_WAYBAR_CONFIG" "$WG_WAYBAR_STYLE"
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no waybar config"* ]]
+}
+
+@test "without a waybar config, the autostart is still written" {
+  rm -f "$WG_WAYBAR_CONFIG" "$WG_WAYBAR_STYLE"
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+
+  run "$WG_ROOT/install.sh"
+  run grep -c 'o.launch_on_start("wingroup-daemon")' "$WG_HYPR_AUTOSTART_LUA"
+  [ "$output" -eq 1 ]
+}
+
+# And no waybar file is created out of nothing to hold buttons nobody draws.
+@test "without a waybar config, none is created" {
+  rm -f "$WG_WAYBAR_CONFIG" "$WG_WAYBAR_STYLE"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$WG_WAYBAR_CONFIG" ]
+  [ ! -e "$WG_WAYBAR_STYLE" ]
+}
+
+# The summary names the file actually written and the way a line is spelled
+# there -- not autostart.conf and exec-once on a machine that reads neither.
+@test "the summary names the Lua file and its spelling" {
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Autostart ($WG_HYPR_AUTOSTART_LUA)"* ]]
+  [[ "$output" == *'o.launch_on_start("wingroup-daemon")'* ]]
+  [[ "$output" != *"exec-once"* ]]
+}
+
+@test "uninstall succeeds without a waybar config too" {
+  rm -f "$WG_WAYBAR_CONFIG" "$WG_WAYBAR_STYLE"
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+  "$WG_ROOT/install.sh" >/dev/null
+
+  run "$WG_ROOT/uninstall.sh"
   [ "$status" -eq 0 ]
 }

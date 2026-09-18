@@ -15,6 +15,15 @@ source "$WG_ROOT/lib/constants.sh"
 : "${WG_WAYBAR_STYLE:=$HOME/.config/waybar/style.css}"
 : "${WG_HYPR_BINDINGS:=$HOME/.config/hypr/bindings.conf}"
 : "${WG_HYPR_AUTOSTART:=$HOME/.config/hypr/autostart.conf}"
+# Omarchy 4 moved the Hyprland config to Lua: hyprland.lua requires
+# hypr.autostart, and autostart.conf is not read at all any more. A machine that
+# has the Lua file gets the Lua block; one that does not is on the older layout
+# and gets the conf block, as before.
+#
+# This is not a style preference. When the update landed, the exec-once lines
+# sat in a file nobody reads: the daemon, the watcher and the restore never
+# started, and every session came back to a desktop that could not file it.
+: "${WG_HYPR_AUTOSTART_LUA:=$HOME/.config/hypr/autostart.lua}"
 : "${WG_STATE_DIR:=$HOME/.local/state/omarchy/wingroup}"
 : "${WG_RESTORE_SCRIPT:=$HOME/restore-claude.sh}"
 : "${WG_CLAUDE_SETTINGS:=$HOME/.claude/settings.json}"
@@ -584,7 +593,75 @@ install_autostart_missing() {
   done
 }
 
+# The same two jobs as the conf pair above -- add what is missing, or write the
+# block -- against Omarchy 4's Lua autostart.
+#
+# o.launch_on_start is Omarchy's own helper for this, so a wingroup line looks
+# like every other line in that file and picks up whatever the helper does with
+# them.
+install_autostart_lua_missing() {
+  local line added=0 tmp
+  for line in ${WG_AUTOSTART_LINES[@]+"${WG_AUTOSTART_LINES[@]}"}; do
+    grep -qF "o.launch_on_start(\"$line\")" "$WG_HYPR_AUTOSTART_LUA" && continue
+    if (( ! added )); then
+      backup "$WG_HYPR_AUTOSTART_LUA"
+      added=1
+    fi
+    tmp="$(mktemp "$(dirname -- "$WG_HYPR_AUTOSTART_LUA")/.wingroup.XXXXXX")" || return 0
+    if awk -v ins="o.launch_on_start(\"$line\")" \
+        '$0 ~ /<<< wingroup/ { print ins } { print }' \
+        "$WG_HYPR_AUTOSTART_LUA" >"$tmp" && mv -f "$tmp" "$WG_HYPR_AUTOSTART_LUA"; then
+      WG_AUTOSTART_UPGRADED+=("$line")
+    else
+      rm -f "$tmp"
+      return 0
+    fi
+  done
+}
+
+install_autostart_lua() {
+  if grep -q '>>> wingroup' "$WG_HYPR_AUTOSTART_LUA"; then
+    install_autostart_lua_missing
+    return 0
+  fi
+
+  local eof_flag=""
+  wg_ends_with_newline "$WG_HYPR_AUTOSTART_LUA" || eof_flag=" no-eof-nl"
+
+  if [[ -x $WG_RESTORE_SCRIPT ]]; then
+    WG_AUTOSTART_ADDED="both"
+  else
+    WG_AUTOSTART_ADDED="daemon"
+  fi
+
+  local lines="" line
+  for line in ${WG_AUTOSTART_LINES[@]+"${WG_AUTOSTART_LINES[@]}"}; do
+    lines+="o.launch_on_start(\"$line\")"$'\n'
+  done
+
+  backup "$WG_HYPR_AUTOSTART_LUA"
+  cat >>"$WG_HYPR_AUTOSTART_LUA" <<EOF
+
+-- >>> wingroup
+${lines}-- <<< wingroup$eof_flag
+EOF
+}
+
+# Which file the autostart went into and how a line is spelled there, for the
+# closing summary -- which used to name autostart.conf and "exec-once" even on a
+# machine where neither is read any more.
+WG_AUTOSTART_FILE="$WG_HYPR_AUTOSTART"
+wg_autostart_line() { printf 'exec-once = %s' "$1"; }
+
 install_autostart() {
+  # Omarchy 4 and later: the Lua file is the one Hyprland reads.
+  if [[ -f $WG_HYPR_AUTOSTART_LUA ]]; then
+    WG_AUTOSTART_FILE="$WG_HYPR_AUTOSTART_LUA"
+    wg_autostart_line() { printf 'o.launch_on_start("%s")' "$1"; }
+    install_autostart_lua
+    return 0
+  fi
+
   if grep -q '>>> wingroup' "$WG_HYPR_AUTOSTART"; then
     install_autostart_missing
     return 0
@@ -723,32 +800,55 @@ seed_state() {
 }
 
 link_binaries
-install_waybar_config
-install_waybar_style
+
+# The bar buttons live in waybar's config, and a machine may have no waybar at
+# all: Omarchy 4 replaced it with a shell of its own. Everything else wingroup
+# does -- filing windows, recording sessions, the restore at login -- works
+# without a bar, so a missing one is a thing to say, not a reason to stop.
+#
+# It used to be a reason to stop. The first install after the upgrade died on
+# "cannot open file .../waybar/config.jsonc" before it reached the autostart,
+# which is the one step that makes any of the rest run at the next login.
+if [[ -f $WG_WAYBAR_CONFIG ]]; then
+  install_waybar_config
+  install_waybar_style
+  WG_WAYBAR_SKIPPED=0
+else
+  WG_WAYBAR_SKIPPED=1
+fi
 install_bindings
 install_autostart
 install_claude_hook
 seed_state
 
-printf 'wingroup installed. Reload with: hyprctl reload && pkill -SIGUSR2 waybar\n'
+if (( WG_WAYBAR_SKIPPED )); then
+  printf 'wingroup installed. Reload with: hyprctl reload\n'
+  printf 'Bar (%s): no waybar config, so the group buttons were not added.\n' "$WG_WAYBAR_CONFIG"
+  printf '  Omarchy 4 replaced waybar with its own shell; everything else wingroup does works without it.\n'
+else
+  printf 'wingroup installed. Reload with: hyprctl reload && pkill -SIGUSR2 waybar\n'
+fi
 case $WG_AUTOSTART_ADDED in
   both)
-    printf 'Autostart (%s): added "exec-once = wingroup-daemon", "exec-once = wingroup-oomwatch" and "exec-once = wingroup-restore".\n' \
-      "$WG_HYPR_AUTOSTART" ;;
+    printf 'Autostart (%s): added "%s", "%s" and "%s".\n' "$WG_AUTOSTART_FILE" \
+      "$(wg_autostart_line wingroup-daemon)" "$(wg_autostart_line wingroup-oomwatch)" \
+      "$(wg_autostart_line wingroup-restore)" ;;
   daemon)
-    printf 'Autostart (%s): added "exec-once = wingroup-daemon" and "exec-once = wingroup-oomwatch".\n' \
-      "$WG_HYPR_AUTOSTART"
-    printf '  No executable restore script at %s, so "exec-once = wingroup-restore" was left out.\n' \
-      "$WG_RESTORE_SCRIPT"
+    printf 'Autostart (%s): added "%s" and "%s".\n' "$WG_AUTOSTART_FILE" \
+      "$(wg_autostart_line wingroup-daemon)" "$(wg_autostart_line wingroup-oomwatch)"
+    printf '  No executable restore script at %s, so "%s" was left out.\n' \
+      "$WG_RESTORE_SCRIPT" "$(wg_autostart_line wingroup-restore)"
     printf '  To enable it later, see "Startup integration" in the README.\n' ;;
   *)
     if (( ${#WG_AUTOSTART_UPGRADED[@]} )); then
       # Named individually, because this is the line an existing install was
       # silently missing and "updated" would not tell anyone which.
-      printf 'Autostart (%s): added the missing "exec-once = %s".\n' \
-        "$WG_HYPR_AUTOSTART" "${WG_AUTOSTART_UPGRADED[@]}"
+      local_line=""
+      for local_line in "${WG_AUTOSTART_UPGRADED[@]}"; do
+        printf 'Autostart (%s): added the missing "%s".\n' "$WG_AUTOSTART_FILE" "$(wg_autostart_line "$local_line")"
+      done
     else
-      printf 'Autostart (%s): already configured, left unchanged.\n' "$WG_HYPR_AUTOSTART"
+      printf 'Autostart (%s): already configured, left unchanged.\n' "$WG_AUTOSTART_FILE"
     fi ;;
 esac
 if (( WG_CONFIG_REFRESHED )); then
