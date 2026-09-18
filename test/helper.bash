@@ -23,6 +23,23 @@ wg_setup_tmp() {
   unset WAYBAR_OUTPUT_NAME
   WG_TMP="$(mktemp -d)"
   export WG_TMP
+  # Never the real home directory -- for anything, including paths that do not
+  # exist yet.
+  #
+  # Every file install.sh and uninstall.sh touch defaults to somewhere under
+  # $HOME, and the suites have been protected one variable at a time: the Claude
+  # settings file below, the waybar files and the autostart in the suites that
+  # set them. That held until a new path arrived. Omarchy 4's Lua autostart was
+  # added to the installer and redirected in install.bats alone, and
+  # install-edgecases.bats and constants.bats went on running the installer
+  # against the real ~/.config/hypr/autostart.lua -- writing wingroup's block in,
+  # then uninstalling it out. After one afternoon of test runs the block was
+  # gone, and the next login started nothing: no daemon, no watcher, no restore.
+  #
+  # Moving HOME itself means a path added tomorrow is covered before anyone
+  # remembers to cover it.
+  export HOME="$WG_TMP/home"
+  mkdir -p "$HOME"
   # The picker's single-instance lock lives here; keep it out of the real one.
   export XDG_RUNTIME_DIR="$WG_TMP"
   export WG_STATE_DIR="$WG_TMP/state"
