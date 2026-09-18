@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Test-only stand-in for omarchy-menu-select: Omarchy 4's pick-one menu.
+#
+# Records the prompt and the rows it was handed, then answers the way the real
+# one does: with the text of the row picked -- row $WG_SELECT_PICK, counting
+# from 1 -- or with nothing and a failure when nothing is picked, which is what
+# cancelling looks like. $WG_SELECT_TRIM trims the answer, since the real menu's
+# answer is the label as it drew it and a caller must not depend on padding.
+prompt="${1:-}"
+shift || true
+mapfile -t rows
+if [[ -n ${WG_SELECT_LOG:-} ]]; then
+  {
+    printf 'prompt=%s\n' "$prompt"
+    printf '%s\n' "${rows[@]}"
+  } >>"$WG_SELECT_LOG"
+fi
+[[ -n ${WG_SELECT_PICK:-} ]] || exit 1
+answer="${rows[WG_SELECT_PICK - 1]}"
+if [[ -n ${WG_SELECT_TRIM:-} ]]; then
+  answer="${answer#"${answer%%[![:space:]]*}"}"
+  answer="${answer%"${answer##*[![:space:]]}"}"
+fi
+printf '%s' "$answer"

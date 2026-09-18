@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Test-only stand-in for omarchy-menu-input: Omarchy 4's type-a-line prompt.
+# Answers with $WG_INPUT_TEXT, or with nothing and a failure when it is unset --
+# which is what cancelling looks like.
+[[ -n ${WG_INPUT_LOG:-} ]] && printf 'prompt=%s\n' "${1:-}" >>"$WG_INPUT_LOG"
+[[ -n ${WG_INPUT_TEXT+x} ]] || exit 1
+printf '%s' "$WG_INPUT_TEXT"

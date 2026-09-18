@@ -14,6 +14,9 @@ source "$WG_ROOT/lib/constants.sh"
 : "${WG_WAYBAR_CONFIG:=$HOME/.config/waybar/config.jsonc}"
 : "${WG_WAYBAR_STYLE:=$HOME/.config/waybar/style.css}"
 : "${WG_HYPR_BINDINGS:=$HOME/.config/hypr/bindings.conf}"
+# Omarchy 4's Lua bindings, which replaced bindings.conf the way autostart.lua
+# replaced autostart.conf: the old file is not read at all there.
+: "${WG_HYPR_BINDINGS_LUA:=$HOME/.config/hypr/bindings.lua}"
 : "${WG_HYPR_AUTOSTART:=$HOME/.config/hypr/autostart.conf}"
 # Omarchy 4 moved the Hyprland config to Lua: hyprland.lua requires
 # hypr.autostart, and autostart.conf is not read at all any more. A machine that
@@ -535,7 +538,36 @@ wg_block_matches() {
   [[ "$current" == "${block#$'\n'}" ]]
 }
 
+# SUPER+G and SUPER+CTRL+G in Omarchy 4's Lua bindings.
+#
+# SUPER+G is Omarchy's own "toggle window grouping", so it is unbound before it
+# is bound again -- the same unbind the conf block has always carried. o.bind
+# with a string runs it as a command, which is Omarchy's own helper for exactly
+# this and what the file's own examples use.
+install_bindings_lua() {
+  grep -q '>>> wingroup' "$WG_HYPR_BINDINGS_LUA" && return 0
+
+  local eof_flag=""
+  wg_ends_with_newline "$WG_HYPR_BINDINGS_LUA" || eof_flag=" no-eof-nl"
+
+  backup "$WG_HYPR_BINDINGS_LUA"
+  cat >>"$WG_HYPR_BINDINGS_LUA" <<EOF
+
+-- >>> wingroup
+hl.unbind("SUPER + G")
+o.bind("SUPER + G", "Window groups", "wingroup menu")
+o.bind("SUPER + CTRL + G", "Send window to group", "wingroup send")
+-- <<< wingroup$eof_flag
+EOF
+}
+
 install_bindings() {
+  # Omarchy 4 and later: the Lua file is the one Hyprland reads.
+  if [[ -f $WG_HYPR_BINDINGS_LUA ]]; then
+    install_bindings_lua
+    return 0
+  fi
+
   grep -q '>>> wingroup' "$WG_HYPR_BINDINGS" && return 0
 
   local eof_flag=""

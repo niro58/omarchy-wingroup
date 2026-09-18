@@ -12,6 +12,7 @@ source "$WG_ROOT/lib/constants.sh"
 : "${WG_WAYBAR_CONFIG:=$HOME/.config/waybar/config.jsonc}"
 : "${WG_WAYBAR_STYLE:=$HOME/.config/waybar/style.css}"
 : "${WG_HYPR_BINDINGS:=$HOME/.config/hypr/bindings.conf}"
+: "${WG_HYPR_BINDINGS_LUA:=$HOME/.config/hypr/bindings.lua}"
 : "${WG_HYPR_AUTOSTART:=$HOME/.config/hypr/autostart.conf}"
 # Omarchy 4's Lua autostart, where the block goes on that layout.
 : "${WG_HYPR_AUTOSTART_LUA:=$HOME/.config/hypr/autostart.lua}"
@@ -175,6 +176,9 @@ strip_block "$WG_WAYBAR_CONFIG" '// >>> wingroup' '// <<< wingroup'
 strip_waybar_slots
 strip_block "$WG_WAYBAR_STYLE" '/* >>> wingroup' '/* <<< wingroup'
 strip_block "$WG_HYPR_BINDINGS" '# >>> wingroup' '# <<< wingroup'
+# And Omarchy 4's Lua bindings, for the same reason both autostarts are stripped:
+# a machine installed before the upgrade and after it has a block in each.
+[[ ! -f $WG_HYPR_BINDINGS_LUA ]] || strip_block "$WG_HYPR_BINDINGS_LUA" '-- >>> wingroup' '-- <<< wingroup'
 strip_block "$WG_HYPR_AUTOSTART" '# >>> wingroup' '# <<< wingroup'
 # Both are stripped, not one or the other: a machine that was installed before
 # the Omarchy 4 upgrade and again after it has a block in each file, and leaving
