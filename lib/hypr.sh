@@ -163,3 +163,21 @@ wg_ws_selector() {
     *)               printf '%s\n' "$ws" ;;
   esac
 }
+
+# The command that reaches Omarchy 4's shell. A variable so the tests can stand
+# something harmless in for it rather than poke the shell on the machine running
+# them.
+: "${WG_SHELL_CMD:=omarchy-shell}"
+
+# Asks Omarchy 4's shell to redraw wingroup's groups, the way wg_signal_waybar
+# asks waybar. Quiet and best-effort: -q returns success whether or not the
+# shell, or the widget, is there -- a machine on waybar has neither, and that is
+# not an error.
+#
+# The widget already redraws on the Hyprland events that change it. This is for
+# the changes Hyprland never hears about: a group created from a terminal, a pin
+# moved, a crash recorded.
+wg_signal_shell() {
+  command -v "$WG_SHELL_CMD" >/dev/null 2>&1 || return 0
+  "$WG_SHELL_CMD" -q wingroup.groups refresh >/dev/null 2>&1 || true
+}

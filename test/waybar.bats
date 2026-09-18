@@ -645,3 +645,35 @@ wg_crash_clear() {
   run jq_calls
   [ "$output" -le 1 ]
 }
+
+# --- every group in one answer, for Omarchy 4's shell ------------------------
+#
+# The shell's widget draws every group from one call. Waybar ran a process per
+# slot, each building the whole window table to describe a single group.
+
+@test "--all describes every group and the crash button in one document" {
+  run "$WG_ROOT/bin/wingroup-waybar" --all
+  [ "$status" -eq 0 ]
+  [ "$(jq '.groups | length' <<<"$output")" -eq "$(jq '.groups | length' "$WG_STATE_DIR/state.json")" ]
+  [ "$(jq -r '.groups[0].name' <<<"$output")" = "$(jq -r '.groups[0].name' "$WG_STATE_DIR/state.json")" ]
+  jq -e '.groups[0] | has("text") and has("tooltip") and has("class")' <<<"$output"
+  jq -e '.crashed | has("text")' <<<"$output"
+}
+
+# The same answer a slot gives, with its group's name beside it.
+@test "--all says for each group what its own slot would say" {
+  local slot all
+  slot="$("$WG_ROOT/bin/wingroup-waybar" 0)"
+  all="$("$WG_ROOT/bin/wingroup-waybar" --all)"
+  [ "$(jq -c '.groups[0] | del(.name)' <<<"$all")" = "$(jq -c . <<<"$slot")" ]
+}
+
+# Once is the point: the window table is built once for every group.
+@test "--all asks the compositor for the window list once" {
+  export WG_HYPRCTL_LOG="$WG_TMP/hyprctl.log"
+  : >"$WG_HYPRCTL_LOG"
+  run "$WG_ROOT/bin/wingroup-waybar" --all
+  [ "$status" -eq 0 ]
+  run grep -c -- '-j clients' "$WG_HYPRCTL_LOG"
+  [ "$output" -eq 1 ]
+}
