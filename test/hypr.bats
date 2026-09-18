@@ -134,3 +134,109 @@ wg_fake_bar_ready() {
 @test "nothing in, nothing out" {
   [ -z "$(wg_ws_selector "")" ]
 }
+
+# --- speaking to a compositor that has moved on -----------------------------
+#
+# Hyprland 0.56 replaced the dispatch string with a Lua API. "hyprctl dispatch
+# movetoworkspacesilent name:plat,address:0x..." is read as Lua source there and
+# fails to parse, so every move wingroup makes stopped working the day Omarchy 4
+# landed: the terminals came back from the snapshot and piled up wherever they
+# opened, because nothing could place them.
+#
+# The old spelling stays the one written in this codebase, and is translated on
+# the way out. These check the translation itself; whether the compositor wants
+# it is a separate question, probed once.
+
+@test "a silent move becomes a window move that does not follow" {
+  run wg_hypr_lua_form movetoworkspacesilent "name:plat,address:0xaaa1"
+  [ "$status" -eq 0 ]
+  [ "$output" = 'hl.dsp.window.move({ workspace = "name:plat", window = "address:0xaaa1", follow = false })' ]
+}
+
+# The workspace keeps its old selector, and that is not a guess: "plat" on its
+# own is accepted and silently moves nothing.
+@test "a move to a numbered workspace keeps the bare number" {
+  run wg_hypr_lua_form movetoworkspacesilent "5,address:0xaaa1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'workspace = "5"'* ]]
+}
+
+@test "a following move follows" {
+  run wg_hypr_lua_form movetoworkspace "name:plat,address:0xaaa1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"follow = true"* ]]
+}
+
+@test "switching workspace becomes a focus" {
+  run wg_hypr_lua_form workspace "name:plat"
+  [ "$output" = 'hl.dsp.focus({ workspace = "name:plat" })' ]
+}
+
+@test "focusing a window becomes a focus with a window" {
+  run wg_hypr_lua_form focuswindow "address:0xaaa1"
+  [ "$output" = 'hl.dsp.focus({ window = "address:0xaaa1" })' ]
+}
+
+@test "moving a workspace to a monitor names both" {
+  run wg_hypr_lua_form moveworkspacetomonitor "name:plat DP-1"
+  [ "$output" = 'hl.dsp.workspace.move({ workspace = "name:plat", monitor = "DP-1" })' ]
+}
+
+# swapwindow swapped the focused window with the named one; window.swap takes
+# that one as its target.
+@test "swapping names the other window as the target" {
+  run wg_hypr_lua_form swapwindow "address:0xaaa2"
+  [ "$output" = 'hl.dsp.window.swap({ target = "address:0xaaa2" })' ]
+}
+
+@test "an exact resize is pulled apart into x, y and the window" {
+  run wg_hypr_lua_form resizewindowpixel "exact 1000 900,address:0xaaa1"
+  [ "$output" = 'hl.dsp.window.resize({ x = "1000", y = "900", window = "address:0xaaa1", exact = true })' ]
+}
+
+# Guessing a translation for a dispatcher nobody here calls would be inventing
+# an API by extrapolation.
+@test "a dispatcher wingroup does not use is not translated" {
+  run wg_hypr_lua_form togglefloating "address:0xaaa1"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "on a compositor that does not take Lua, the old spelling goes out as it is" {
+  WG_HYPR_LUA=0 wg_hypr_dispatch movetoworkspacesilent "name:plat,address:0xaaa1"
+  [ "$(dispatches)" = "movetoworkspacesilent name:plat,address:0xaaa1" ]
+}
+
+@test "and on one that does, the Lua goes out instead" {
+  WG_HYPR_LUA=1 wg_hypr_dispatch movetoworkspacesilent "name:plat,address:0xaaa1"
+  [ "$(dispatches)" = 'hl.dsp.window.move({ workspace = "name:plat", window = "address:0xaaa1", follow = false })' ]
+}
+
+# The probe, on its own stub: a compositor that answers the new API's no-op with
+# "ok" takes Lua, and one that does not, does not.
+@test "a compositor that answers hl.dsp.no_op takes Lua" {
+  printf '#!/usr/bin/env bash\nprintf "ok\\n"\n' >"$WG_TMP/hyprctl-new"
+  chmod +x "$WG_TMP/hyprctl-new"
+  WG_HYPRCTL="$WG_TMP/hyprctl-new" WG_HYPR_LUA="" run wg_hypr_lua
+  [ "$status" -eq 0 ]
+}
+
+@test "one that refuses it does not" {
+  printf '#!/usr/bin/env bash\nprintf "Invalid dispatcher\\n" >&2\nexit 1\n' >"$WG_TMP/hyprctl-old"
+  chmod +x "$WG_TMP/hyprctl-old"
+  WG_HYPRCTL="$WG_TMP/hyprctl-old" WG_HYPR_LUA="" run wg_hypr_lua
+  [ "$status" -ne 0 ]
+}
+
+# Asked once, not once per dispatch: this runs on every window that opens.
+@test "the compositor is asked which language it speaks only once" {
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$WG_TMP/probes"\nprintf "ok\\n"\n' >"$WG_TMP/hyprctl-count"
+  chmod +x "$WG_TMP/hyprctl-count"
+  : >"$WG_TMP/probes"
+  export WG_HYPRCTL="$WG_TMP/hyprctl-count" WG_HYPR_LUA=""
+  wg_hypr_dispatch focuswindow "address:0xaaa1" >/dev/null
+  wg_hypr_dispatch focuswindow "address:0xaaa2" >/dev/null
+  wg_hypr_dispatch focuswindow "address:0xaaa3" >/dev/null
+  run grep -c 'no_op' "$WG_TMP/probes"
+  [ "$output" -eq 1 ]
+}
