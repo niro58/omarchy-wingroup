@@ -411,38 +411,37 @@ wg_sessions_expire() {
   ' --arg now "$now" --arg ttl "$WG_SESSIONS_TTL"
 }
 
-# Runs $@ with this process's Claude Code variables removed.
+# The `env` arguments that strip this process's Claude Code variables from a
+# launch: "-uCLAUDE_CODE_CHILD_SESSION" and friends. Filled by
+# wg_launch_env_init; a launch is then `env "${WG_LAUNCH_ENV[@]}" <command>`.
 #
-# A Claude session launched from inside another one inherits its markers --
-# CLAUDE_CODE_CHILD_SESSION above all -- and a session that believes it is a
-# child does not persist its transcript. So restoring a crash from a terminal
-# that happens to be running Claude hands back a session that quietly saves
-# nothing, with "Transcript saving is off" across the top of it. Eleven sessions
-# were reopened that way before anyone noticed.
+# Why strip at all: a Claude session launched from inside another one inherits
+# its markers -- CLAUDE_CODE_CHILD_SESSION above all -- and a session that
+# believes it is a child does not persist its transcript. So restoring a crash
+# from a terminal that happens to be running Claude hands back a session that
+# quietly saves nothing. Eleven sessions were reopened that way before anyone
+# noticed.
 #
-# The login restore is safe either way -- Hyprland's autostart has no such
-# variables -- but `wingroup crashed --restore` inherits whatever shell it was
-# run from, and that shell is sometimes a Claude session.
+# Why an array and not a function that runs the command: every launch is
+# backgrounded, and backgrounding a shell function forks a whole bash subshell
+# to run it, which then waits on the terminal for as long as the terminal lives.
+# That was the first version of this. After one login there were twenty bash
+# processes named wingroup-restore, each the parent of one terminal, long after
+# the restore itself had finished. `env` is a program, so a backgrounded env is
+# forked and exec'd and nothing is left behind.
 #
 # Read from `env` rather than /proc/self/environ: a shell that exports these
 # after it starts has them in its environment and not in the process's initial
-# image, and reading the image finds nothing to strip. Which is its own small
-# lesson in checking that a fix did anything.
-#
-# Only wingroup's own launches are cleaned. The variables stay in the calling
-# shell, where they are somebody else's business.
-wg_launch_clean() {
+# image, and reading the image finds nothing to strip.
+declare -ga WG_LAUNCH_ENV=()
+
+wg_launch_env_init() {
   local name
-  local -a strip=()
+  WG_LAUNCH_ENV=()
   while IFS= read -r name; do
     [[ -n $name ]] || continue
-    strip+=("-u$name")
+    WG_LAUNCH_ENV+=("-u$name")
   done < <(env | sed -E 's/=.*//' | grep -E '^(CLAUDE|ANTHROPIC)' | sort -u)
-  if (( ${#strip[@]} == 0 )); then
-    "$@"
-    return
-  fi
-  env "${strip[@]}" "$@"
 }
 
 # Files a crash for scope $1, killed at $2 (an ISO timestamp from the journal).
