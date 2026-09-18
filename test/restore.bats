@@ -1083,6 +1083,44 @@ wg_write_crashed() {
   [ "$output" -eq 1 ]
 }
 
+# A terminal the restore opens must not keep a copy of the restore alive.
+#
+# Every launch is backgrounded, and backgrounding a shell function forks a
+# subshell to run it. When the function's last act is the launch, bash execs it
+# and nothing is left; when anything follows -- a `return` did -- the subshell
+# waits on the terminal for as long as the terminal lives. After one real login
+# there were twenty bash processes named wingroup-restore, each the parent of
+# one terminal, long after the restore itself had finished.
+#
+# Run the way login runs it: with no Claude variables in the environment. With
+# them present the old code took its other branch, which bash happened to exec,
+# and a test run from inside a Claude session passed on the broken code for
+# exactly that reason.
+wg_restore_as_at_login() {
+  local -a strip=()
+  local name
+  while IFS= read -r name; do
+    [[ -n $name ]] && strip+=("-u$name")
+  done < <(env | sed -E 's/=.*//' | grep -E '^(CLAUDE|ANTHROPIC)')
+  env ${strip[@]+"${strip[@]}"} "$WG_ROOT/bin/wingroup-restore"
+}
+
+@test "a restored terminal does not leave a copy of the restore running" {
+  local shop="$WG_TMP/projects/shop-web"
+  wg_make_dirs "abc-123:$shop"
+  wg_snapshot_from_last_boot "abc-123:$shop"
+  export WG_LAUNCH_CMD="$WG_ROOT/test/bin/launch-alive-stub" WG_LAUNCH_ALIVE_FOR=5
+
+  run wg_restore_as_at_login
+  [ "$status" -eq 0 ]
+  wait_until launched_at_least 1
+  sleep 0.5
+  # The stand-in terminal is still up -- it lives five seconds -- and the
+  # restore has returned. Anything still named wingroup-restore is a parked copy.
+  run pgrep -f "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -ne 0 ]
+}
+
 # The ordering is the whole point, so the order of the dispatches is what is
 # asserted. tidy files this window by its project, which the shop group owns;
 # the record says the user had parked it on misc. Placing before tidy would
