@@ -33,10 +33,30 @@ BarWidget {
   readonly property var heat: ["#d7b377", "#e0a458", "#e8933d", "#f2851c"]
   readonly property var heatOpacity: [0.70, 0.82, 0.92, 1.0]
 
+  // Waybar's convention, which the bar output still follows: "class" is one
+  // name or a list of them. Both have to end up as a list here.
+  //
+  // Not Array.isArray. The list arrives from JSON.parse inside a Process's
+  // stdout handler and reaches QML as a QVariantList, which Array.isArray says
+  // no to -- so every group with more than one class took the String() branch
+  // and became the single class "busy,idle1". That never matches /^idle(\d+)$/,
+  // so every busy group lost its idle heat and drew in the bar's plain
+  // foreground: the groups actually being worked in were the grey ones, and
+  // only a group with exactly one class kept its colour.
+  //
+  // So: a string is split on the separators either form can arrive with, and
+  // anything else is walked by index, which is true of a real Array and of a
+  // QVariantList alike.
   function classes(group) {
     var c = group && group["class"]
     if (!c) return []
-    return Array.isArray(c) ? c : [String(c)]
+    if (typeof c === "string") return c.split(/[\s,]+/).filter(function (s) { return s !== "" })
+    var out = []
+    for (var i = 0; i < c.length; i++) {
+      var one = String(c[i])
+      if (one !== "") out.push(one)
+    }
+    return out
   }
 
   function idleStep(group) {
