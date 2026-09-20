@@ -79,11 +79,71 @@ feed() {
 # wingroup-restore respawns fourteen terminals; the flag is how it says so. The
 # path is spelled out rather than taken from the daemon, so that the two sides
 # agreeing on it is what the test checks.
-@test "a window filed while a restore is running is filed silently" {
+#
+# It used to file them silently, and the two passes raced: restore puts a window
+# back on the workspace its session was recorded on, by address, while the
+# daemon files the same window by its project. Whichever dispatched last won.
+# Seen on a real desktop -- a session recorded on workspace 2 was put back
+# there, then dragged into the group that owns its directory, which left that
+# group holding a window its saved layout knew nothing about and every tile in
+# it wrong.
+#
+# So during a restore the daemon holds off entirely and files nothing.
+@test "a window that opens while a restore is running is not filed yet" {
   : >"$XDG_RUNTIME_DIR/wingroup-restoring"
   wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# Held off, not dropped. The window is looked at again when the restore is over,
+# and by then restore has had its say -- so a window it placed into a group is
+# already in a group and nothing more is done to it.
+@test "a window the restore placed into a group is left alone afterwards" {
+  : >"$XDG_RUNTIME_DIR/wingroup-restoring"
+  wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
+  wg_place_windows 1001:shop
+  rm -f "$XDG_RUNTIME_DIR/wingroup-restoring"
+  wg_daemon_flush_deferred
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+# And the other half of holding off: a window the restore had no workspace for
+# is still filed by its project, just afterwards instead of underneath it.
+@test "a window the restore left outside every group is filed once it ends" {
+  : >"$XDG_RUNTIME_DIR/wingroup-restoring"
+  wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
+  rm -f "$XDG_RUNTIME_DIR/wingroup-restoring"
+  wg_daemon_flush_deferred
   run dispatches
-  [ "$output" = "movetoworkspacesilent name:shop,address:0xaaa1" ]
+  [ "$output" = "movetoworkspace name:shop,address:0xaaa1" ]
+}
+
+@test "nothing is filed while the restore is still running" {
+  : >"$XDG_RUNTIME_DIR/wingroup-restoring"
+  wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
+  wg_daemon_flush_deferred
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
+
+@test "a window held over a restore is filed once, not on every tick" {
+  : >"$XDG_RUNTIME_DIR/wingroup-restoring"
+  wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
+  rm -f "$XDG_RUNTIME_DIR/wingroup-restoring"
+  wg_daemon_flush_deferred
+  wg_daemon_flush_deferred
+  run bash -c "wc -l <'$WG_DISPATCH_LOG'"
+  [ "$output" -eq 1 ]
+}
+
+# A terminal that dies during the restore -- a resume that fails, an oom kill --
+# must not be filed by its ghost afterwards.
+@test "a window that closes during the restore is not filed afterwards" {
+  : >"$XDG_RUNTIME_DIR/wingroup-restoring"
+  wg_daemon_handle_line "openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign"
+  wg_daemon_handle_line "closewindow>>aaa1"
+  rm -f "$XDG_RUNTIME_DIR/wingroup-restoring"
+  wg_daemon_flush_deferred
+  [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
 @test "following resumes once the restore flag is cleared" {
@@ -355,6 +415,51 @@ feed() {
   wait "$daemon" 2>/dev/null || true
   exec 9>&-
   [ "$seen" -eq 1 ]
+}
+
+# The idle tick is the only thing that can notice a restore has finished: the
+# flag is a file, nobody announces its removal, and the window that was held
+# back will not open a second time. So the wiring is tested through the read
+# loop rather than by calling the flush directly, the way the tests above do --
+# a flush that is never called from the loop leaves the window stranded on
+# whatever workspace it opened on, and every test above it would still pass.
+@test "the read loop files what a finished restore left behind" {
+  local sig=deferredsig
+  export HYPRLAND_INSTANCE_SIGNATURE="$sig"
+  mkdir -p "$XDG_RUNTIME_DIR/hypr/$sig"
+  python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' \
+    "$XDG_RUNTIME_DIR/hypr/$sig/.socket2.sock"
+
+  local fifo="$WG_TMP/events"
+  mkfifo "$fifo"
+  printf '#!/usr/bin/env bash\nexec cat %q\n' "$fifo" >"$WG_TMP/socat"
+  chmod +x "$WG_TMP/socat"
+  exec 9<>"$fifo"
+
+  : >"$XDG_RUNTIME_DIR/wingroup-restoring"
+  PATH="$WG_TMP:$PATH" WG_REFRESH_POLL=0.1 \
+    env -u WG_DAEMON_NO_MAIN "$WG_ROOT/bin/wingroup-daemon" \
+    >"$WG_TMP/daemon.out" 2>&1 &
+  local daemon=$!
+
+  printf 'openwindow>>aaa1,1,Alacritty,✳ Everest-web full redesign\n' >&9
+  sleep 0.5
+  local during=0
+  [ -s "$WG_DISPATCH_LOG" ] && during=1
+
+  # The restore ends, and nothing arrives to say so.
+  rm -f "$XDG_RUNTIME_DIR/wingroup-restoring"
+  local i=0
+  while (( i++ < 50 )) && [ ! -s "$WG_DISPATCH_LOG" ]; do sleep 0.1; done
+  local after=0
+  [ -s "$WG_DISPATCH_LOG" ] && after=1
+
+  kill "$daemon" 2>/dev/null || true
+  wait "$daemon" 2>/dev/null || true
+  exec 9>&-
+
+  [ "$during" -eq 0 ]
+  [ "$after" -eq 1 ]
 }
 
 # Killing the daemon has to actually free the lock.
