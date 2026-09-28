@@ -435,6 +435,8 @@ window below a separator, and a total on the last line:
 ▸ beta               1 windows · 1 idle · 0 busy
 + new group…
 − remove a group…
+⇄ move a group to a monitor…
+⇅ move a group along the bar…
 ⟳ tidy — file every window by its project
 ⏻ auto-assign: on
 ──────────────────────────────
@@ -466,8 +468,8 @@ when three rows of the picker all read `alpha`. A worktree name longer than 16
 characters is cut short with `…` — that column ends the row, and a branch name
 has no upper bound. A window that is not in a worktree shows nothing extra.
 
-The four actions sit directly under the groups rather than at the bottom, so
-they stay a few rows in no matter how many windows are open:
+The actions sit directly under the groups rather than at the bottom, so they stay
+a few rows in no matter how many windows are open:
 
 - **`+ new group…`** prompts for a label in a walker text field, then creates
   the group exactly as `wingroup new` would — same slugification, same refusal
@@ -480,6 +482,16 @@ they stay a few rows in no matter how many windows are open:
   which group, then asks again to confirm that one by name — with *Cancel* as
   the entry already under the cursor, because there is no undo. It never closes
   or moves a window.
+- **`⇄ move a group to a monitor…`** is `wingroup monitor` without a terminal. It
+  asks which group, then which monitor — every monitor, with the one the group is
+  on now and the one it is pinned to marked separately, since those are two facts
+  and they disagree more often than not. A group that has a pin is also offered
+  *Unpin*.
+- **`⇅ move a group along the bar…`** is `wingroup reorder` without a terminal. It
+  asks which group, then where it goes: to the front, one to the left, one to the
+  right, or to the back. Only the moves that would actually move it are offered,
+  so the group already at the front is not asked whether it would like to go
+  there. You get a notification saying where along the bar it ended up.
 - **`⟳ tidy`** is `wingroup tidy`.
 - **`⏻ auto-assign: on/off`** is `wingroup toggle-auto`, and the row shows the
   current setting.
@@ -531,6 +543,7 @@ wingroup new <label> [project...]      create a group
 wingroup rename <name> <label>         change a group's displayed label
 wingroup dissolve <name>               remove a group, leaving its windows alone
 wingroup monitor <group> <name|->      pin a group to a monitor, or clear the pin
+wingroup reorder <group> <front|back|left|right>  move a group along the bar
 wingroup toggle-auto                   turn automatic assignment on or off
 wingroup crashed [--restore] [--clear] list sessions systemd-oomd killed
 ```
@@ -649,6 +662,40 @@ and leaves it bound there, so a group first opened on the laptop stays on the
 laptop forever. A pin fixes that: `wingroup activate` focuses the pinned monitor
 first and, if the group's workspace is currently living on a different one,
 drags the workspace across before switching to it.
+
+### `wingroup reorder <group> <front|back|left|right>`
+
+```console
+$ wingroup reorder alpha front    # first on the bar
+$ wingroup reorder alpha back     # last on the bar
+$ wingroup reorder alpha left     # swap with the group before it
+$ wingroup reorder alpha right    # swap with the group after it
+```
+
+Moves one group within `.groups`, which is the order the bar draws its buttons in
+and the order the picker lists its groups in — that array *is* the order, there is
+nothing else to change. Before this, the order was whichever order the groups had
+been created in, and putting a new group next to the first one meant dissolving
+and remaking every group after it, or editing `state.json` by hand.
+
+The whole group row moves: its label, its projects and its pin travel with it. No
+window is touched — a group's workspace keeps its name, so nothing moves on
+screen, only the position of its button.
+
+`left` on the group that is already first, and `right` on the one that is already
+last, are **no-ops rather than failures**. This is the thing you reach by holding
+a keybind down, and an error at the end of the bar would be a complaint about
+having arrived where you were going. A direction that is not one of the four is a
+different matter — a typo — and is refused:
+
+```console
+$ wingroup reorder alpha sideways
+wingroup: no such direction: sideways (front, back, left or right)
+```
+
+A slot is a position in this list, so moving a group moves what the bar's *N*th
+button and `wingroup activate <slot>` mean. That is the feature rather than a side
+effect of it, but it is worth knowing if you have keybinds wired to slot numbers.
 
 ### `wingroup toggle-auto`
 

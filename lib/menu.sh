@@ -136,7 +136,7 @@ wg_menu_build() {
   # windows open they used to land some twenty rows down -- far enough that
   # "+ new group…" read as something the picker did not have.
   #
-  # The three that act on one group sit together, then the two that act on
+  # The four that act on one group sit together, then the two that act on
   # everything at once. "− remove a group…" only opens a chooser and then a
   # confirmation, so landing on it by mistake costs a keystroke, not a group.
   local auto
@@ -144,6 +144,7 @@ wg_menu_build() {
   printf 'new\t%s\n' "+ new group…"
   printf 'delete\t%s\n' "− remove a group…"
   printf 'monitor\t%s\n' "⇄ move a group to a monitor…"
+  printf 'reorder\t%s\n' "⇅ move a group along the bar…"
   printf 'tidy\t%s\n' "⟳ tidy — file every window by its project"
   printf 'toggle-auto\t%s\n' "⏻ auto-assign: $auto"
 
@@ -234,6 +235,34 @@ wg_monitor_menu_build() {
   done < <(wg_hypr_query monitors | jq -r '.[].name')
 
   [[ -z $pinned ]] || printf 'mon:-\t%s\n' "Unpin — leave it wherever it is"
+}
+
+# Where a group can go along the bar, once one has been picked to move.
+#
+# Only the moves that would actually move it. A group already at the front has
+# no front to go to and no neighbour to its left, and an entry that could not
+# change anything is an entry to read and dismiss every time -- the same
+# reasoning that keeps the monitor chooser's unpin entry away from an unpinned
+# group. With two groups or more every group has at least one move left, so the
+# chooser is never empty; cmd_reorder_interactive handles the case where it would
+# be, because a picker showing nothing reads as a broken entry.
+#
+# Left and right rather than up and down: the buttons are a row on the bar, which
+# is where the user is looking while picking one of these.
+wg_reorder_menu_build() {
+  local name="$1" state="${2:-$(wg_state_read)}" index total
+  index="$(jq -r --arg n "$name" '.groups | map(.name) | index($n) // empty' <<<"$state")"
+  [[ -n $index ]] || return 0
+  total="$(jq -r '.groups | length' <<<"$state")"
+
+  if (( index > 0 )); then
+    printf 'move:front\t%s\n' "⤒ To the front of the bar"
+    printf 'move:left\t%s\n' "← One to the left"
+  fi
+  if (( index < total - 1 )); then
+    printf 'move:right\t%s\n' "→ One to the right"
+    printf 'move:back\t%s\n' "⤓ To the back of the bar"
+  fi
 }
 
 # The confirmation in front of removing a group.

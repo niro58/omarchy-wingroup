@@ -12,6 +12,11 @@ teardown() { wg_teardown_tmp; }
 
 wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
 
+# The order the bar draws its buttons in, which is .groups order and nothing
+# else. Read straight off the file rather than through `run`, so an assertion
+# can compare two orders on one line.
+group_order() { jq -r '[.groups[].name] | join(",")' "$WG_STATE_DIR/state.json"; }
+
 @test "activate by name switches to the group workspace" {
   wingroup activate shop
   [ "$(dispatches)" = "workspace name:shop" ]
@@ -154,11 +159,11 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
   [ "$(dispatches)" = "workspace name:site" ]
 }
 
-# Three groups, then new/delete/monitor/tidy/toggle-auto, then the separator:
-# the first window is index 9 now that the actions no longer sit at the bottom
-# of the list.
+# Three groups, then new/delete/monitor/reorder/tidy/toggle-auto, then the
+# separator: the first window is index 10 now that the actions no longer sit at
+# the bottom of the list.
 @test "menu focuses the window the picker returned" {
-  export WG_WALKER_PICK=9
+  export WG_WALKER_PICK=10
   wingroup menu
   [[ "$(dispatches)" == focuswindow* ]]
 }
@@ -414,6 +419,71 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
   [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
+# --- moving a group along the bar from the picker ---
+
+# The same two steps moving a group to a monitor takes, and for the same reason:
+# the action on its own does not say which group it acts on. Pick the group, then
+# pick where it goes. site is index 1 in the group chooser, and being in the
+# middle it is offered all four moves -- so index 0 of the second chooser is
+# "to the front".
+@test "the picker moves the group along the bar to where it was told" {
+  export WG_WALKER_PICKS="6 1 0"
+  wingroup menu
+  [ "$(group_order)" = "site,shop,fleet" ]
+}
+
+# Where it ended up, because a picker opened from a keybind has no terminal for
+# the answer to land in and the bar redrawing is the only other clue.
+@test "the picker says where along the bar the group ended up" {
+  export WG_WALKER_PICKS="6 1 0"
+  wingroup menu
+  [[ "$(notifications)" == *"site is now 1 of 3 on the bar"* ]]
+}
+
+# shop is already first, so the two moves that would take it further forward are
+# not offered at all and index 0 is "one to the right" -- the first move it can
+# actually make.
+@test "the picker's reorder chooser offers the first group only the moves it has" {
+  export WG_WALKER_PICKS="6 0 0"
+  wingroup menu
+  [ "$(group_order)" = "site,shop,fleet" ]
+}
+
+@test "backing out of the reorder chooser changes no order" {
+  export WG_WALKER_PICKS="6 1"
+  wingroup menu
+  [ "$(group_order)" = "shop,site,fleet" ]
+  [ ! -s "$WG_NOTIFY_LOG" ]
+}
+
+@test "backing out of the group chooser changes no order either" {
+  export WG_WALKER_PICKS="6"
+  wingroup menu
+  [ "$(group_order)" = "shop,site,fleet" ]
+  [ ! -s "$WG_NOTIFY_LOG" ]
+}
+
+# Same empty-chooser trap the remove and move entries have: an empty walker reads
+# as a broken entry rather than as "there is nothing here to do". With no groups
+# the reorder entry is index 3.
+@test "the reorder entry says so when there are no groups at all" {
+  wg_patch_state '.groups = []'
+  export WG_WALKER_PICKS="3"
+  wingroup menu
+  [[ "$(notifications)" == *"no groups to reorder"* ]]
+}
+
+# One group is an order of one: every move that could be offered would do
+# nothing, so the chooser would be empty. Say so instead. With one group the
+# reorder entry is index 4.
+@test "the reorder entry says so when there is only one group" {
+  wg_patch_state '.groups |= [.[0]]'
+  export WG_WALKER_PICKS="4"
+  wingroup menu
+  [[ "$(notifications)" == *"only one group"* ]]
+  [ "$(group_order)" = "shop" ]
+}
+
 # --- the send picker's "+ new group…" ---
 
 # SUPER+CTRL+G's group chooser has always carried this entry, and it only ever
@@ -570,6 +640,90 @@ wingroup() { "$WG_ROOT/bin/wingroup" "$@"; }
   wg_patch_state '.groups[1].monitor = "DP-1"'
   wingroup activate shop
   [ "$(dispatches)" = "workspace name:shop" ]
+}
+
+# --- the order the groups are drawn in ---
+#
+# The bar draws one button per group in .groups order, and that order was
+# whatever order the groups happened to be created in. Putting an eighth group
+# next to the first one meant dissolving and remaking every group after it, or
+# editing state.json by hand.
+
+@test "reorder front puts the group first" {
+  wingroup reorder fleet front
+  [ "$(group_order)" = "fleet,shop,site" ]
+}
+
+@test "reorder back puts the group last" {
+  wingroup reorder shop back
+  [ "$(group_order)" = "site,fleet,shop" ]
+}
+
+@test "reorder left swaps the group with the one before it" {
+  wingroup reorder fleet left
+  [ "$(group_order)" = "shop,fleet,site" ]
+}
+
+@test "reorder right swaps the group with the one after it" {
+  wingroup reorder shop right
+  [ "$(group_order)" = "site,shop,fleet" ]
+}
+
+# There is nowhere further to go, and the answer to that is an order that has not
+# changed -- not a failure. This is reached by holding a keybind down, where an
+# error at the end of the bar would be noise about nothing.
+@test "reorder left on the first group changes nothing" {
+  wingroup reorder shop left
+  [ "$(group_order)" = "shop,site,fleet" ]
+}
+
+@test "reorder right on the last group changes nothing" {
+  wingroup reorder fleet right
+  [ "$(group_order)" = "shop,site,fleet" ]
+}
+
+@test "reorder front on the group that is already first changes nothing" {
+  wingroup reorder shop front
+  [ "$(group_order)" = "shop,site,fleet" ]
+}
+
+# The row moves, not the name: a group carries its label, its projects and its
+# pin to the new position. Rebuilding the row from its name would quietly drop
+# every one of them.
+@test "reorder carries the whole group row with it, not just the name" {
+  wg_patch_state '.groups[2].monitor = "DP-1"'
+  wingroup reorder fleet front
+  run bash -c "jq -r '.groups[0] | [.name, .label, (.projects | join(\"+\")), .monitor] | join(\" \")' '$WG_STATE_DIR/state.json'"
+  [ "$output" = "fleet fleet fleet-hub DP-1" ]
+}
+
+@test "reorder refuses an unknown group and leaves the order alone" {
+  run wingroup reorder nosuch front
+  [ "$status" -ne 0 ]
+  [ "$(group_order)" = "shop,site,fleet" ]
+}
+
+# front, back, left, right and nothing else. A typo that fell through to one of
+# them would move a group somewhere the user never asked for.
+@test "reorder refuses a direction that is not one of the four" {
+  run wingroup reorder shop sideways
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"sideways"* ]]
+  [ "$(group_order)" = "shop,site,fleet" ]
+}
+
+@test "reorder redraws the bar" {
+  wingroup reorder fleet front
+  [ "$(cat "$WG_REFRESH_LOG")" = "refresh" ]
+}
+
+# A slot is a position in this list -- it is what a click on the bar's Nth button
+# runs -- so moving a group moves what the slots mean. That is the feature, not a
+# side effect of it.
+@test "reorder changes which group a slot activates" {
+  wingroup reorder fleet front
+  wingroup activate 0
+  [ "$(dispatches)" = "workspace name:fleet" ]
 }
 
 @test "an unknown subcommand exits non-zero with usage" {
