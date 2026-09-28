@@ -95,6 +95,26 @@ feed() {
   [ ! -s "$WG_DISPATCH_LOG" ]
 }
 
+# The bug that hid two failures in this file for a week, and would hide the next
+# one just as well.
+#
+# `declare` inside a function declares a *local*, and sourcing a file inside a
+# function counts -- which is exactly how setup() above loads the daemon. The
+# maps then ceased to exist when setup returned, and what the tests wrote went
+# into an ordinary indexed array instead, whose subscript is arithmetic. A
+# window address is valid arithmetic, so WG_SEEN[0xaaa1]=1 quietly became
+# element 43681 of something else and bash never said a word. The deferred flush
+# then looked for a window called 43681, found none, and filed nothing.
+#
+# Asserted on the type rather than on any behaviour, because the behaviour it
+# breaks is spread over every test here.
+@test "the daemon's maps are still maps when it is sourced from a function" {
+  run bash -c "f() { source '$WG_ROOT/bin/wingroup-daemon'; }; f; declare -p WG_SEEN WG_DEFERRED"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"declare -A WG_SEEN"* ]]
+  [[ "$output" == *"declare -A WG_DEFERRED"* ]]
+}
+
 # Held off, not dropped. The window is looked at again when the restore is over,
 # and by then restore has had its say -- so a window it placed into a group is
 # already in a group and nothing more is done to it.
