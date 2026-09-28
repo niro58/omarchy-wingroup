@@ -408,6 +408,163 @@ wg_place_order() {
   return 0
 }
 
+# --- rebuilding the arrangement ------------------------------------------------
+#
+# Where the pass above reaches its limit. Swapping tiles puts the right sessions
+# into the tiles that exist, and when the tree Hyprland built is not the tree the
+# record describes, no swap can help: the tiles themselves are wrong. The size
+# pass then spends its attempts pushing against a shape that cannot hold the
+# sizes it is asking for, which is how one real restore ended with two windows
+# six and ten pixels wide.
+#
+# The tree is rebuilt instead. lib/tree.sh reads the recorded rectangles back as
+# the sequence of splits that produced them; this plays that sequence, by parking
+# the group's windows on a holding workspace and moving them back one at a time
+# -- each against the window whose tile it has to share, with the direction
+# preselected. Verified against Hyprland 0.56.2: a window moved in from another
+# workspace obeys preselect exactly as a newly opened one does, so the restore
+# can go on launching everything in one burst and fix the arrangement afterwards.
+#
+# Where windows are parked while their workspace is emptied. An ordinary
+# workspace, deliberately: a special one is hidden, and if anything goes wrong
+# half way through -- the compositor restarted, a dispatch refused -- the windows
+# have to be somewhere the user can still reach by name.
+: "${WG_PLACE_HOLD:=wingroup-rebuild}"
+
+# The rows for one workspace, as "addr x y w h" -- the plan's keys are addresses,
+# so the plan comes back naming windows the dispatcher can act on directly.
+wg_place_rebuild_rows() {
+  local rows="$1" out="" line addr x y w h
+  while IFS=$'\t' read -r x y w h addr; do
+    [[ -n $addr ]] || continue
+    out+="$addr $x $y $w $h"$'\n'
+  done <<<"$rows"
+  printf '%s' "$out"
+}
+
+# Rebuilds one workspace. $1 dry run, $2 the workspace, $3 the recorded rows for
+# it as "addr x y w h", $4 the live rows in the same shape. Prints what it does.
+wg_place_rebuild_one() {
+  local dry="$1" ws="$2" recorded="$3" present="$4" plan line seed dir insert addr n
+  n="$(grep -c . <<<"$recorded")"
+  (( n >= 2 )) || return 0
+
+  # The tree the record describes. A record that no sequence of splits could
+  # have produced is a damaged record, and rearranging a group by guesswork is
+  # worse than leaving it as the user finds it.
+  plan="$(wg_tree_plan <<<"$recorded")" || {
+    printf 'skip   %s  (its recorded arrangement cannot be rebuilt)\n' "$ws"
+    return 0
+  }
+
+  # Nothing to do when the desktop already has that tree. Compared as plans
+  # rather than as coordinates on purpose: the sizes pass has not run yet, so
+  # the tiles are the right shape but rarely yet the right size, and comparing
+  # pixels here would rebuild every group on every restore for no reason.
+  if [[ "$plan" == "$(wg_tree_plan <<<"$present" 2>/dev/null)" ]]; then
+    return 0
+  fi
+
+  printf 'rebuild %s  (%s windows)\n' "$ws" "$n"
+  (( ! dry )) || return 0
+
+  # Park everything first. The workspace has to be empty before the first window
+  # goes back, or that window lands beside whatever is still there and every
+  # split after it is taken out of the wrong tile.
+  while read -r addr _; do
+    [[ -n $addr ]] || continue
+    wg_hypr_dispatch movetoworkspacesilent "$(wg_ws_selector "$WG_PLACE_HOLD"),address:$addr"
+  done <<<"$recorded"
+
+  while IFS= read -r line; do
+    case $line in
+      root\ *)
+        wg_hypr_dispatch movetoworkspacesilent "$(wg_ws_selector "$ws"),address:${line#root }" ;;
+      split\ *)
+        read -r _ seed dir insert <<<"$line"
+        # Focus, then preselect, then move: preselect applies to the tile that
+        # has focus, so the order is the whole instruction.
+        wg_hypr_dispatch focuswindow "address:$seed"
+        wg_hypr_dispatch layoutmsg "preselect $dir"
+        wg_hypr_dispatch movetoworkspacesilent "$(wg_ws_selector "$ws"),address:$insert" ;;
+    esac
+  done <<<"$plan"
+  return 0
+}
+
+# Rebuilds every group whose arrangement does not match the record. $1 is a dry
+# run flag, $2 the rows.
+#
+# A workspace holding a window the record knows nothing about is left alone: the
+# plan has no place for it, and moving the others around it would tile it
+# somewhere it never was. That is the common case for a desktop that has been
+# used for a while, and the uncommon case at login, which is when this matters.
+wg_place_rebuild() {
+  local dry="$1" rows="$2" row key ws addr pid x y w h active rebuilt=0
+  local -A want_of=() have_of=() unknown_of=() queue_of=()
+  [[ -n $rows ]] || return 0
+  WG_PLACE_KNOWN=()
+  while IFS= read -r row; do
+    wg_place_row_split "$row"
+    [[ -n $WG_PLACE_CWD && -n $WG_PLACE_WORKSPACE ]] || continue
+    [[ $WG_PLACE_WORKSPACE != special:* ]] || continue
+    [[ $WG_PLACE_X =~ ^-?[0-9]+$ && $WG_PLACE_Y =~ ^-?[0-9]+$ ]] || continue
+    [[ $WG_PLACE_W =~ ^[0-9]+$ && $WG_PLACE_H =~ ^[0-9]+$ ]] || continue
+    if [[ -n $WG_PLACE_SESSION ]]; then key="i:$WG_PLACE_SESSION"; else key="d:$WG_PLACE_CWD"; fi
+    WG_PLACE_KNOWN[$key]=1
+    want_of[$WG_PLACE_WORKSPACE]+="$WG_PLACE_X"$'\t'"$WG_PLACE_Y"$'\t'"$WG_PLACE_W"$'\t'"$WG_PLACE_H"$'\t'"$key"$'\n'
+  done <<<"$rows"
+  (( ${#want_of[@]} )) || return 0
+
+  wg_place_children
+  while IFS=$'\t' read -r addr pid ws x y w h; do
+    [[ -n $addr && -n $pid && -n ${want_of[$ws]:-} ]] || continue
+    key="$(wg_place_key_of "$pid")"
+    if [[ -z $key ]]; then
+      unknown_of[$ws]=1
+      continue
+    fi
+    have_of[$ws]+="$x"$'\t'"$y"$'\t'"$w"$'\t'"$h"$'\t'"$key"$'\t'"$addr"$'\n'
+  done < <(wg_hypr_query clients 2>/dev/null \
+           | jq -r '.[] | select(.pid != null and .address != null and (.floating | not))
+                    | [.address, (.pid | tostring), (.workspace.name // ""),
+                       ((.at // [0, 0])[0] | tostring), ((.at // [0, 0])[1] | tostring),
+                       ((.size // [0, 0])[0] | tostring), ((.size // [0, 0])[1] | tostring)]
+                    | @tsv' 2>/dev/null)
+
+  active="$(wg_hypr_query activewindow 2>/dev/null | jq -r '.address // empty' 2>/dev/null || true)"
+
+  for ws in "${!have_of[@]}"; do
+    [[ -z ${unknown_of[$ws]:-} ]] || continue
+    local recorded="" present="" line
+    # One address per recorded row, in reading order, so that a session open in
+    # two terminals takes two tiles and a session that did not come back simply
+    # leaves its rectangle out of the plan. The rest still rebuild around it.
+    queue_of=()
+    while IFS=$'\t' read -r x y w h key addr; do
+      [[ -n $addr ]] || continue
+      queue_of[$key]+="$addr "
+      present+="$addr $x $y $w $h"$'\n'
+    done < <(printf '%s' "${have_of[$ws]}" | sort -t$'\t' -k2,2n -k1,1n)
+    while IFS=$'\t' read -r x y w h key; do
+      [[ -n $key ]] || continue
+      addr="${queue_of[$key]%% *}"
+      [[ -n $addr ]] || continue
+      queue_of[$key]="${queue_of[$key]#* }"
+      recorded+="$addr $x $y $w $h"$'\n'
+    done < <(printf '%s' "${want_of[$ws]}" | sort -t$'\t' -k2,2n -k1,1n)
+
+    line="$(wg_place_rebuild_one "$dry" "$ws" "$recorded" "$present")"
+    [[ -z $line ]] || { printf '%s\n' "$line"; [[ $line == skip* ]] || rebuilt=1; }
+  done
+
+  # Focus moved with every window put back; hand it to whatever had it before.
+  if (( rebuilt && ! dry )) && [[ -n $active ]]; then
+    wg_hypr_dispatch focuswindow "address:$active"
+  fi
+  return 0
+}
+
 # --- putting the splits back --------------------------------------------------
 
 # How close is close enough, how many attempts per window and per axis, and how

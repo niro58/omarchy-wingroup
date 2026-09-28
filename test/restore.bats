@@ -1194,3 +1194,142 @@ wg_restore_as_at_login() {
   run bash -c "grep -c 'special' '$WG_DISPATCH_LOG' || true"
   [ "$output" -eq 0 ]
 }
+
+# --- rebuilding the arrangement itself ----------------------------------------
+#
+# Swapping tiles can only put the right sessions into the tiles that exist. When
+# the tree Hyprland built differs from the one the record describes -- which it
+# usually does, because the tree follows the order the windows arrived in --
+# there is no set of swaps that produces the recorded arrangement, and the size
+# pass then pushes against a shape that cannot hold it. One real restore ended
+# with two windows six and ten pixels wide that way.
+#
+# So the arrangement is rebuilt: the group's windows are parked on a holding
+# workspace and moved back one at a time, each against the window whose tile it
+# has to share, with the split direction preselected. Verified against Hyprland
+# 0.56.2 -- a window moved in from elsewhere obeys preselect exactly as a newly
+# opened one does, which is what lets the restore keep launching in one burst.
+
+@test "a group whose tree differs from the record is rebuilt" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform" c="$WG_TMP/projects/fleet-hub"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b" "ccc-3:$c"
+  # Recorded: A down the left, B and C stacked on the right.
+  wg_snapshot_from_last_boot \
+    "aaa-1:$a:misc:0:0:eDP-1:800:900:1600:900" \
+    "bbb-2:$b:misc:800:0:eDP-1:800:450:1600:900" \
+    "ccc-3:$c:misc:800:450:eDP-1:800:450:1600:900"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_fake_terminal 2005 2006 "$c" "ccc-3"
+  # What Hyprland built instead: A and B stacked on the left, C down the right.
+  wg_write_clients "0xaaa1:2001:misc:0:0:800:450" \
+                   "0xbbb1:2003:misc:0:450:800:450" \
+                   "0xccc1:2005:misc:800:0:800:900"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run dispatches
+  [[ "$output" == *"movetoworkspacesilent name:wingroup-rebuild,address:0xaaa1"* ]]
+  [[ "$output" == *"movetoworkspacesilent name:wingroup-rebuild,address:0xbbb1"* ]]
+  [[ "$output" == *"movetoworkspacesilent name:wingroup-rebuild,address:0xccc1"* ]]
+  # A goes back on its own, B to its right, C below B.
+  run bash -c "grep -A 6 'name:misc,address:0xaaa1' '$WG_DISPATCH_LOG' | tr '\n' '|'"
+  [ "$output" = "movetoworkspacesilent name:misc,address:0xaaa1|focuswindow address:0xaaa1|layoutmsg preselect r|movetoworkspacesilent name:misc,address:0xbbb1|focuswindow address:0xbbb1|layoutmsg preselect d|movetoworkspacesilent name:misc,address:0xccc1|" ]
+}
+
+@test "a group already arranged as the record has it is left alone" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  wg_snapshot_from_last_boot \
+    "aaa-1:$a:misc:0:0:eDP-1:800:900:1600:900" \
+    "bbb-2:$b:misc:800:0:eDP-1:800:900:1600:900"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_write_clients "0xaaa1:2001:misc:0:0:800:900" "0xbbb1:2003:misc:800:0:800:900"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run bash -c "grep -c 'wingroup-rebuild' '$WG_DISPATCH_LOG' || true"
+  [ "$output" -eq 0 ]
+}
+
+# A window the record knows nothing about -- one the user opened by hand -- has
+# no place in the plan, and rebuilding around it would tile it somewhere it
+# never was. Rebuilding is for a workspace the record fully describes.
+@test "a group holding a window the record does not know is not rebuilt" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  wg_snapshot_from_last_boot \
+    "aaa-1:$a:misc:0:0:eDP-1:800:900:1600:900" \
+    "bbb-2:$b:misc:800:0:eDP-1:800:450:1600:900"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_write_clients "0xaaa1:2001:misc:0:450:800:450" \
+                   "0xbbb1:2003:misc:0:0:800:450" \
+                   "0xddd1:9999:misc:800:0:800:900"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run bash -c "grep -c 'wingroup-rebuild' '$WG_DISPATCH_LOG' || true"
+  [ "$output" -eq 0 ]
+}
+
+# The pinwheel: rectangles no sequence of splits can produce. The record is
+# damaged or stale, and the group is left as it is rather than rearranged into
+# something nobody asked for.
+@test "an arrangement no tree can build leaves the group alone" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  local c="$WG_TMP/projects/fleet-hub" d="$WG_TMP/projects/ops-tools"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b" "ccc-3:$c" "ddd-4:$d"
+  wg_snapshot_from_last_boot \
+    "aaa-1:$a:misc:0:0:eDP-1:200:100:300:200" \
+    "bbb-2:$b:misc:200:0:eDP-1:100:200:300:200" \
+    "ccc-3:$c:misc:100:100:eDP-1:200:100:300:200" \
+    "ddd-4:$d:misc:0:100:eDP-1:100:100:300:200"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_fake_terminal 2005 2006 "$c" "ccc-3"
+  wg_fake_terminal 2007 2008 "$d" "ddd-4"
+  wg_write_clients "0xaaa1:2001:misc:0:0:150:200" "0xbbb1:2003:misc:150:0:150:200" \
+                   "0xccc1:2005:misc:0:0:150:100" "0xddd1:2007:misc:150:100:150:100"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  run bash -c "grep -c 'wingroup-rebuild' '$WG_DISPATCH_LOG' || true"
+  [ "$output" -eq 0 ]
+}
+
+@test "the window that had focus has it again once the rebuild is done" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  wg_snapshot_from_last_boot \
+    "aaa-1:$a:misc:0:0:eDP-1:800:900:1600:900" \
+    "bbb-2:$b:misc:800:0:eDP-1:800:900:1600:900"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  # Stacked rather than side by side, so a rebuild is needed.
+  wg_write_clients "0xaaa1:2001:misc:0:0:800:450" "0xbbb1:2003:misc:0:450:800:450"
+
+  run "$WG_ROOT/bin/wingroup-restore"
+  [ "$status" -eq 0 ]
+  # The line straight after the last window is put back, rather than the last
+  # line of the run: the size pass goes on dispatching after this one is done.
+  run bash -c "awk '/movetoworkspacesilent name:misc/ {n = NR} {l[NR] = \$0} END {print l[n + 1]}' '$WG_DISPATCH_LOG'"
+  [ "$output" = "focuswindow address:0xaaa1" ]
+}
+
+@test "a dry run says which group it would rebuild and moves nothing" {
+  local a="$WG_TMP/projects/shop-web" b="$WG_TMP/projects/site-platform"
+  wg_make_dirs "aaa-1:$a" "bbb-2:$b"
+  wg_snapshot_from_last_boot \
+    "aaa-1:$a:misc:0:0:eDP-1:800:900:1600:900" \
+    "bbb-2:$b:misc:800:0:eDP-1:800:900:1600:900"
+  wg_fake_terminal 2001 2002 "$a" "aaa-1"
+  wg_fake_terminal 2003 2004 "$b" "bbb-2"
+  wg_write_clients "0xaaa1:2001:misc:0:0:800:450" "0xbbb1:2003:misc:0:450:800:450"
+
+  run "$WG_ROOT/bin/wingroup-restore" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *rebuild*misc* ]]
+  [ ! -s "$WG_DISPATCH_LOG" ]
+}
