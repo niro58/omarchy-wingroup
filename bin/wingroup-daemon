@@ -54,7 +54,14 @@ fi
 # processes with no handle on each other.
 : "${WG_RESTORE_FLAG:=${XDG_RUNTIME_DIR:-/tmp}/wingroup-restoring}"
 
-declare -A WG_SEEN=()
+# -g, and it is not decoration. `declare` inside a function makes a *local*
+# variable, and sourcing a file inside a function counts: every test here loads
+# the daemon from bats' setup(), so without -g this map ceased to exist the
+# moment setup returned. What the test body then wrote to went to an ordinary
+# indexed array, whose subscript is evaluated as arithmetic -- and a window
+# address is valid arithmetic, so "WG_SEEN[0xaaa1]=1" quietly became element
+# 43681 of a different array and no error was ever printed.
+declare -gA WG_SEEN=()
 WG_LAST_REFRESH_MS=0
 
 wg_now_ms() {
@@ -155,7 +162,8 @@ wg_daemon_should_follow() {
 
 # Windows that opened while a restore was running, waiting to be looked at once
 # it is over. Keyed by address, because that is what a close has to remove.
-declare -A WG_DEFERRED=()
+# -g for the reason WG_SEEN carries above it.
+declare -gA WG_DEFERRED=()
 
 wg_daemon_open_window() {
   local address="$1" state
