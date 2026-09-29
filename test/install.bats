@@ -1508,6 +1508,101 @@ wg_recorder() {
   [ -f "$WG_OMARCHY_PLUGINS_DIR/wingroup.groups/notes" ]
 }
 
+# --- the Claude accounts widget ------------------------------------------------
+#
+# Installed only with claude-swap present, and in place of Omarchy's agents
+# widget -- which is put back on uninstall only if install is what took it off.
+
+# A claude-swap, present, and a shell that reports Omarchy's agents widget as
+# $1 ("true" or "false").
+wg_with_cswap() {
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$WG_TMP/cswap-stub"
+  chmod +x "$WG_TMP/cswap-stub"
+  export WG_CSWAP_CMD="$WG_TMP/cswap-stub"
+  printf '#!/usr/bin/env bash\nif [ "$*" = "shell listPlugins" ]; then printf %%s %s; fi\nexit 0\n' \
+    "'[{\"id\":\"omarchy.agents\",\"enabled\":${1:-true}}]'" >"$WG_TMP/shell-stub"
+  chmod +x "$WG_TMP/shell-stub"
+  export WG_SHELL_CMD="$WG_TMP/shell-stub"
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+}
+
+@test "with claude-swap, the accounts widget is linked and enabled" {
+  wg_with_cswap true
+  wg_recorder enable-stub "$WG_TMP/enabled"
+  export WG_PLUGIN_ENABLE="$WG_TMP/enable-stub"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$WG_OMARCHY_PLUGINS_DIR/wingroup.accounts")" = "$WG_ROOT/shell/wingroup.accounts" ]
+  grep -qx 'wingroup.accounts' "$WG_TMP/enabled"
+}
+
+@test "with claude-swap, Omarchy's agents widget is switched off" {
+  wg_with_cswap true
+  wg_recorder disable-stub "$WG_TMP/disabled"
+  export WG_PLUGIN_DISABLE="$WG_TMP/disable-stub"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  grep -qx 'omarchy.agents' "$WG_TMP/disabled"
+  [[ "$output" == *"in place of Omarchy's agents widget"* ]]
+}
+
+@test "with claude-swap, its switcher starts at login" {
+  wg_with_cswap true
+  "$WG_ROOT/install.sh" >/dev/null
+  grep -qF 'o.launch_on_start("cswap auto")' "$WG_HYPR_AUTOSTART_LUA"
+}
+
+# Without claude-swap this widget could only say claude-swap is missing, and
+# Omarchy's working widget must not be traded for that.
+@test "without claude-swap, nothing about accounts changes" {
+  printf -- '-- Extra autostart processes.\n' >"$WG_HYPR_AUTOSTART_LUA"
+  wg_recorder disable-stub "$WG_TMP/disabled"
+  export WG_PLUGIN_DISABLE="$WG_TMP/disable-stub"
+
+  run "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$WG_OMARCHY_PLUGINS_DIR/wingroup.accounts" ]
+  [ ! -s "$WG_TMP/disabled" ]
+  run grep -c 'cswap auto' "$WG_HYPR_AUTOSTART_LUA"
+  [ "$output" -eq 0 ]
+}
+
+@test "uninstall turns Omarchy's agents widget back on when install turned it off" {
+  wg_with_cswap true
+  "$WG_ROOT/install.sh" >/dev/null
+  wg_recorder enable-stub "$WG_TMP/re-enabled"
+  export WG_PLUGIN_ENABLE="$WG_TMP/enable-stub"
+
+  run "$WG_ROOT/uninstall.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$WG_OMARCHY_PLUGINS_DIR/wingroup.accounts" ]
+  grep -qx 'omarchy.agents' "$WG_TMP/re-enabled"
+}
+
+# Somebody who had switched it off before installing wingroup did not ask to
+# have it back after removing wingroup.
+@test "uninstall leaves Omarchy's agents widget off when it was off before install" {
+  wg_with_cswap false
+  "$WG_ROOT/install.sh" >/dev/null
+  wg_recorder enable-stub "$WG_TMP/re-enabled"
+  export WG_PLUGIN_ENABLE="$WG_TMP/enable-stub"
+
+  run "$WG_ROOT/uninstall.sh"
+  [ "$status" -eq 0 ]
+  # The recorder writes only when it is called, so no file at all is the
+  # cleanest answer -- and a file without the id would do as well.
+  [ ! -e "$WG_TMP/re-enabled" ] || ! grep -q 'omarchy.agents' "$WG_TMP/re-enabled"
+}
+
+@test "the accounts widget's manifest is one Omarchy's schema accepts" {
+  run jq -e '.id == "wingroup.accounts" and (.kinds | index("bar-widget")) and .entryPoints.barWidget == "Panel.qml"' \
+    "$WG_ROOT/shell/wingroup.accounts/manifest.json"
+  [ "$status" -eq 0 ]
+  [ -f "$WG_ROOT/shell/wingroup.accounts/Panel.qml" ]
+}
+
 @test "the widget's manifest is one Omarchy's schema accepts" {
   run jq -e '.id == "wingroup.groups" and (.kinds | index("bar-widget")) and .entryPoints.barWidget == "Widget.qml"' \
     "$WG_ROOT/shell/wingroup.groups/manifest.json"

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "wingroup.accounts",
+  "name": "Claude accounts",
+  "version": "1.0.0",
+  "author": "wingroup",
+  "description": "Every Claude account claude-swap knows: the 5-hour and weekly windows, when they reset, and which one is live. Click one to switch to it.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "Claude accounts",
+    "description": "Per-account Claude limits from claude-swap, and switching between them",
+    "category": "AI",
+    "aliases": ["claude", "accounts", "cswap"],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

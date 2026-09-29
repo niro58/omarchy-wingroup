@@ -415,6 +415,83 @@ session still comes back where it was even though its conversation does not come
 back at all.
 
 
+## Several Claude accounts
+
+With more than one Claude subscription, the bar shows every account and switches
+between them. This part is built on [claude-swap](https://github.com/realiti4/claude-swap)
+and is installed only when `cswap` is on your `PATH`:
+
+```sh
+uv tool install claude-swap      # or: pipx install claude-swap
+cswap add                        # registers the account you are logged in as
+```
+
+Then `./install.sh` again. It adds a **Claude accounts** widget to the bar in
+place of Omarchy's own agents widget, and starts `cswap auto` at login.
+
+```
+󱚣 58%          ← the live account's tighter window
+
+CLAUDE ACCOUNTS
+┌ you@personal                                  ● live ┐
+│ 5-hour · resets in 3h 28m                        58% │
+│ Weekly · resets in 6d 10h                        58% │
+└──────────────────────────────────────────────────────┘
+  you@work
+  5-hour · resets in 4h 48m                         2%
+  Weekly · resets in 22h 58m                       94%
+```
+
+Click an account — or move to it with the arrow keys and press Enter — to make it
+the live one. `r` refreshes.
+
+### Adding more accounts without touching running sessions
+
+A plain `claude auth login` replaces the live login, and on Linux every running
+session picks up whatever is live on its next message. To add an account without
+that, log it into a throwaway directory and register it from there:
+
+```sh
+CLAUDE_CONFIG_DIR=~/.claude-login-2 claude auth login
+CLAUDE_CONFIG_DIR=~/.claude-login-2 cswap add
+rm -rf ~/.claude-login-2             # claude-swap keeps its own copy
+```
+
+### Why claude-swap, and not one directory per account
+
+The other common approach gives each account its own `CLAUDE_CONFIG_DIR`. It was
+tried here and dropped:
+
+- each account then has its **own transcripts**, so `claude --resume` cannot cross
+  accounts and a restore has to know which account owns each session;
+- settings, skills, MCP servers and memory are **duplicated** per directory;
+- setting `CLAUDE_CONFIG_DIR` at all — even to `~/.claude` itself — moves where
+  Claude reads its global `.claude.json` from, so your account's details and
+  settings seem to vanish;
+- a running session can never move to another account.
+
+claude-swap swaps the login inside the one `~/.claude` instead, taking Claude
+Code's own credential locks so a swap never races a token refresh. History,
+settings and restore all keep working across accounts, and a session that runs
+out can carry on under the next account.
+
+### Automatic switching
+
+`cswap auto` moves the live login to the account with the most room when the
+active one's 5-hour **or** weekly window reaches 90%. Change the point with:
+
+```sh
+cswap config set autoswitch.threshold 100    # wait until a window is fully spent
+```
+
+An account whose week is nearly spent is not somewhere it will switch *to*, even
+if its five hours are empty — the tighter window decides, which is also what the
+widget marks in red.
+
+The first message after a switch rebuilds that conversation's prompt cache on the
+new account, which costs a little extra usage once.
+
+
 ## Keybinds
 
 | Keybind | Command | What it does |

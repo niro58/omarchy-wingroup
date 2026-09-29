@@ -14,6 +14,12 @@ export WG_HYPR_LUA=0
 # accepts any arguments and does nothing; the tests about these calls point them
 # at recorders themselves.
 export WG_SHELL_CMD=true WG_PLUGIN_ENABLE=true WG_PLUGIN_DISABLE=true
+# claude-swap, as far as the suite is concerned, is not installed -- whatever
+# the machine running it has. install.sh adds the accounts widget and `cswap
+# auto` only when it is, so letting the real one leak in would make the plugin
+# and autostart tests depend on who runs them. The tests about it point this at
+# a stub of their own.
+export WG_CSWAP_CMD=wingroup-test-no-such-cswap
 export WG_PROJECTS_DIR="/home/dev/projects"
 export WG_LIB_DIR="$WG_ROOT/lib"
 # Never the real one. If this machine has Omarchy installed, the picker would

@@ -18,7 +18,10 @@ source "$WG_ROOT/lib/constants.sh"
 : "${WG_HYPR_AUTOSTART_LUA:=$HOME/.config/hypr/autostart.lua}"
 : "${WG_OMARCHY_PLUGINS_DIR:=$HOME/.config/omarchy/plugins}"
 : "${WG_PLUGIN_DISABLE:=omarchy-plugin-disable}"
+: "${WG_PLUGIN_ENABLE:=omarchy-plugin-enable}"
 : "${WG_STATE_DIR:=$HOME/.local/state/omarchy/wingroup}"
+# Left by install.sh when it turned Omarchy's own agents widget off.
+: "${WG_AGENTS_MARKER:=$WG_STATE_DIR/.disabled-omarchy-agents}"
 : "${WG_CLAUDE_SETTINGS:=$HOME/.claude/settings.json}"
 
 # The exact command string install.sh registered. Matching on it is what makes
@@ -192,6 +195,18 @@ WG_WIDGET_LINK="$WG_OMARCHY_PLUGINS_DIR/wingroup.groups"
 if [[ -L $WG_WIDGET_LINK ]]; then
   "$WG_PLUGIN_DISABLE" wingroup.groups >/dev/null 2>&1 || true
   rm -f "$WG_WIDGET_LINK"
+fi
+
+# The accounts widget, the same way -- and Omarchy's agents widget back on, but
+# only if install turned it off. The marker is the whole test: a user who had
+# switched it off before installing wingroup did not ask to have it back.
+WG_ACCOUNTS_LINK="$WG_OMARCHY_PLUGINS_DIR/wingroup.accounts"
+if [[ -L $WG_ACCOUNTS_LINK ]]; then
+  "$WG_PLUGIN_DISABLE" wingroup.accounts >/dev/null 2>&1 || true
+  rm -f "$WG_ACCOUNTS_LINK"
+fi
+if [[ -e $WG_AGENTS_MARKER ]]; then
+  "$WG_PLUGIN_ENABLE" omarchy.agents >/dev/null 2>&1 && rm -f "$WG_AGENTS_MARKER"
 fi
 strip_claude_hook
 
