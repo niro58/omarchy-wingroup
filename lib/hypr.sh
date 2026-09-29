@@ -87,6 +87,12 @@ wg_hypr_lua_form() {
     swapwindow)
       # Swaps the focused window with this one, as the old dispatcher did.
       printf 'hl.dsp.window.swap({ target = "%s" })\n' "$arg" ;;
+    layoutmsg)
+      # A message to the layout itself -- "preselect r" and the like, which is
+      # how the arrangement rebuild says which way the next window entering a
+      # tile should split it. The Lua side takes the message as one string, so
+      # unlike every other dispatcher here nothing is picked apart.
+      printf 'hl.dsp.layout("%s")\n' "$arg" ;;
     resizewindowpixel)
       # "exact <w> <h>,address:0x..."
       rest="${arg#exact }"

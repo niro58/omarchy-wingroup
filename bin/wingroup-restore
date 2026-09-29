@@ -26,6 +26,8 @@ source "$WG_LIB_DIR/state.sh"
 source "$WG_LIB_DIR/hypr.sh"
 # shellcheck source=lib/sessions.sh
 source "$WG_LIB_DIR/sessions.sh"
+# shellcheck source=lib/tree.sh
+source "$WG_LIB_DIR/tree.sh"
 # shellcheck source=lib/place.sh
 source "$WG_LIB_DIR/place.sh"
 
@@ -200,6 +202,7 @@ fi
 if (( WG_DRY )); then
   wg_place_rows "$WG_DRY" "$WG_SNAPSHOT_ROWS"
   wg_place_monitors "$WG_DRY" "$WG_SNAPSHOT_ROWS"
+  wg_place_rebuild "$WG_DRY" "$WG_SNAPSHOT_ROWS"
   wg_place_order "$WG_DRY" "$WG_SNAPSHOT_ROWS"
   wg_place_sizes "$WG_DRY" "$WG_SNAPSHOT_ROWS"
   exit 0
@@ -233,6 +236,14 @@ wg_place_rows "$WG_DRY" "$WG_PLACE_INPUT"
 # workspace: which monitor each workspace is on first, because moving a
 # workspace moves every tile in it, and the order of the tiles inside it last.
 wg_place_monitors "$WG_DRY" "$WG_SNAPSHOT_ROWS"
+
+# The arrangement itself, before anything is swapped or resized: this is the
+# pass that can make the tiles the record describes exist at all. What it cannot
+# do -- a workspace holding a window the record never saw, an arrangement no
+# sequence of splits could have built -- it leaves alone, and the swap pass
+# below still makes the best of the tiles that are there.
+wg_place_rebuild "$WG_DRY" "$WG_SNAPSHOT_ROWS"
+
 wg_place_order "$WG_DRY" "$WG_SNAPSHOT_ROWS"
 
 # And the splits last of all, because every pass before this one moves windows
