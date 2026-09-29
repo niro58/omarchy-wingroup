@@ -26,6 +26,10 @@ setup() {
 
   WG_SCOPE="$(wg_fake_scope 9029a872)"
   WG_SCOPE_TWO="$(wg_fake_scope 5c14ff03)"
+  # Entries are keyed by terminal now: the scope and the tty. 34816 is the tty
+  # wg_fake_proc gives a session unless a test says otherwise.
+  WG_KEY="$(wg_sessions_key "$WG_SCOPE" 34816)"
+  WG_KEY_TWO="$(wg_sessions_key "$WG_SCOPE_TWO" 34816)"
   # Every app on the desktop gets a scope; the browser is the one oomd actually
   # picks most days.
   WG_BROWSER_SCOPE='app-Hyprland-brave\x2dbrowser-2f31c0de.scope'
@@ -193,9 +197,9 @@ bar_refreshed() { (( $(refreshes) >= 1 )); }
 
   run wg_sessions_scan
   [ "$output" -eq 1 ]
-  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].workspace' "$WG_SESSIONS_FILE")" = "ads" ]
-  [ "$(jq -c --arg s "$WG_SCOPE" '.sessions[$s].at' "$WG_SESSIONS_FILE")" = "[3804,1273]" ]
-  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].monitor' "$WG_SESSIONS_FILE")" = "DP-1" ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].workspace' "$WG_SESSIONS_FILE")" = "ads" ]
+  [ "$(jq -c --arg s "$WG_KEY" '.sessions[$s].at' "$WG_SESSIONS_FILE")" = "[3804,1273]" ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].monitor' "$WG_SESSIONS_FILE")" = "DP-1" ]
 }
 
 # A tile's size means nothing without the screen it was measured on: the same
@@ -212,8 +216,8 @@ bar_refreshed() { (( $(refreshes) >= 1 )); }
 
   run wg_sessions_scan
   [ "$output" -eq 1 ]
-  [ "$(jq -c --arg s "$WG_SCOPE" '.sessions[$s].size' "$WG_SESSIONS_FILE")" = "[774,944]" ]
-  [ "$(jq -c --arg s "$WG_SCOPE" '.sessions[$s].mon_size' "$WG_SESSIONS_FILE")" = "[1920,1080]" ]
+  [ "$(jq -c --arg s "$WG_KEY" '.sessions[$s].size' "$WG_SESSIONS_FILE")" = "[774,944]" ]
+  [ "$(jq -c --arg s "$WG_KEY" '.sessions[$s].mon_size' "$WG_SESSIONS_FILE")" = "[1920,1080]" ]
 }
 
 # A compositor that answers with zeroes is a compositor that did not answer.
@@ -226,7 +230,7 @@ bar_refreshed() { (( $(refreshes) >= 1 )); }
   export WG_FIXTURE_CLIENTS="$WG_TMP/clients.json" WG_FIXTURE_WORKSPACES="$WG_TMP/workspaces.json"
 
   run wg_sessions_scan
-  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s] | has("size")' "$WG_SESSIONS_FILE")" = "false" ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s] | has("size")' "$WG_SESSIONS_FILE")" = "false" ]
 }
 
 # And it all reaches the rows the restore reads, in the columns it reads them
@@ -332,8 +336,8 @@ bar_refreshed() { (( $(refreshes) >= 1 )); }
   local sessions
   sessions="$(wg_sessions_read)"
   [ "$(jq '.sessions | length' <<<"$sessions")" -eq 2 ]
-  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].cwd' <<<"$sessions")" = "$WG_TMP/projects/shop-web" ]
-  [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions[$s].source' <<<"$sessions")" = "scan" ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].cwd' <<<"$sessions")" = "$WG_TMP/projects/shop-web" ]
+  [ "$(jq -r --arg s "$WG_KEY_TWO" '.sessions[$s].source' <<<"$sessions")" = "scan" ]
 }
 
 # Redrawing the bar is a signal to the user that something happened. A kill
@@ -470,8 +474,8 @@ bar_refreshed() { (( $(refreshes) >= 1 )); }
   [ "$(jq '.sessions | length' <<<"$(wg_sessions_read)")" -eq 0 ]
 
   wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
-  wait_until scope_known "$WG_SCOPE"
-  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].cwd' <<<"$(wg_sessions_read)")" = "$WG_TMP/projects/shop-web" ]
+  wait_until scope_known "$WG_KEY"
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].cwd' <<<"$(wg_sessions_read)")" = "$WG_TMP/projects/shop-web" ]
 
   # Built by the same helper the --once tests use, so the bytes on the fifo are
   # the bytes those tests hand to the parser, then pushed down the live stream.
@@ -533,15 +537,15 @@ wg_snapshot_from_boot() {
   wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
   # And one the hook told us about, because the id is the half of the record a
   # restore actually resumes from.
-  wg_sessions_record "$WG_SCOPE_TWO" "abc-123" "$WG_TMP/projects/site-platform" hook
+  wg_sessions_record "$WG_KEY_TWO" "abc-123" "$WG_TMP/projects/site-platform" hook
 
   run "$WG_ROOT/bin/wingroup-oomwatch" --once
   [ "$status" -eq 0 ]
   [ -f "$WG_SNAPSHOT_FILE" ]
   [ "$(jq -r '.boot' "$WG_SNAPSHOT_FILE")" = "$WG_BOOT_NOW" ]
   [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 2 ]
-  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].cwd' "$WG_SNAPSHOT_FILE")" = "$WG_TMP/projects/shop-web" ]
-  [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions[$s].session' "$WG_SNAPSHOT_FILE")" = "abc-123" ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].cwd' "$WG_SNAPSHOT_FILE")" = "$WG_TMP/projects/shop-web" ]
+  [ "$(jq -r --arg s "$WG_KEY_TWO" '.sessions[$s].session' "$WG_SNAPSHOT_FILE")" = "abc-123" ]
 }
 
 # The ordering guard between the watcher and the restore, and the one thing in
@@ -766,7 +770,7 @@ notified_twice() { (( $(notifies) >= 2 )); }
 
   wait_until follower_up
   wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
-  wait_until scope_known "$WG_SCOPE"
+  wait_until scope_known "$WG_KEY"
 
   journal_kill "$WG_SCOPE"
   cat "$WG_TMP/journal.txt" >&8
@@ -777,7 +781,7 @@ notified_twice() { (( $(notifies) >= 2 )); }
   # Still there and still reading, which is the half of this that --once cannot
   # test: a second session dies later in the same login.
   wg_fake_proc 1002 claude "$WG_SCOPE_TWO" "$WG_TMP/projects/site-platform"
-  wait_until scope_known "$WG_SCOPE_TWO"
+  wait_until scope_known "$WG_KEY_TWO"
   : >"$WG_TMP/journal.txt"
   journal_kill "$WG_SCOPE_TWO"
   cat "$WG_TMP/journal.txt" >&8
@@ -834,18 +838,18 @@ notified_twice() { (( $(notifies) >= 2 )); }
 @test "the snapshot leaves out sessions the last scan did not see" {
   wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
   # A scope whose process died hours ago: still in the map, not open any more.
-  wg_sessions_record "$WG_SCOPE_TWO" "long-gone" "$WG_TMP/projects/site-platform" hook
+  wg_sessions_record "$WG_KEY_TWO" "long-gone" "$WG_TMP/projects/site-platform" hook
   local stale=$(( $(date +%s) - 4000 ))
-  jq --arg s "$WG_SCOPE_TWO" --arg t "$stale" \
+  jq --arg s "$WG_KEY_TWO" --arg t "$stale" \
      '.sessions[$s].seen = ($t | tonumber)' "$WG_SESSIONS_FILE" >"$WG_TMP/patched"
   mv -f "$WG_TMP/patched" "$WG_SESSIONS_FILE"
 
   run "$WG_ROOT/bin/wingroup-oomwatch" --once
   [ "$status" -eq 0 ]
   [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 1 ]
-  [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "false" ]
+  [ "$(jq -r --arg s "$WG_KEY_TWO" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "false" ]
   # and the map itself still remembers it, because a crash still has to match
-  [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions | has($s)' "$WG_SESSIONS_FILE")" = "true" ]
+  [ "$(jq -r --arg s "$WG_KEY_TWO" '.sessions | has($s)' "$WG_SESSIONS_FILE")" = "true" ]
 }
 
 # One conversation open in two live terminals is two windows, and both come
@@ -875,17 +879,17 @@ notified_twice() { (( $(notifies) >= 2 )); }
 # stops being refreshed. It must not come back as a second terminal.
 @test "a conversation resumed after its old terminal closed comes back once" {
   wg_fake_proc 1002 claude "$WG_SCOPE_TWO" "$WG_TMP/projects/shop-web"
-  wg_sessions_record "$WG_SCOPE" "same-session" "$WG_TMP/projects/shop-web" hook
-  wg_sessions_record "$WG_SCOPE_TWO" "same-session" "$WG_TMP/projects/shop-web" hook
+  wg_sessions_record "$WG_KEY" "same-session" "$WG_TMP/projects/shop-web" hook
+  wg_sessions_record "$WG_KEY_TWO" "same-session" "$WG_TMP/projects/shop-web" hook
   local stale=$(( $(date +%s) - 4000 ))
-  jq --arg s "$WG_SCOPE" --arg t "$stale" \
+  jq --arg s "$WG_KEY" --arg t "$stale" \
      '.sessions[$s].seen = ($t | tonumber)' "$WG_SESSIONS_FILE" >"$WG_TMP/patched"
   mv -f "$WG_TMP/patched" "$WG_SESSIONS_FILE"
 
   run "$WG_ROOT/bin/wingroup-oomwatch" --once
   [ "$status" -eq 0 ]
   [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 1 ]
-  [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "true" ]
+  [ "$(jq -r --arg s "$WG_KEY_TWO" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "true" ]
 }
 
 # A restore hands a session back by opening a terminal, so a session that was
@@ -899,8 +903,8 @@ notified_twice() { (( $(notifies) >= 2 )); }
   run "$WG_ROOT/bin/wingroup-oomwatch" --once
   [ "$status" -eq 0 ]
   [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 1 ]
-  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "true" ]
-  [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "false" ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "true" ]
+  [ "$(jq -r --arg s "$WG_KEY_TWO" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "false" ]
 }
 
 # A session can have more Claude processes in its terminal than itself: the
@@ -920,8 +924,8 @@ notified_twice() { (( $(notifies) >= 2 )); }
 
   run "$WG_ROOT/bin/wingroup-oomwatch" --once
   [ "$status" -eq 0 ]
-  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "true" ]
-  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].tty' "$WG_SESSIONS_FILE")" != "0" ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions | has($s)' "$WG_SNAPSHOT_FILE")" = "true" ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].tty' "$WG_SESSIONS_FILE")" != "0" ]
 }
 
 # And the directory recorded is the session's, not the child's: the child is
@@ -931,7 +935,7 @@ notified_twice() { (( $(notifies) >= 2 )); }
   wg_fake_proc 538572 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web/design" 0
 
   run wg_sessions_scan
-  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].cwd' "$WG_SESSIONS_FILE")" = "$WG_TMP/projects/shop-web" ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].cwd' "$WG_SESSIONS_FILE")" = "$WG_TMP/projects/shop-web" ]
 }
 
 # Order-independent: the same answer when the child is the one /proc lists
@@ -941,8 +945,8 @@ notified_twice() { (( $(notifies) >= 2 )); }
   wg_fake_proc 10001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web/design" 0
 
   run wg_sessions_scan
-  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].tty' "$WG_SESSIONS_FILE")" != "0" ]
-  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions[$s].cwd' "$WG_SESSIONS_FILE")" = "$WG_TMP/projects/shop-web" ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].tty' "$WG_SESSIONS_FILE")" != "0" ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].cwd' "$WG_SESSIONS_FILE")" = "$WG_TMP/projects/shop-web" ]
 }
 
 # One terminal is one session, however many Claude processes are running in it.
@@ -954,16 +958,81 @@ notified_twice() { (( $(notifies) >= 2 )); }
   [ "$output" -eq 1 ]
 }
 
+# --- two terminals in one scope ------------------------------------------------
+#
+# The sixth time sessions "did not come back", and the one the others were
+# symptoms of. A terminal opened from inside another one -- foot's ctrl+shift+n,
+# or any `foot &` from a shell -- is a child of that terminal's process and so
+# lands in its scope. The map was keyed by scope and held one entry, so the
+# second session to start overwrote the first, and the overwritten ones were
+# simply not in the record the next boot restored from.
+#
+# Measured on the restart that prompted this: thirty live sessions in
+# twenty-five scopes, twenty-four entries in the map, six sessions lost. All six
+# of them opened from inside another terminal.
+
+@test "two terminals sharing a scope are two sessions, not one" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web" 34816
+  wg_fake_proc 1002 claude "$WG_SCOPE" "$WG_TMP/projects/site-platform" 34817
+
+  run wg_sessions_scan
+  [ "$output" -eq 2 ]
+  [ "$(jq -r --arg s "$(wg_sessions_key "$WG_SCOPE" 34816)" '.sessions[$s].cwd' "$WG_SESSIONS_FILE")" = "$WG_TMP/projects/shop-web" ]
+  [ "$(jq -r --arg s "$(wg_sessions_key "$WG_SCOPE" 34817)" '.sessions[$s].cwd' "$WG_SESSIONS_FILE")" = "$WG_TMP/projects/site-platform" ]
+}
+
+@test "both terminals of a shared scope reach the snapshot a restore reads" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web" 34816
+  wg_fake_proc 1002 claude "$WG_SCOPE" "$WG_TMP/projects/site-platform" 34817
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 2 ]
+}
+
+# The hook's half of this is in test/hook.bats, where the hook runs as the
+# program it ships as: writing an id under the scope alone is what let the
+# second session in a scope land on top of the first one's.
+
+# systemd-oomd kills the scope, not a process in it, so both terminals die
+# together and both are owed back.
+@test "a kill files a crash for every terminal that was in the scope" {
+  wg_sessions_record "$(wg_sessions_key "$WG_SCOPE" 34816)" "first-session" "$WG_TMP/projects/shop-web" hook
+  wg_sessions_record "$(wg_sessions_key "$WG_SCOPE" 34817)" "second-session" "$WG_TMP/projects/site-platform" hook
+  journal_kill "$WG_SCOPE"
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(crashes)" -eq 2 ]
+  [ "$(jq -r '[.crashed[].session] | sort | join(",")' <<<"$(wg_crashed_read)")" = "first-session,second-session" ]
+}
+
+# Installed over a running desktop, every session already going has its id under
+# the old key and nothing rewrites it -- the hook runs once, at the start. Two
+# entries for one terminal is a restore that opens the session twice, once
+# resumable and once as a fresh claude in the same directory.
+@test "an entry written under the old scope key is carried onto its terminal" {
+  wg_sessions_record "$WG_SCOPE" "from-before" "$WG_TMP/projects/shop-web" hook "" "" "$WG_TMP/projects/shop-web"
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web" 34816
+
+  run wg_sessions_scan
+  [ "$output" -eq 1 ]
+  [ "$(jq '.sessions | length' "$WG_SESSIONS_FILE")" -eq 1 ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].session' "$WG_SESSIONS_FILE")" = "from-before" ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].resume_cwd' "$WG_SESSIONS_FILE")" = "$WG_TMP/projects/shop-web" ]
+  [ "$(jq -r --arg s "$WG_SCOPE" '.sessions | has($s)' "$WG_SESSIONS_FILE")" = "false" ]
+}
+
 # A session the hook has recorded but no scan has classified yet has no tty
 # field at all. Dropping it would lose a session over a field that is merely
 # late; keeping it costs at worst one spare window.
 @test "a session no scan has classified yet is kept in the snapshot" {
   wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
-  wg_sessions_record "$WG_SCOPE_TWO" "just-hooked" "$WG_TMP/projects/site-platform" hook
+  wg_sessions_record "$WG_KEY_TWO" "just-hooked" "$WG_TMP/projects/site-platform" hook
 
   run "$WG_ROOT/bin/wingroup-oomwatch" --once
   [ "$status" -eq 0 ]
-  [ "$(jq -r --arg s "$WG_SCOPE_TWO" '.sessions[$s].session' "$WG_SNAPSHOT_FILE")" = "just-hooked" ]
+  [ "$(jq -r --arg s "$WG_KEY_TWO" '.sessions[$s].session' "$WG_SNAPSHOT_FILE")" = "just-hooked" ]
 }
 
 # The regression that lost a whole desktop.

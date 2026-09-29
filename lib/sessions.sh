@@ -3,16 +3,28 @@
 # mirrors), lib/hypr.sh for wg_scope_workspaces, and lib/resolve.sh for
 # wg_crashed_group.
 #
-# Two runtime files, both keyed by systemd scope.
+# Two runtime files, both keyed by terminal: the scope a terminal runs in and
+# the terminal it owns, written "<scope>#<tty>".
 #
 # Omarchy launches every terminal through uwsm/xdg-terminal-exec, which puts it
 # in a scope of its own -- "app-Hyprland-xdg\x2dterminal\x2dexec-<hash>.scope".
 # That name is the one thing a live Claude session and the journal record of its
 # death have in common: /proc/<pid>/cgroup ends in it while the session runs,
-# and systemd-oomd names it when it kills the thing. So the scope is the join
-# key, and everything here is a map keyed by it.
+# and systemd-oomd names it when it kills the thing. So the scope is what joins
+# a living session to its death.
 #
-# sessions.json is what is alive: scope -> the session running in it. It has to
+# What the scope is not is one terminal. A terminal opened from inside another
+# one -- foot's ctrl+shift+n, or any `foot &` from a shell -- is a child of that
+# terminal's process and lands in its scope, and the two are then one key. The
+# map held one entry, so the second session to start overwrote the first, and
+# the overwritten ones were simply not in the record the next boot restored
+# from. Measured on one real restart: thirty live sessions in twenty-five
+# scopes, twenty-four entries, six sessions gone -- the sixth time sessions
+# "did not come back". The tty is what separates them: sibling terminals each
+# own a pty, while everything a session starts inside its own terminal shares
+# that session's -- which is the distinction the map wanted all along.
+#
+# sessions.json is what is alive: terminal -> the session running in it. It has to
 # be written while the process is still up, because none of it can be recovered
 # afterwards -- /proc is gone, and the journal's launch line records the
 # directory the terminal was *opened* in, which is not where the session ended
@@ -175,6 +187,36 @@ wg_proc_scope() {
   printf '%s\n' "$line"
 }
 
+# The key one terminal's entry lives under: its scope and the terminal itself.
+#
+# Written "<scope>#<tty>" so that the scope is still a prefix of it, which is
+# what lets a kill -- which names a scope and takes every terminal in it -- find
+# all of them again.
+#
+# A session with no controlling terminal keys on 0. Those are the ones running
+# in the browser or inside another app, and they are excluded from the snapshot
+# anyway; they get a key of their own here so that they cannot overwrite the
+# entry of a terminal that happens to share their scope.
+wg_sessions_key() {
+  local scope="$1" tty="${2:-}"
+  [[ -n $scope ]] || return 0
+  [[ $tty =~ ^[0-9]+$ ]] || tty=0
+  printf '%s#%s\n' "$scope" "$tty"
+}
+
+# The controlling terminal of $1, as /proc/<pid>/stat reports it: 0 for a
+# process that has none. Field 7, read positionally -- see the note in
+# wg_sessions_scan for why that is safe and why it is not an awk.
+wg_proc_tty() {
+  local pid="$1"
+  local -a stat=()
+  [[ -r $WG_PROC_DIR/$pid/stat ]] || return 0
+  # shellcheck disable=SC2034  # only field 7 is wanted, by position
+  read -r -a stat < "$WG_PROC_DIR/$pid/stat" || return 0
+  [[ ${stat[6]:-} =~ ^[0-9]+$ ]] || return 0
+  printf '%s\n' "${stat[6]}"
+}
+
 # Where each scope's window is and how big it is, as
 # "scope<TAB>workspace<TAB>x<TAB>y<TAB>w<TAB>h<TAB>monitor w<TAB>monitor h<TAB>monitor"
 # lines: the workspace it is on, its tile's corner and size, and the monitor
@@ -290,6 +332,32 @@ wg_sessions_record() {
     --arg size "$size" --arg msize "$mon_size"
 }
 
+# Moves an entry written under a bare scope onto its terminal's key.
+#
+# Entries outlive the change that introduced the key: the hook writes the
+# session id once, at the start of a session, and nothing rewrites it. Installed
+# over a running desktop, every session already going would keep its id under
+# the old key while the scan wrote a new one under the new -- two entries for
+# one terminal, and a restore that opens the session twice, once resumable and
+# once as a fresh claude in the same directory. That is a failure this project
+# has already had once, from lingering scopes, and it is not worth having again
+# for the sake of skipping twelve lines.
+#
+# The old entry is the base and the new one wins any field they share: the scan
+# has just measured everything except the session id, and the id is the one
+# thing only the old entry can have.
+wg_sessions_migrate_scope() {
+  local scope="$1" key="$2"
+  [[ -n $scope && -n $key && $scope != "$key" ]] || return 0
+  # shellcheck disable=SC2016  # jq variables
+  wg_runtime_update "$WG_SESSIONS_FILE" "$(wg_sessions_default)" '
+    if (.sessions[$old] // null) == null then .
+    else .sessions[$new] = (.sessions[$old] + (.sessions[$new] // {}))
+         | del(.sessions[$old])
+    end
+  ' --arg old "$scope" --arg new "$key"
+}
+
 # Refreshes the map from every live claude process.
 #
 # Reads $WG_PROC_DIR directly rather than forking a ps: the pid list is a glob
@@ -320,15 +388,18 @@ wg_sessions_scan_prefer() {
 }
 
 wg_sessions_scan() {
-  local dir pid comm scope cwd tty found=0
+  local dir pid comm scope cwd tty key found=0
   local -a stat=()
-  local -A pick_pid=() pick_tty=() pick_cwd=()
+  local -A pick_pid=() pick_tty=() pick_cwd=() pick_scope=() terminals_in=()
   # One compositor query for the whole pass, not one per session: the answer is
   # the same for every scope and asking per process would be a fork each.
-  local -A ws_of=() at_of=() mon_of=() size_of=() monsize_of=()
+  local -A ws_of=() at_of=() mon_of=() size_of=() monsize_of=() windows_of=()
   local wscope wsname wx wy ww wh wmw wmh wmon
   while IFS=$'\t' read -r wscope wsname wx wy ww wh wmw wmh wmon; do
     [[ -n $wscope ]] || continue
+    # How many windows the scope has, which decides whether the geometry below
+    # can be trusted to belong to any one terminal in it. See where it is read.
+    windows_of[$wscope]=$(( ${windows_of[$wscope]:-0} + 1 ))
     ws_of[$wscope]="$wsname"
     [[ -z $wx || -z $wy ]] || at_of[$wscope]="$wx,$wy"
     mon_of[$wscope]="$wmon"
@@ -369,12 +440,18 @@ wg_sessions_scan() {
       tty="${stat[6]:-}"
     fi
     [[ $tty =~ ^[0-9]+$ ]] || tty=""
+    # Bucketed by terminal rather than by scope, which is the whole point: two
+    # sibling terminals share a scope and are two sessions, while everything a
+    # session starts inside its own terminal shares that terminal and is one.
+    key="$(wg_sessions_key "$scope" "$tty")"
+    [[ -z $tty || $tty == 0 ]] || terminals_in[$scope]=1
     # Not recorded yet: one terminal can hold several Claude processes, and only
     # one of them is the session. See below.
-    if wg_sessions_scan_prefer "${pick_tty[$scope]-unset}" "${pick_pid[$scope]:-}" "$tty" "$pid"; then
-      pick_pid[$scope]="$pid"
-      pick_tty[$scope]="$tty"
-      pick_cwd[$scope]="$cwd"
+    if wg_sessions_scan_prefer "${pick_tty[$key]-unset}" "${pick_pid[$key]:-}" "$tty" "$pid"; then
+      pick_pid[$key]="$pid"
+      pick_tty[$key]="$tty"
+      pick_cwd[$key]="$cwd"
+      pick_scope[$key]="$scope"
     fi
   done
 
@@ -390,10 +467,38 @@ wg_sessions_scan() {
   # snapshot reads as "not in a terminal", and the session was left out of the
   # record and did not come back after the reboot. Two live sessions were found
   # in exactly that state.
-  for scope in "${!pick_pid[@]}"; do
-    wg_sessions_record "$scope" "" "${pick_cwd[$scope]}" scan "${pick_tty[$scope]}" \
-      "${ws_of[$scope]:-}" "" "${at_of[$scope]:-}" "${mon_of[$scope]:-}" \
-      "${size_of[$scope]:-}" "${monsize_of[$scope]:-}"
+  for key in "${!pick_pid[@]}"; do
+    scope="${pick_scope[$key]}"
+    # A Claude process with no terminal of its own, in a scope where a terminal
+    # is running: a subagent, a `claude -p`, the pen.dev CLI's Agent SDK child.
+    # It is not a session -- it is something a session started -- and an entry
+    # for it would be offered back as a crashed session of its own the next time
+    # oomd took the scope. A scope with no terminal at all is a different thing
+    # and keeps its entry: that is Claude running in the browser or inside
+    # another app, which the snapshot drops later but the map is right to know.
+    if [[ ${pick_tty[$key]:-0} == 0 && -n ${terminals_in[$scope]:-} ]]; then
+      continue
+    fi
+    wg_sessions_migrate_scope "$scope" "$key"
+    # Where the window is, but only when the scope has one window to speak of.
+    #
+    # The compositor answers "which window belongs to this scope", and for two
+    # sibling terminals sharing a scope there are two answers and no way to tell
+    # from here which is which -- the window's own process is the terminal, and
+    # its controlling terminal is not the pty it hands to the shell inside it.
+    # Recording either one's tile against both would put a session back on a
+    # workspace it was never on, which is worse than not knowing: a session with
+    # no recorded workspace is filed by its project, which is at least a rule
+    # the user can predict. So geometry is left out for those, and they come
+    # back filed rather than placed -- an arrangement lost, where before the
+    # session itself was.
+    if (( ${windows_of[$scope]:-0} == 1 )); then
+      wg_sessions_record "$key" "" "${pick_cwd[$key]}" scan "${pick_tty[$key]}" \
+        "${ws_of[$scope]:-}" "" "${at_of[$scope]:-}" "${mon_of[$scope]:-}" \
+        "${size_of[$scope]:-}" "${monsize_of[$scope]:-}"
+    else
+      wg_sessions_record "$key" "" "${pick_cwd[$key]}" scan "${pick_tty[$key]}"
+    fi
     found=$(( found + 1 ))
   done
   wg_sessions_expire
@@ -454,36 +559,56 @@ wg_launch_env_init() {
 # Returns 1 when the scope is unknown, so a caller can tell "ignored" from
 # "recorded" without re-reading the file.
 wg_crashed_add() {
-  local scope="$1" killed_at="$2" entry session cwd workspace
+  local scope="$1" killed_at="$2" entry session cwd workspace filed=0
   [[ -n $scope ]] || return 1
-  entry="$(jq -c --arg s "$scope" '.sessions[$s] // empty' <<<"$(wg_sessions_read)")"
-  [[ -n $entry ]] || return 1
-  session="$(jq -r '.session // ""' <<<"$entry")"
+  # Every terminal in the scope, because that is what the kill took. systemd-oomd
+  # kills the scope, not a process in it, so two sibling terminals sharing one
+  # die together and both are owed back. Matched on the prefix rather than the
+  # whole key, which is what the "<scope>#<tty>" shape is for; an entry written
+  # before this shape existed is keyed on the scope alone and still matches.
+  while IFS= read -r entry; do
+    [[ -n $entry ]] || continue
+    session="$(jq -r '.session // ""' <<<"$entry")"
   # Resumable directory over live directory, for the reason wg_snapshot_previous_rows
   # gives: this is what --resume will be run from.
-  cwd="$(jq -r '.resume_cwd // .cwd // ""' <<<"$entry")"
-  # And where it was, so it can be put back there.
-  #
-  # The map knows this at the moment of the kill and nothing else ever will --
-  # the window is already gone. Without it a restored crash is filed by the
-  # project its directory sits in, which is the wrong answer whenever that is
-  # not where the user had it: a session in a project no group claims lands
-  # nowhere in particular, and one that had been moved lands back where it was
-  # moved from.
-  workspace="$(jq -r '.workspace // ""' <<<"$entry")"
-  # Stamped with the boot it died in, because the list outlives the boot now.
-  # That is what lets the next login tell a session it still owes the user from
-  # one killed since -- and a scope name is not enough to tell them apart, since
-  # the scope is gone either way.
-  # shellcheck disable=SC2016  # jq variables
-  wg_runtime_update "$WG_CRASHED_FILE" "$(wg_crashed_default)" '
-    if any(.crashed[]; .scope == $scope) then .
-    else .crashed += [({scope: $scope, session: $session, cwd: $cwd, killed_at: $at}
-                       + (if $ws == "" then {} else {workspace: $ws} end)
-                       + (if $boot == "" then {} else {boot: $boot} end))]
-    end
-  ' --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" --arg at "$killed_at" \
-    --arg ws "$workspace" --arg boot "$(wg_boot_id)"
+    cwd="$(jq -r '.resume_cwd // .cwd // ""' <<<"$entry")"
+    # And where it was, so it can be put back there.
+    #
+    # The map knows this at the moment of the kill and nothing else ever will --
+    # the window is already gone. Without it a restored crash is filed by the
+    # project its directory sits in, which is the wrong answer whenever that is
+    # not where the user had it: a session in a project no group claims lands
+    # nowhere in particular, and one that had been moved lands back where it was
+    # moved from.
+    workspace="$(jq -r '.workspace // ""' <<<"$entry")"
+    # Stamped with the boot it died in, because the list outlives the boot now.
+    # That is what lets the next login tell a session it still owes the user from
+    # one killed since -- and a scope name is not enough to tell them apart, since
+    # the scope is gone either way.
+    #
+    # Not deduplicated by scope any more: several terminals can die in one, and
+    # one row each is the point. The session is what makes a row distinct, and
+    # for the pre-hook entries that have no session id the directory stands in.
+    # shellcheck disable=SC2016  # jq variables
+    wg_runtime_update "$WG_CRASHED_FILE" "$(wg_crashed_default)" '
+      if any(.crashed[]; .scope == $scope
+                         and (.session // "") == $session
+                         and (if $session == "" then (.cwd // "") == $cwd else true end))
+      then .
+      else .crashed += [({scope: $scope, session: $session, cwd: $cwd, killed_at: $at}
+                         + (if $ws == "" then {} else {workspace: $ws} end)
+                         + (if $boot == "" then {} else {boot: $boot} end))]
+      end
+    ' --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" --arg at "$killed_at" \
+      --arg ws "$workspace" --arg boot "$(wg_boot_id)"
+    filed=1
+  done < <(jq -c --arg s "$scope" '
+    .sessions | to_entries[]
+    | select(.key == $s or (.key | startswith($s + "#")))
+    | .value' <<<"$(wg_sessions_read)")
+
+  (( filed )) || return 1
+  return 0
 }
 
 # The crashes from boots that have ended: sessions oomd killed and nobody

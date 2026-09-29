@@ -36,8 +36,12 @@ hook() {
   run bash -c "'$WG_ROOT/bin/wingroup-hook' <'$WG_TMP/payload.json'"
 }
 
+# The entry is keyed by terminal -- the scope and the tty the fake "self"
+# process carries -- because a scope can hold more than one terminal and used to
+# hold only one entry for all of them.
 recorded() {
-  jq -r --arg s "$WG_SCOPE" --arg f "$1" '.sessions[$s][$f] // ""' <<<"$(wg_sessions_read)"
+  jq -r --arg s "$(wg_sessions_key "$WG_SCOPE" 34816)" --arg f "$1" \
+    '.sessions[$s][$f] // ""' <<<"$(wg_sessions_read)"
 }
 
 # Gives fake process $1 a parent of $2, which is what the ancestry walk reads.
@@ -239,4 +243,32 @@ wg_fake_comm() {
   hook '{"session_id":"the-real-one","cwd":"/home/dev/projects/shop-web"}'
   [ "$status" -eq 0 ]
   [ "$(recorded session)" = "the-real-one" ]
+}
+
+# Two terminals in one scope, which is what a terminal opened from inside
+# another one gives you -- foot's ctrl+shift+n, or any `foot &` from a shell.
+#
+# The hook used to key its entry on the scope alone, so the second session to
+# start wrote its id over the first one's, and the first was not in the record
+# the next boot restored from. Six sessions were lost that way on one restart.
+# The tty is what tells the two apart: everything a session starts inside its
+# own terminal shares that terminal, while a sibling terminal has one of its
+# own.
+@test "two terminals in one scope each keep their own session id" {
+  wg_fake_proc self claude "$WG_SCOPE" "$WG_SESSION_CWD" 34816
+  hook "{\"session_id\":\"first-session\",\"cwd\":\"$WG_SESSION_CWD\"}"
+  [ "$status" -eq 0 ]
+
+  # The second terminal: same scope, its own pty.
+  wg_fake_proc self claude "$WG_SCOPE" "$WG_TMP/projects/other" 34817
+  hook "{\"session_id\":\"second-session\",\"cwd\":\"$WG_TMP/projects/other\"}"
+  [ "$status" -eq 0 ]
+
+  local first second
+  first="$(jq -r --arg s "$(wg_sessions_key "$WG_SCOPE" 34816)" \
+    '.sessions[$s].session // ""' <<<"$(wg_sessions_read)")"
+  second="$(jq -r --arg s "$(wg_sessions_key "$WG_SCOPE" 34817)" \
+    '.sessions[$s].session // ""' <<<"$(wg_sessions_read)")"
+  [ "$first" = "first-session" ]
+  [ "$second" = "second-session" ]
 }
