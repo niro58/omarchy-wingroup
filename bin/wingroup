@@ -66,6 +66,7 @@ usage: wingroup <command>
   rename <name> <label>         change a group's displayed label
   dissolve <name>               remove a group, leaving its windows alone
   monitor <group> <name|->      pin a group to a monitor, or clear the pin
+  reorder <group> <front|back|left|right>  move a group along the bar
   toggle-auto                   turn automatic assignment on or off
   crashed [--menu|--restore|--clear]  list sessions systemd-oomd killed
 USAGE
@@ -162,6 +163,101 @@ cmd_monitor() {
     wg_hypr_dispatch moveworkspacetomonitor "$(wg_ws_selector "$name") $monitor"
   fi
   wg_refresh
+}
+
+# reorder <group> front|back|left|right moves one group within .groups.
+#
+# The bar draws a button per group in .groups order, and so does the picker, so
+# that array *is* the order of the buttons -- there is nothing else to change.
+# Until now the order was whichever order the groups had been created in, and
+# putting a new group next to the first one meant dissolving and remaking every
+# group after it, or editing state.json by hand.
+#
+# A move that has nowhere to go is a no-op and not an error. left at the front
+# and right at the back are reached by holding a keybind down, and a failure
+# there would be a notification about having arrived where the user was heading.
+# A direction that is not one of the four is a different thing entirely -- a
+# typo -- and must not be quietly read as one that is.
+#
+# The whole row moves, not the name: label, projects and pin travel with it.
+cmd_reorder() {
+  local name="${1:?usage: wingroup reorder <group> <front|back|left|right>}"
+  local direction="${2:?usage: wingroup reorder <group> <front|back|left|right>}"
+  local state
+  state="$(wg_state_read)"
+  wg_group_exists "$name" "$state" || wg_die "no such group: $name"
+  case $direction in
+    front|back|left|right) ;;
+    *) wg_die "no such direction: $direction (front, back, left or right)" ;;
+  esac
+
+  # The index is worked out inside the filter rather than passed in, because the
+  # copy read above is not the one being written: wg_state_update re-reads under
+  # the lock, and a daemon that added a group in between would have shifted every
+  # position after it. The name is the only handle that survives that.
+  # shellcheck disable=SC2016  # $n, $d, $i, $j, $g and $len are jq variables
+  wg_state_update '
+    (.groups | map(.name) | index($n)) as $i
+    | if $i == null then . else
+        (.groups | length) as $len
+        | (if   $d == "front" then 0
+           elif $d == "back"  then $len - 1
+           elif $d == "left"  then (if $i > 0 then $i - 1 else 0 end)
+           else                    (if $i < $len - 1 then $i + 1 else $len - 1 end)
+           end) as $j
+        | .groups[$i] as $g
+        | .groups = ((.groups | del(.[$i])) | .[0:$j] + [$g] + .[$j:])
+      end' \
+    --arg n "$name" --arg d "$direction"
+  wg_refresh
+}
+
+# The picker's "⇅ move a group along the bar…", in the same two steps pinning a
+# group to a monitor takes and for the same reason: the action on its own does
+# not say which group it acts on.
+#
+# The empty cases are handled here rather than in wg_reorder_menu_build, because
+# what they need is a sentence and not a list. One group is the interesting one:
+# every move it could be offered would do nothing, so the chooser would come up
+# with no rows at all -- which on a bar with one group reads as an entry that is
+# broken rather than as an order that is already right.
+cmd_reorder_interactive() {
+  local state action name label total i
+  local -a names=()
+
+  state="$(wg_state_read)"
+  mapfile -t names < <(wg_state_group_names "$state")
+  total="${#names[@]}"
+  if (( total == 0 )); then
+    wg_notify "wingroup" "There are no groups to reorder."
+    return 0
+  fi
+  if (( total == 1 )); then
+    wg_notify "wingroup" "There is only one group, so there is nothing to reorder."
+    return 0
+  fi
+
+  action="$(wg_group_list_build "$state" | wg_menu_run 'Reorder which group?')"
+  [[ -n $action ]] || return 0
+  name="${action#group:}"
+  label="$(wg_state_group_field "$name" label "$state")"
+  [[ -n $label ]] || label="$name"
+
+  action="$(wg_reorder_menu_build "$name" "$state" | wg_menu_run "Move $label")"
+  [[ -n $action ]] || return 0
+
+  cmd_reorder "$name" "${action#move:}"
+
+  # Read back afterwards rather than worked out from the direction: "front" and
+  # "one to the left" land in the same place for the second group of three, and
+  # the position the user wants told is the one the group is in now.
+  names=()
+  mapfile -t names < <(wg_state_group_names)
+  for (( i = 0; i < ${#names[@]}; i++ )); do
+    [[ ${names[i]} == "$name" ]] || continue
+    wg_notify "wingroup" "$label is now $(( i + 1 )) of ${#names[@]} on the bar."
+    break
+  done
 }
 
 cmd_cycle() {
@@ -878,6 +974,7 @@ cmd_menu() {
     new)           cmd_new_interactive ;;
     delete)        cmd_delete_interactive ;;
     monitor)       cmd_monitor_interactive ;;
+    reorder)       cmd_reorder_interactive ;;
     tidy)          cmd_tidy ;;
     toggle-auto)   cmd_toggle_auto ;;
   esac
@@ -898,6 +995,7 @@ main() {
     rename)      cmd_rename "$@" ;;
     dissolve)    cmd_dissolve "$@" ;;
     monitor)     cmd_monitor "$@" ;;
+    reorder)     cmd_reorder "$@" ;;
     toggle-auto) cmd_toggle_auto ;;
     crashed)     cmd_crashed "$@" ;;
     *)           wg_usage ;;
