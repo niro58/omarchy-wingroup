@@ -16,8 +16,6 @@ source "$WG_LIB_DIR/sessions.sh"
 source "$WG_LIB_DIR/notify.sh"
 # shellcheck source=lib/place.sh
 source "$WG_LIB_DIR/place.sh"
-# shellcheck source=lib/accounts.sh
-source "$WG_LIB_DIR/accounts.sh"
 
 # Tests point this at a stub that replaces /proc lookups with a fixture map.
 if [[ -n ${WG_TEST_STUB_CWD:-} ]]; then
@@ -68,7 +66,6 @@ usage: wingroup <command>
   rename <name> <label>         change a group's displayed label
   dissolve <name>               remove a group, leaving its windows alone
   monitor <group> <name|->      pin a group to a monitor, or clear the pin
-  account <list|add|use|remove|dir> [name]  which Claude account new terminals use
   reorder <group> <front|back|left|right>  move a group along the bar
   toggle-auto                   turn automatic assignment on or off
   crashed [--menu|--restore|--clear]  list sessions systemd-oomd killed
@@ -584,58 +581,6 @@ cmd_toggle_auto() {
   wg_refresh
 }
 
-# Which Claude account new terminals open under.
-#
-# An account is a configuration directory, because that is what Claude keeps a
-# session in: `claude --resume <id>` finds a conversation only from the
-# directory it was started in, so the account a terminal belongs to has to be
-# decided before Claude starts. `dir` is the verb the shell hook calls on every
-# new terminal, which is why it prints one line and nothing else.
-#
-# Logging in is not here. `claude auth login`, run against the directory this
-# prints, is what puts credentials in it -- an interactive, human thing that
-# wingroup has no business holding.
-cmd_account() {
-  local action="${1:-list}" name="${2:-}"
-  case $action in
-    list)
-      local active current
-      active="$(wg_account_active)"
-      while IFS= read -r current; do
-        [[ -n $current ]] || continue
-        if [[ $current == "$active" ]]; then
-          printf '* %s\t%s\n' "$current" "$(wg_account_dir "$current")"
-        else
-          printf '  %s\t%s\n' "$current" "$(wg_account_dir "$current")"
-        fi
-      done < <(wg_account_list)
-      ;;
-    dir)  wg_account_dir "$name" ;;
-    add)
-      [[ -n $name ]] || wg_die "usage: wingroup account add <name>"
-      wg_account_add "$name" || wg_die "cannot add account: $name"
-      printf 'Added %s. Log it in with:\n  CLAUDE_CONFIG_DIR=%s claude auth login\n' \
-        "$name" "$(wg_account_dir "$name")"
-      ;;
-    use)
-      [[ -n $name ]] || wg_die "usage: wingroup account use <name>"
-      wg_account_use "$name" || wg_die "no such account: $name"
-      # Only terminals opened from now on. A running session has its directory
-      # already, and Claude has its transcripts open in it.
-      printf 'New terminals will use %s.\n' "$name"
-      wg_refresh
-      ;;
-    remove)
-      [[ -n $name ]] || wg_die "usage: wingroup account remove <name>"
-      wg_account_remove "$name" || wg_die "cannot remove account: $name"
-      # The directory stays: it holds that account's conversations.
-      printf 'Removed %s. Its directory is still at %s.\n' "$name" "$WG_ACCOUNTS_DIR/$name"
-      wg_refresh
-      ;;
-    *) wg_die "usage: wingroup account <list|add|use|remove|dir> [name]" ;;
-  esac
-}
-
 # One wg_crashed_rows line into WG_CRASH[1..3] -- session id, directory, time.
 # The array index is the column number, as with WG_ROW.
 #
@@ -1053,7 +998,6 @@ main() {
     reorder)     cmd_reorder "$@" ;;
     toggle-auto) cmd_toggle_auto ;;
     crashed)     cmd_crashed "$@" ;;
-    account)     cmd_account "$@" ;;
     *)           wg_usage ;;
   esac
 }

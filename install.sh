@@ -35,6 +35,13 @@ source "$WG_ROOT/lib/constants.sh"
 : "${WG_STATE_DIR:=$HOME/.local/state/omarchy/wingroup}"
 : "${WG_RESTORE_SCRIPT:=$HOME/restore-claude.sh}"
 : "${WG_CLAUDE_SETTINGS:=$HOME/.claude/settings.json}"
+# claude-swap's command. The accounts widget and its switcher are installed only
+# when it is on the PATH; see install_accounts_widget.
+: "${WG_CSWAP_CMD:=cswap}"
+# Left behind when install turned Omarchy's own agents widget off, so that
+# uninstall turns it back on -- and only then. A user who had switched it off
+# themselves before installing must not find it back on after removing wingroup.
+: "${WG_AGENTS_MARKER:=$WG_STATE_DIR/.disabled-omarchy-agents}"
 
 WG_SIGNAL=11
 
@@ -118,6 +125,12 @@ WG_AUTOSTART_ADDED=""
 # how an existing install came to be left without the watcher.
 WG_AUTOSTART_LINES=(wingroup-daemon wingroup-oomwatch)
 [[ -x $WG_RESTORE_SCRIPT ]] && WG_AUTOSTART_LINES+=(wingroup-restore)
+# claude-swap's switcher, when claude-swap is there. It is what moves the live
+# login to an account with room when a window runs out; it has to run whether or
+# not anyone opens the bar, and it runs until logout. Only with claude-swap
+# installed: an autostart line for a command that does not exist is a login
+# that logs an error every time, for a feature nobody set up.
+command -v "$WG_CSWAP_CMD" >/dev/null 2>&1 && WG_AUTOSTART_LINES+=("cswap auto")
 
 # What the upgrade path added to a block that was already there.
 WG_AUTOSTART_UPGRADED=()
@@ -706,6 +719,48 @@ wg_autostart_line() { printf 'exec-once = %s' "$1"; }
 # text console -- the link is still made and the summary says how to finish.
 WG_WIDGET_RESULT=""
 
+# The Claude accounts widget, in place of Omarchy's own agents widget.
+#
+# Omarchy's shows one record per tool, and so one Claude account: whichever
+# login happens to be live. With several subscriptions behind claude-swap that
+# is the wrong question answered well. This one shows every account claude-swap
+# knows, with both windows and when they reset, and switches between them.
+#
+# Only when claude-swap is installed. Without it this widget can say nothing but
+# "claude-swap is not installed", and swapping a working widget for that would
+# be taking something away.
+#
+# Omarchy's is switched off only when it was on, and a marker says this script
+# did it -- uninstall turns it back on from the marker alone, so a user who had
+# already switched it off does not find it back after removing wingroup.
+WG_ACCOUNTS_RESULT=""
+install_accounts_widget() {
+  [[ -f $WG_HYPR_AUTOSTART_LUA ]] || return 0
+  command -v "$WG_CSWAP_CMD" >/dev/null 2>&1 || return 0
+
+  local target="$WG_OMARCHY_PLUGINS_DIR/wingroup.accounts"
+  mkdir -p "$WG_OMARCHY_PLUGINS_DIR" || return 0
+  if [[ -d $target && ! -L $target ]] && grep -q '"id": *"wingroup.accounts"' "$target/manifest.json" 2>/dev/null; then
+    rm -rf "$target"
+  fi
+  ln -sfn "$WG_ROOT/shell/wingroup.accounts" "$target"
+  "$WG_SHELL_CMD" -q shell rescanPlugins >/dev/null 2>&1 || true
+  if ! "$WG_PLUGIN_ENABLE" wingroup.accounts >/dev/null 2>&1; then
+    WG_ACCOUNTS_RESULT="linked"
+    return 0
+  fi
+  WG_ACCOUNTS_RESULT="enabled"
+
+  # Asked of the running shell rather than read from shell.json: enabled is what
+  # the shell says it is, and a file edited since the last rescan is not that.
+  local agents_on
+  agents_on="$("$WG_SHELL_CMD" shell listPlugins 2>/dev/null \
+    | jq -r 'first(.[]? | select(.id == "omarchy.agents") | .enabled) // false' 2>/dev/null)"
+  if [[ $agents_on == true ]] && "$WG_PLUGIN_DISABLE" omarchy.agents >/dev/null 2>&1; then
+    mkdir -p "$(dirname -- "$WG_AGENTS_MARKER")" && : >"$WG_AGENTS_MARKER"
+  fi
+}
+
 install_shell_widget() {
   [[ -f $WG_HYPR_AUTOSTART_LUA ]] || return 0
   local target="$WG_OMARCHY_PLUGINS_DIR/wingroup.groups"
@@ -890,6 +945,7 @@ fi
 install_bindings
 install_autostart
 install_shell_widget
+install_accounts_widget
 install_claude_hook
 seed_state
 
@@ -912,6 +968,19 @@ case $WG_WIDGET_RESULT in
       printf 'Bar (%s): no waybar config, so the group buttons were not added.\n' "$WG_WAYBAR_CONFIG"
       printf '  Everything else wingroup does works without a bar.\n'
     fi ;;
+esac
+case $WG_ACCOUNTS_RESULT in
+  enabled)
+    printf 'Bar (Omarchy shell): the "Claude accounts" widget is installed and enabled'
+    if [[ -e $WG_AGENTS_MARKER ]]; then
+      printf ', in place of Omarchy'"'"'s agents widget.\n'
+    else
+      printf '.\n'
+    fi
+    printf '  claude-swap switches accounts at login and whenever a window runs out: cswap auto\n' ;;
+  linked)
+    printf 'Bar (Omarchy shell): the "Claude accounts" widget is installed but could not be enabled now.\n'
+    printf '  Enable it once the shell is running: omarchy plugin enable wingroup.accounts\n' ;;
 esac
 case $WG_AUTOSTART_ADDED in
   both)
