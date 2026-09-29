@@ -71,6 +71,36 @@ wg_hook_nested() {
   return 1
 }
 
+# The terminal this session runs in, read from the session's own claude.
+#
+# Not from this process. Claude runs its hooks detached -- a hook has no
+# controlling terminal of its own, measured on the live machine at tty 0 -- so
+# asking itself always answered 0. The first version did exactly that: every
+# session's id was filed under "<scope>#0", apart from the entry the scan keeps
+# for its terminal, and the snapshot's freshness filter dropped it within a
+# minute because nothing ever refreshes a "#0" entry. A restart would have
+# brought every session back as an empty claude.
+#
+# The claude that launched this hook does own the terminal. It is our parent,
+# or an ancestor if Claude runs the hook through a shell, so the walk stops at
+# the first claude it meets. Prints nothing when there is none to find, which
+# the key then records as 0 -- the right answer for a session that genuinely has
+# no terminal, such as Claude running in the browser.
+wg_hook_tty() {
+  local pid="${CLAUDE_PID:-$PPID}" comm hops=0
+  while (( hops < 20 )); do
+    read -r comm < "$WG_PROC_DIR/$pid/comm" 2>/dev/null || return 0
+    if [[ $comm == "claude" ]]; then
+      wg_proc_tty "$pid"
+      return 0
+    fi
+    pid="$(awk '/^PPid:/{print $2}' "$WG_PROC_DIR/$pid/status" 2>/dev/null)" || return 0
+    [[ -n $pid && $pid != 0 ]] || return 0
+    hops=$(( hops + 1 ))
+  done
+  return 0
+}
+
 wg_hook_record() {
   local payload session cwd scope key
   local -a fields=()
@@ -107,12 +137,11 @@ wg_hook_record() {
   # would be a row nothing is ever able to look up.
   [[ -n $scope ]] || return 0
 
-  # Which terminal, not just which scope. Claude runs the hook as a child of the
-  # session, so this process's controlling terminal is the session's -- and two
-  # sibling terminals in one scope differ by exactly that. Written under the
-  # scope alone, the second session to start in a scope overwrote the first, and
-  # the first was then missing from the record the next boot restored from.
-  key="$(wg_sessions_key "$scope" "$(wg_proc_tty self)")"
+  # Which terminal, not just which scope: two sibling terminals in one scope
+  # differ by exactly that, and written under the scope alone the second
+  # session to start overwrote the first. The terminal is the session's
+  # claude's -- see wg_hook_tty for why it is not this process's own.
+  key="$(wg_sessions_key "$scope" "$(wg_hook_tty)")"
 
   # The same directory twice, and they diverge later on purpose. The scan keeps
   # the first one current as the session moves about; the second is what

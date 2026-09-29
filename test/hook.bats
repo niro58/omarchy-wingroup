@@ -22,7 +22,19 @@ setup() {
   # The hook resolves its own scope through $WG_PROC_DIR/self, so the fake
   # process table needs a "self" in it. wg_sessions_scan globs [0-9]* and so
   # never picks this entry up as a process of its own.
-  wg_fake_proc self claude "$WG_SCOPE" "$WG_SESSION_CWD"
+  #
+  # And it has no terminal: tty 0. That is how Claude really runs a hook --
+  # detached, measured on the live machine -- and the first version of these
+  # tests gave the fake hook a terminal of its own instead. Every test passed,
+  # and on the real desktop every session's id was filed under "#0", apart from
+  # its terminal, where the snapshot dropped it within a minute. A restart would
+  # have brought every session back empty.
+  wg_fake_proc self bash "$WG_SCOPE" "$WG_SESSION_CWD" 0
+  # The terminal belongs to the session's own claude, which is what launched the
+  # hook. CLAUDE_PID stands in for the hook's parent: under bats the real $PPID
+  # is the test runner.
+  wg_fake_proc 700 claude "$WG_SCOPE" "$WG_SESSION_CWD" 34816
+  export CLAUDE_PID=700
 }
 
 teardown() { wg_teardown_tmp; }
@@ -130,7 +142,8 @@ wg_fake_comm() {
 # must never overwrite the one the hook was told.
 @test "a later scan does not blank the id the hook recorded" {
   hook '{"session_id":"11111111-2222","cwd":"/home/dev/projects/shop-web"}'
-  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web-live"
+  # The session's own claude, standing somewhere new since the hook ran.
+  wg_fake_proc 700 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web-live" 34816
   run wg_sessions_scan
   [ "$output" -eq 1 ]
   [ "$(recorded session)" = "11111111-2222" ]
@@ -150,7 +163,8 @@ wg_fake_comm() {
 # reboot.
 @test "a later scan moves the cwd and leaves the resume directory alone" {
   hook '{"session_id":"11111111-2222","cwd":"/home/dev/projects/shop-web"}'
-  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web/.worktrees/fix"
+  # The session's own claude, moved into a worktree since the hook ran.
+  wg_fake_proc 700 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web/.worktrees/fix" 34816
   run wg_sessions_scan
   [ "$output" -eq 1 ]
   [ "$(recorded cwd)" = "$WG_TMP/projects/shop-web/.worktrees/fix" ]
@@ -255,13 +269,15 @@ wg_fake_comm() {
 # own terminal shares that terminal, while a sibling terminal has one of its
 # own.
 @test "two terminals in one scope each keep their own session id" {
-  wg_fake_proc self claude "$WG_SCOPE" "$WG_SESSION_CWD" 34816
+  # The first terminal is setup's: claude 700 on pty 34816.
   hook "{\"session_id\":\"first-session\",\"cwd\":\"$WG_SESSION_CWD\"}"
   [ "$status" -eq 0 ]
 
-  # The second terminal: same scope, its own pty.
-  wg_fake_proc self claude "$WG_SCOPE" "$WG_TMP/projects/other" 34817
-  hook "{\"session_id\":\"second-session\",\"cwd\":\"$WG_TMP/projects/other\"}"
+  # The second terminal: same scope, a claude of its own on its own pty. The
+  # hook itself has no terminal in either case -- the pty is read from the
+  # claude that launched it.
+  wg_fake_proc 701 claude "$WG_SCOPE" "$WG_TMP/projects/other" 34817
+  CLAUDE_PID=701 hook "{\"session_id\":\"second-session\",\"cwd\":\"$WG_TMP/projects/other\"}"
   [ "$status" -eq 0 ]
 
   local first second

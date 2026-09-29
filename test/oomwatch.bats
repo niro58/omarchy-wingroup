@@ -1023,6 +1023,70 @@ notified_twice() { (( $(notifies) >= 2 )); }
   [ "$(jq -r --arg s "$WG_SCOPE" '.sessions | has($s)' "$WG_SESSIONS_FILE")" = "false" ]
 }
 
+# --- the id from a relaunched session's own command line ----------------------
+#
+# The hook is the only thing Claude tells a session id to, and for a day it
+# filed every one under a terminal of 0 -- apart from the terminal's own entry,
+# where the snapshot then dropped it. A session whose terminal entry has no id
+# comes back from a restart as an empty claude. Every session a restore brings
+# back was started as `claude --resume <id>`, so the scan reads the id from
+# there when the entry has none.
+
+# argv for fake process $1, NUL-separated as /proc writes it.
+wg_fake_cmdline() {
+  local pid="$1"; shift
+  printf '%s\0' "$@" >"$WG_PROC_DIR/$pid/cmdline"
+}
+
+@test "a relaunched session's id is read from its own command line" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_fake_cmdline 1001 claude --resume 11111111-2222-3333-4444-555555555555
+
+  run wg_sessions_scan
+  [ "$output" -eq 1 ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].session' "$WG_SESSIONS_FILE")" = "11111111-2222-3333-4444-555555555555" ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].resume_cwd' "$WG_SESSIONS_FILE")" = "$WG_TMP/projects/shop-web" ]
+}
+
+# /resume inside a running session switches conversation; the hook records the
+# new id, and the command line still names the old one. The hook's is right.
+@test "an id the hook recorded is not overridden by the command line" {
+  wg_sessions_record "$WG_KEY" "the-conversation-now" "$WG_TMP/projects/shop-web" hook
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_fake_cmdline 1001 claude --resume 11111111-2222-3333-4444-555555555555
+
+  run wg_sessions_scan
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].session' "$WG_SESSIONS_FILE")" = "the-conversation-now" ]
+}
+
+@test "a session started without --resume is given no id by the scan" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_fake_cmdline 1001 claude
+
+  run wg_sessions_scan
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].session // ""' "$WG_SESSIONS_FILE")" = "" ]
+}
+
+# Only something shaped like a session id: an argument after --resume that is a
+# path, a flag, or a search term is not one.
+@test "whatever follows --resume is taken only if it is a session id" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_fake_cmdline 1001 claude --resume --dangerously-skip-permissions
+
+  run wg_sessions_scan
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].session // ""' "$WG_SESSIONS_FILE")" = "" ]
+}
+
+# The restart this protects: the id reaches the snapshot a restore reads.
+@test "a relaunched session's id reaches the snapshot" {
+  wg_fake_proc 1001 claude "$WG_SCOPE" "$WG_TMP/projects/shop-web"
+  wg_fake_cmdline 1001 claude --resume 11111111-2222-3333-4444-555555555555
+
+  run "$WG_ROOT/bin/wingroup-oomwatch" --once
+  [ "$status" -eq 0 ]
+  [ "$(jq -r --arg s "$WG_KEY" '.sessions[$s].session' "$WG_SNAPSHOT_FILE")" = "11111111-2222-3333-4444-555555555555" ]
+}
+
 # A session the hook has recorded but no scan has classified yet has no tty
 # field at all. Dropping it would lose a session over a field that is merely
 # late; keeping it costs at worst one spare window.
