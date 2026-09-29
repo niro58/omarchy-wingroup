@@ -326,10 +326,51 @@ wg_sessions_record() {
       + (if $mon == "" then {} else {monitor: $mon} end)
       + (if $size == "" then {} else {size: ($size | split(",") | map(tonumber))} end)
       + (if $msize == "" then {} else {mon_size: ($msize | split(",") | map(tonumber))} end)
+    # ${12}: an id to use only when the entry has none. See wg_proc_resume_id --
+    # it fills a gap and never overrides, so a conversation switched with
+    # /resume inside a session keeps the id the hook recorded for the switch.
+    | if $fill != "" and ((.sessions[$scope].session // "") == "")
+      then .sessions[$scope] += ({session: $fill}
+             + (if (.sessions[$scope].resume_cwd // "") == "" then {resume_cwd: $cwd} else {} end))
+      else . end
   ' --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" \
     --arg source "$source" --arg now "$now" --arg tty "$tty" --arg ws "$workspace" \
     --arg resume "$resume_cwd" --arg at "$at" --arg mon "$monitor" \
-    --arg size "$size" --arg msize "$mon_size"
+    --arg size "$size" --arg msize "$mon_size" --arg fill "${12:-}"
+}
+
+# The session id a claude process was started with, when it was started as
+# `claude --resume <id>` -- which every session a restore brings back is.
+# Prints nothing otherwise. One read of /proc/<pid>/cmdline, NUL-separated.
+#
+# A second source for the one fact only the hook used to supply, and the one a
+# restore cannot do without. The hook can miss: for a day it filed every id
+# under a terminal of 0, apart from the entry the scan keeps, and a session
+# whose id is not on its terminal's entry comes back from a restart as an empty
+# claude. A relaunched session carries its id on its own command line, so the
+# scan can put it back every fifteen seconds whatever the hook did.
+#
+# It fills a gap and never overrides one. Inside a running session, /resume
+# switches to another conversation while the command line still names the
+# first; the hook fires for the switch and records the new id, and from then on
+# the command line is the one that is wrong.
+wg_proc_resume_id() {
+  local pid="$1" arg want=0
+  local -a args=()
+  [[ -n $pid ]] || return 0
+  # Readable first, and not `mapfile ... < file 2>/dev/null`: redirections are
+  # applied left to right, so the complaint about a missing file is printed
+  # before stderr is silenced -- onto the scan's stdout, which is its count.
+  [[ -r $WG_PROC_DIR/$pid/cmdline ]] || return 0
+  mapfile -d '' -t args < "$WG_PROC_DIR/$pid/cmdline" || return 0
+  for arg in ${args[@]+"${args[@]}"}; do
+    if (( want )); then
+      [[ $arg =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && printf '%s\n' "$arg"
+      return 0
+    fi
+    [[ $arg == --resume || $arg == -r ]] && want=1
+  done
+  return 0
 }
 
 # Moves an entry written under a bare scope onto its terminal's key.
@@ -388,7 +429,7 @@ wg_sessions_scan_prefer() {
 }
 
 wg_sessions_scan() {
-  local dir pid comm scope cwd tty key found=0
+  local dir pid comm scope cwd tty key fill found=0
   local -a stat=()
   local -A pick_pid=() pick_tty=() pick_cwd=() pick_scope=() terminals_in=()
   # One compositor query for the whole pass, not one per session: the answer is
@@ -492,12 +533,16 @@ wg_sessions_scan() {
     # the user can predict. So geometry is left out for those, and they come
     # back filed rather than placed -- an arrangement lost, where before the
     # session itself was.
+    # The id this terminal's claude was relaunched with, as a fallback for the
+    # hook's -- folded into the one write the scan makes anyway.
+    fill="$(wg_proc_resume_id "${pick_pid[$key]}")"
     if (( ${windows_of[$scope]:-0} == 1 )); then
       wg_sessions_record "$key" "" "${pick_cwd[$key]}" scan "${pick_tty[$key]}" \
         "${ws_of[$scope]:-}" "" "${at_of[$scope]:-}" "${mon_of[$scope]:-}" \
-        "${size_of[$scope]:-}" "${monsize_of[$scope]:-}"
+        "${size_of[$scope]:-}" "${monsize_of[$scope]:-}" "$fill"
     else
-      wg_sessions_record "$key" "" "${pick_cwd[$key]}" scan "${pick_tty[$key]}"
+      wg_sessions_record "$key" "" "${pick_cwd[$key]}" scan "${pick_tty[$key]}" \
+        "" "" "" "" "" "" "$fill"
     fi
     found=$(( found + 1 ))
   done
