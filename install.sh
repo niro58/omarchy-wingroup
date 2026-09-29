@@ -32,6 +32,13 @@ source "$WG_ROOT/lib/constants.sh"
 : "${WG_OMARCHY_PLUGINS_DIR:=$HOME/.config/omarchy/plugins}"
 : "${WG_SHELL_CMD:=omarchy-shell}"
 : "${WG_PLUGIN_ENABLE:=omarchy-plugin-enable}"
+# Used to turn Omarchy's agents widget off in favour of the accounts one. Missing
+# from the first version of that change: every test exports it, so the suite
+# passed, and on a real machine `set -u` stopped the install dead at the line
+# that used it -- leaving Omarchy's widget on and skipping every step after it.
+# test/install.bats now fails for any variable an installer reads without
+# giving it a value itself.
+: "${WG_PLUGIN_DISABLE:=omarchy-plugin-disable}"
 : "${WG_STATE_DIR:=$HOME/.local/state/omarchy/wingroup}"
 : "${WG_RESTORE_SCRIPT:=$HOME/restore-claude.sh}"
 : "${WG_CLAUDE_SETTINGS:=$HOME/.claude/settings.json}"

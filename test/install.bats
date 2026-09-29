@@ -1596,6 +1596,48 @@ wg_with_cswap() {
   [ ! -e "$WG_TMP/re-enabled" ] || ! grep -q 'omarchy.agents' "$WG_TMP/re-enabled"
 }
 
+# The bug that shipped with the accounts widget: install.sh read
+# WG_PLUGIN_DISABLE without ever giving it a value. Every test exports it, so
+# the suite was green; on a real machine `set -u` stopped the install at that
+# line. This runs the installer without it, as a user does.
+@test "the installer runs without the test environment's plugin variables" {
+  wg_with_cswap true
+  mkdir -p "$WG_TMP/path"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s"\n' "$WG_TMP/disabled" \
+    >"$WG_TMP/path/omarchy-plugin-disable"
+  chmod +x "$WG_TMP/path/omarchy-plugin-disable"
+
+  run env -u WG_PLUGIN_DISABLE PATH="$WG_TMP/path:$PATH" "$WG_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  grep -qx 'omarchy.agents' "$WG_TMP/disabled"
+}
+
+# And the class of it. The test environment supplies every WG_ variable, so an
+# installer that forgets to give one a value of its own passes every test and
+# fails on the machine it is for. Anything an installer reads has to be given a
+# value by the installer -- or by a file it sources.
+@test "every variable an installer reads is given a value by the installer" {
+  local f missing=""
+  for f in install.sh uninstall.sh; do
+    local path="$WG_ROOT/$f" sourced="" used given
+    # files the installer sources, which are allowed to supply values
+    sourced="$(grep -oE '^source "\$WG_ROOT/[^"]+"' "$path" | sed -E 's|^source "\$WG_ROOT/||; s|"$||')"
+    used="$(grep -oE '\$\{?WG_[A-Z0-9_]+' "$path" | sed 's/[${]//g' | sort -u)"
+    given="$(
+      for g in "$path" ${sourced:+$(printf "$WG_ROOT/%s " $sourced)}; do
+        grep -oE '\$\{WG_[A-Z0-9_]+:?=' "$g"
+        grep -oE '(^|[[:space:];])WG_[A-Z0-9_]+\+?=' "$g"
+        grep -oE '(local|declare)( -[a-zA-Z]+)* [^;]*' "$g" | grep -oE 'WG_[A-Z0-9_]+'
+      done | grep -oE 'WG_[A-Z0-9_]+' | sort -u
+    )"
+    local v
+    for v in $(comm -23 <(printf '%s\n' "$used") <(printf '%s\n' "$given")); do
+      missing+=" $f:$v"
+    done
+  done
+  [ -z "$missing" ] || { echo "read but never given a value:$missing"; false; }
+}
+
 @test "the accounts widget's manifest is one Omarchy's schema accepts" {
   run jq -e '.id == "wingroup.accounts" and (.kinds | index("bar-widget")) and .entryPoints.barWidget == "Panel.qml"' \
     "$WG_ROOT/shell/wingroup.accounts/manifest.json"
