@@ -72,7 +72,7 @@ wg_hook_nested() {
 }
 
 wg_hook_record() {
-  local payload session cwd scope
+  local payload session cwd scope key
   local -a fields=()
 
   # A terminal on stdin means somebody ran this by hand rather than Claude
@@ -107,11 +107,18 @@ wg_hook_record() {
   # would be a row nothing is ever able to look up.
   [[ -n $scope ]] || return 0
 
+  # Which terminal, not just which scope. Claude runs the hook as a child of the
+  # session, so this process's controlling terminal is the session's -- and two
+  # sibling terminals in one scope differ by exactly that. Written under the
+  # scope alone, the second session to start in a scope overwrote the first, and
+  # the first was then missing from the record the next boot restored from.
+  key="$(wg_sessions_key "$scope" "$(wg_proc_tty self)")"
+
   # The same directory twice, and they diverge later on purpose. The scan keeps
   # the first one current as the session moves about; the second is what
   # `claude --resume` has to be run from, which is the directory Claude hands us
   # here and nowhere else, so it is written once and never refreshed.
-  wg_sessions_record "$scope" "$session" "$cwd" hook "" "" "$cwd"
+  wg_sessions_record "$key" "$session" "$cwd" hook "" "" "$cwd"
 }
 
 wg_hook_record || true
