@@ -75,6 +75,10 @@ Panel {
         status: String(a.usageStatus || ""),
         problem: a.usageError ? String(a.usageError) : "",
         disabled: a.disabled === true,
+        // When claude-swap last got an answer for this account. It serves its
+        // last good reading when a check fails, so the numbers below can be
+        // far older than this list.
+        checkedAt: Date.parse(a.usageFetchedAt || a.lastGoodFetchedAt || "") || 0,
         fiveHour: u && u.fiveHour ? { percent: Number(u.fiveHour.pct) / 100, resetsAt: String(u.fiveHour.resetsAt || "") } : null,
         sevenDay: u && u.sevenDay ? { percent: Number(u.sevenDay.pct) / 100, resetsAt: String(u.sevenDay.resetsAt || "") } : null
       })
@@ -111,6 +115,19 @@ Panel {
   function alarming(row) {
     var w = binding(row)
     return !!w && w.percent >= 0.9
+  }
+
+  // How old a row's numbers are, once they are too old to trust; 0 while they
+  // are fresh enough, or when nothing says when they were read. claude-swap
+  // checks an idle account at most every ten minutes, and backs off for an hour
+  // when Anthropic rate-limits the check -- during which it keeps serving the
+  // last reading. Fifteen minutes is past any normal gap, so a row this old is
+  // one claude-swap could not refresh, and its numbers may say there is room
+  // on an account Claude has already stopped.
+  function staleMs(row, now) {
+    if (!row || !row.checkedAt) return 0
+    var age = now - row.checkedAt
+    return age > 15 * 60000 ? age : 0
   }
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
@@ -187,10 +204,12 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     // The live account's tighter window, because that is the one about to stop
-    // work; the glyph alone while there is nothing to report.
+    // work; the glyph alone while there is nothing to report. A "?" when that
+    // reading is too old to trust -- see staleMs.
     text: {
       var w = root.binding(root.live)
-      return w ? "󱚣 " + Math.round(w.percent * 100) + "%" : "󱚣"
+      if (!w) return "󱚣"
+      return "󱚣 " + Math.round(w.percent * 100) + "%" + (root.staleMs(root.live, root.nowMs) > 0 ? "?" : "")
     }
     active: root.alarming(root.live)
     onPressed: function(buttonCode) { root.toggle() }
@@ -353,6 +372,9 @@ Panel {
           if (row.account.disabled) return "Held out of rotation"
           if (row.account.status !== "ok" && row.account.problem !== "")
             return "Could not read usage (" + row.account.problem + ")"
+          var stale = root.staleMs(row.account, root.nowMs)
+          if (stale > 0)
+            return "Last checked " + root.formatDuration(stale) + " ago — may be out of date"
           return ""
         }
         color: root.dim

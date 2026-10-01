@@ -57,7 +57,7 @@ wg_accounts_harness() {
   local expr="$1" out="$WG_TMP/harness.qml" fn
   {
     printf 'import QtQuick\n\nItem {\n'
-    for fn in parseAccounts resetMs formatDuration binding alarming clamp; do
+    for fn in parseAccounts resetMs formatDuration binding alarming staleMs clamp; do
       wg_accounts_function "$fn"
     done
     # try/catch because an expression that throws never reaches Qt.exit, and
@@ -148,5 +148,38 @@ js() { printf '%s' "$1" | tr -d '\n'; }
 
 @test "durations read in the largest unit that fits" {
   run_expr "(formatDuration(45 * 60000) === '45m' && formatDuration(210 * 60000) === '3h 30m' && formatDuration(50 * 3600000) === '2d 2h') ? 7 : 3"
+  [ "$status" -eq 7 ]
+}
+
+# claude-swap keeps serving an account's last good reading while the usage check
+# is rate-limited -- for an hour or more. That reading must not pass for a fresh
+# one: it is how the bar showed 28% for an hour and a half on an account Claude
+# had already stopped.
+STALE='{"accounts":[
+  {"number":1,"email":"a@x","active":true,"usageStatus":"ok","usageFetchedAt":"2026-10-01T12:53:09Z",
+   "usage":{"fiveHour":{"pct":28.0},"sevenDay":{"pct":7.0}}},
+  {"number":2,"email":"b@x","active":false,"usageStatus":"unavailable","usage":null,
+   "lastGoodFetchedAt":"2026-10-01T12:53:09Z"},
+  {"number":3,"email":"c@x","active":false,"usageStatus":"ok",
+   "usage":{"fiveHour":{"pct":1.0},"sevenDay":{"pct":1.0}}}]}'
+READ_AT="Date.parse('2026-10-01T12:53:09Z')"
+
+@test "a reading over an hour and a half old is stale, and says how old" {
+  run_expr "Math.round(staleMs(parseAccounts('$(js "$STALE")')[0], $READ_AT + 97 * 60000) / 60000)"
+  [ "$status" -eq 97 ]
+}
+
+@test "a reading ten minutes old is not stale" {
+  run_expr "staleMs(parseAccounts('$(js "$STALE")')[0], $READ_AT + 10 * 60000) === 0 ? 7 : 3"
+  [ "$status" -eq 7 ]
+}
+
+@test "an account with only a last good reading is aged by that reading" {
+  run_expr "staleMs(parseAccounts('$(js "$STALE")')[1], $READ_AT + 30 * 60000) > 0 ? 7 : 3"
+  [ "$status" -eq 7 ]
+}
+
+@test "a row that does not say when it was read is never called stale" {
+  run_expr "staleMs(parseAccounts('$(js "$STALE")')[2], $READ_AT + 999 * 60000) === 0 ? 7 : 3"
   [ "$status" -eq 7 ]
 }
