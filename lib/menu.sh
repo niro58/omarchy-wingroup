@@ -6,6 +6,10 @@
 # Omarchy 4's own menu, which replaced walker there: pick one row, or type a line.
 : "${WG_OMARCHY_SELECT:=omarchy-menu-select}"
 : "${WG_OMARCHY_INPUT:=omarchy-menu-input}"
+# SUPER+G's rows, kept current by wingroup-daemon so the picker does not have to
+# walk every window and process before it can show anything.
+: "${WG_MENU_CACHE:=${XDG_RUNTIME_DIR:-/tmp}/wingroup-menu.cache}"
+: "${WG_DAEMON_LOCK:=${XDG_RUNTIME_DIR:-/tmp}/wingroup-daemon.lock}"
 
 # Left in WG_GLYPH rather than printed: like WG_WHERE below, this runs once per
 # open window, and a command substitution per row is a fork per row.
@@ -364,8 +368,7 @@ wg_menu_run_omarchy() {
     keys+=("$WG_TRIMMED")
   done
 
-  choice="$(printf '%s\n' "${labels[@]}" \
-    | "$WG_OMARCHY_SELECT" "$prompt" -- --width 644 --maxheight 600 2>/dev/null || true)"
+  choice="$(printf '%s\n' "${labels[@]}" | wg_omarchy_select "$prompt" 2>/dev/null || true)"
   wg_menu_trim "${choice%%$'\n'*}"
   choice="$WG_TRIMMED"
   [[ -n $choice ]] || return 0
@@ -377,6 +380,87 @@ wg_menu_run_omarchy() {
     return 0
   done
   return 0
+}
+
+# Puts the Omarchy menu up with the rows on stdin and prints the row picked.
+#
+# omarchy-menu-select does exactly this, but it starts perl twice to turn the
+# rows into JSON -- some 60ms of the time SUPER+G takes to show anything, on a
+# keypress whose whole budget is a few hundred. jq, which wingroup runs anyway,
+# builds the same request; the request and the two files are the menu's own
+# protocol, copied from omarchy-menu-select.
+#
+# Only for the stock command. A caller that names another one -- the tests do,
+# with a stub -- gets that one, and so does a machine without omarchy-shell.
+wg_omarchy_select() {
+  local prompt="$1" dir payload rc=0
+  if [[ $WG_OMARCHY_SELECT != omarchy-menu-select ]] || ! command -v omarchy-shell >/dev/null 2>&1; then
+    "$WG_OMARCHY_SELECT" "$prompt" -- --width 644 --maxheight 600
+    return
+  fi
+  # Named after this process rather than made by mktemp: one fork fewer, and
+  # SUPER+G's single-instance lock means no two of these are up at once.
+  dir="${XDG_RUNTIME_DIR:-/tmp}/wingroup-select.$$"
+  mkdir -p "$dir" || return 1
+  : >"$dir/selection"
+  rm -f "$dir/done"
+  payload="$(jq -Rnc --arg p "$prompt" --arg s "$dir/selection" --arg d "$dir/done" \
+    '{mode: "select", prompt: $p, options: [inputs], selectionFile: $s, doneFile: $d,
+      width: 644, maxHeight: 600}')"
+  if omarchy-shell shell summon omarchy.menu "$payload" >/dev/null; then
+    while [[ ! -e $dir/done ]]; do
+      sleep 0.05
+    done
+    if [[ -s $dir/selection ]]; then cat "$dir/selection"; else rc=1; fi
+  else
+    rc=1
+  fi
+  rm -rf "$dir"
+  return "$rc"
+}
+
+# Writes SUPER+G's rows to $WG_MENU_CACHE. wingroup-daemon calls this whenever it
+# refreshes the bar, which it does on the window events that change the menu.
+#
+# The first line is every window address, sorted: wg_menu_cached compares it
+# with the windows open now, so a window opened or closed since the last write
+# is never shown wrong -- the menu is built live instead. Written to a temporary
+# file and renamed, so a reader never sees half of one.
+wg_menu_cache_write() {
+  local tmp
+  tmp="$WG_MENU_CACHE.$$"
+  if {
+    wg_hypr_query clients | jq -r '[.[].address] | sort | join(",")'
+    wg_menu_build "$(wg_state_read)"
+  } >"$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$WG_MENU_CACHE"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+# Prints the cached rows when they can be trusted, and fails otherwise.
+#
+# Trusted means: the daemon that keeps them current is running; the state file
+# has not changed since they were written (a group made, renamed, removed or
+# moved); and the same windows are open as when they were. What can still be
+# behind is a title or a status glyph, by at most the daemon's refresh debounce.
+wg_menu_cached() {
+  local key now
+  [[ -f $WG_MENU_CACHE ]] || return 1
+  [[ ! -e $WG_STATE_FILE || $WG_MENU_CACHE -nt $WG_STATE_FILE ]] || return 1
+  # The lock is free only when no daemon holds it.
+  [[ -e $WG_DAEMON_LOCK ]] || return 1
+  if flock -n "$WG_DAEMON_LOCK" true 2>/dev/null; then
+    return 1
+  fi
+  {
+    IFS= read -r key || return 1
+    now="$(wg_hypr_query clients | jq -r '[.[].address] | sort | join(",")')"
+    [[ $key == "$now" ]] || return 1
+    cat
+  } <"$WG_MENU_CACHE"
 }
 
 # Reads action<TAB>display on stdin, shows the picker, prints the chosen action.

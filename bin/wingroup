@@ -964,9 +964,12 @@ cmd_menu() {
   exec 9>"$lock"
   flock -n 9 || return 0
 
-  local action
+  local action rows
+  # The daemon's copy when it is current, which skips the walk over every
+  # window and process that building it takes; otherwise built here.
   # shellcheck disable=SC2119  # no args intended: build the menu for the current state
-  action="$(wg_menu_build | wg_menu_run 'Groups')"
+  rows="$(wg_menu_cached)" || rows="$(wg_menu_build)"
+  action="$(wg_menu_run 'Groups' <<<"$rows")"
   case $action in
     "")            return 0 ;;
     group:*)       cmd_activate "${action#group:}" ;;
