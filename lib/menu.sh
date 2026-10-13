@@ -7,11 +7,15 @@
 : "${WG_OMARCHY_SELECT:=omarchy-menu-select}"
 : "${WG_OMARCHY_INPUT:=omarchy-menu-input}"
 
+# Left in WG_GLYPH rather than printed: like WG_WHERE below, this runs once per
+# open window, and a command substitution per row is a fork per row.
+WG_GLYPH=""
+
 wg_status_glyph() {
   case $1 in
-    idle) printf '✳\n' ;;
-    busy) printf '◐\n' ;;
-    *)    printf '·\n' ;;
+    idle) WG_GLYPH='✳' ;;
+    busy) WG_GLYPH='◐' ;;
+    *)    WG_GLYPH='·' ;;
   esac
 }
 
@@ -150,12 +154,11 @@ wg_menu_build() {
 
   printf 'noop\t%s\n' "──────────────────────────────"
 
-  local glyph shown
   while IFS= read -r line; do
     [[ -n $line ]] || continue
     wg_row_split "$line"
-    glyph="$(wg_status_glyph "${WG_ROW[6]}")"
-    shown="$(wg_title_text "${WG_ROW[9]}")"
+    wg_status_glyph "${WG_ROW[6]}"
+    wg_title_parse "${WG_ROW[9]}"
     # Where the window *is*, which is the workspace when that workspace is a
     # group, and nowhere otherwise. Column 8 is the worktree.
     #
@@ -167,7 +170,7 @@ wg_menu_build() {
     else
       wg_menu_where "" "${WG_ROW[8]}"
     fi
-    printf 'window:%s\t  %s %-44s %s\n' "${WG_ROW[1]}" "$glyph" "$shown" "$WG_WHERE"
+    printf 'window:%s\t  %s %-44s %s\n' "${WG_ROW[1]}" "$WG_GLYPH" "$WG_TEXT" "$WG_WHERE"
   done <<<"$table"
 
   # A footer, not an action. The group rows each answer "how much is waiting in
@@ -186,14 +189,20 @@ wg_menu_build() {
 }
 
 # Every group and nothing else: the chooser for picking one to act on.
+#
+# Name and label together, NUL-delimited, in one jq -- a label is free text and
+# could hold a tab or a newline. Asking for each group's label on its own was a
+# jq per group, and this is the list SUPER+CTRL+G waits on.
 wg_group_list_build() {
   local state="${1:-$(wg_state_read)}" name label
-  while IFS= read -r name; do
+  while IFS= read -r -d '' name && IFS= read -r -d '' label; do
     [[ -n $name ]] || continue
-    label="$(wg_state_group_field "$name" label "$state")"
-    [[ -n $label ]] || label="$name"
     printf 'group:%s\t%s\n' "$name" "$label"
-  done < <(wg_state_group_names "$state")
+  done < <(jq -j '.groups[]?
+    | (.name | tostring) as $n
+    | $n, "\u0000",
+      (if (.label // "") == "" then $n else (.label | tostring) end), "\u0000"' \
+    <<<"$state")
 }
 
 # The same list plus a way out of it: sending a window to a group you have not
@@ -318,12 +327,15 @@ wg_menu_backend() {
 }
 
 # The same row read back from the Omarchy menu, trimmed of the padding either
-# side may have added or dropped.
+# side may have added or dropped. Left in WG_TRIMMED: this runs for every row
+# of the menu, and a command substitution per row is a fork per row.
+WG_TRIMMED=""
+
 wg_menu_trim() {
   local t="$1"
   t="${t#"${t%%[![:space:]]*}"}"
   t="${t%"${t##*[![:space:]]}"}"
-  printf '%s' "$t"
+  WG_TRIMMED="$t"
 }
 
 # wg_menu_run for the Omarchy menu. $1 is the prompt; the rows arrive in the
@@ -339,23 +351,27 @@ wg_menu_trim() {
 # the label -- so tabs in a row are flattened to spaces before it is shown.
 wg_menu_run_omarchy() {
   local prompt="$1" i label key choice
-  local -a labels=()
+  local -a labels=() keys=()
   local -A seen=()
   for (( i = 0; i < ${#displays[@]}; i++ )); do
     label="${displays[i]//$'\t'/ }"
-    key="$(wg_menu_trim "$label")"
+    wg_menu_trim "$label"
+    key="$WG_TRIMMED"
     seen[$key]=$(( ${seen[$key]:-0} + 1 ))
     (( seen[$key] == 1 )) || label+=" (${seen[$key]})"
     labels+=("$label")
+    wg_menu_trim "$label"
+    keys+=("$WG_TRIMMED")
   done
 
   choice="$(printf '%s\n' "${labels[@]}" \
     | "$WG_OMARCHY_SELECT" "$prompt" -- --width 644 --maxheight 600 2>/dev/null || true)"
-  choice="$(wg_menu_trim "${choice%%$'\n'*}")"
+  wg_menu_trim "${choice%%$'\n'*}"
+  choice="$WG_TRIMMED"
   [[ -n $choice ]] || return 0
 
   for (( i = 0; i < ${#labels[@]}; i++ )); do
-    [[ "$(wg_menu_trim "${labels[i]}")" == "$choice" ]] || continue
+    [[ ${keys[i]} == "$choice" ]] || continue
     [[ ${actions[i]} == noop ]] && return 0
     printf '%s\n' "${actions[i]}"
     return 0
