@@ -12,16 +12,26 @@ WG_GLYPHS_BUSY=("◐" "◑")
 # /etc/shells, read once and kept for the life of the process. wg_window_cwd is
 # called once per open window, and grepping the file each time is one fork per
 # window for a file that does not change under us.
+#
+# Read with `read`, not `$(cat ...)`: wg_window_table calls wg_window_cwd inside
+# a command substitution, so a lazy load there happened again in every window's
+# subshell -- a cat per window. The table loads it up front instead, and the
+# builtin read costs no fork for a caller that does not.
 WG_SHELLS=""
+
+wg_shells_load() {
+  [[ -z $WG_SHELLS ]] || return 0
+  local shells=""
+  IFS= read -r -d '' shells </etc/shells 2>/dev/null || true
+  # Wrapped in newlines so an unreadable or missing /etc/shells still leaves
+  # $WG_SHELLS non-empty: it stays "read", and matches nothing.
+  WG_SHELLS=$'\n'"$shells"$'\n'
+}
 
 wg_is_login_shell() {
   local shell="$1"
   [[ -n $shell ]] || return 1
-  if [[ -z $WG_SHELLS ]]; then
-    # Wrapped in newlines so an unreadable or missing /etc/shells still leaves
-    # $WG_SHELLS non-empty: it stays "read", and matches nothing.
-    WG_SHELLS=$'\n'"$(cat /etc/shells 2>/dev/null || true)"$'\n'
-  fi
+  wg_shells_load
   [[ $WG_SHELLS == *"$shell"* ]]
 }
 
@@ -48,6 +58,24 @@ wg_children_load() {
   WG_CHILDREN_LOADED=1
 }
 
+# bash's loadable realpath, when the system ships it: it resolves /proc links
+# into an array without a fork. wg_window_cwd runs once per open window, and a
+# readlink there was a process plus a process substitution for every one of
+# them. Tried once per process; where the loadable is missing, readlink it is.
+WG_REALPATH=""
+
+wg_realpath_load() {
+  [[ -z $WG_REALPATH ]] || return 0
+  WG_REALPATH=readlink
+  local lib
+  for lib in /usr/lib/bash/realpath /usr/local/lib/bash/realpath /usr/lib/x86_64-linux-gnu/bash/realpath; do
+    if [[ -f $lib ]] && enable -f "$lib" realpath 2>/dev/null; then
+      WG_REALPATH=builtin
+      return 0
+    fi
+  done
+}
+
 # Mirrors omarchy-cmd-terminal-cwd: the window's pid is the terminal, its
 # last child is the shell, and the shell's cwd is what we want.
 wg_window_cwd() {
@@ -58,30 +86,52 @@ wg_window_cwd() {
   (( WG_CHILDREN_LOADED )) || wg_children_load
   shell_pid="${WG_CHILDREN[$pid]:-}"
   [[ -n $shell_pid ]] || return 0
-  # Both links in one readlink rather than one each: whatever makes one of them
+  # Both links in one call rather than one each: whatever makes one of them
   # unreadable -- the process exited, or it is not ours -- makes both, so a
-  # result that is not exactly two lines is the same "give up" the two separate
-  # failures used to reach.
-  mapfile -t link < <(readlink -f "/proc/$shell_pid/cwd" "/proc/$shell_pid/exe" 2>/dev/null)
+  # result that is not exactly two entries is the same "give up" the two
+  # separate failures used to reach.
+  wg_realpath_load
+  if [[ $WG_REALPATH == builtin ]]; then
+    realpath -q -a link "/proc/$shell_pid/cwd" "/proc/$shell_pid/exe" 2>/dev/null || true
+  else
+    mapfile -t link < <(readlink -f "/proc/$shell_pid/cwd" "/proc/$shell_pid/exe" 2>/dev/null)
+  fi
   (( ${#link[@]} == 2 )) || return 0
   if wg_is_login_shell "${link[1]}" && [[ -d ${link[0]} ]]; then
     printf '%s\n' "${link[0]}"
   fi
 }
 
-wg_cwd_project() {
+# The project and the Claude worktree a cwd is in, left in WG_PROJECT and
+# WG_WORKTREE rather than printed -- the same reason as WG_WHERE in lib/menu.sh:
+# the table asks this once per window, and a command substitution is a fork.
+# Either is empty when the cwd is not in one.
+WG_PROJECT=""
+WG_WORKTREE=""
+
+wg_cwd_split() {
   local cwd="$1" rest
+  WG_PROJECT=""
+  WG_WORKTREE=""
   [[ -n $cwd ]] || return 0
-  [[ $cwd == "$WG_PROJECTS_DIR"/* ]] || return 0
-  rest="${cwd#"$WG_PROJECTS_DIR"/}"
-  printf '%s\n' "${rest%%/*}"
+  if [[ $cwd == "$WG_PROJECTS_DIR"/* ]]; then
+    rest="${cwd#"$WG_PROJECTS_DIR"/}"
+    WG_PROJECT="${rest%%/*}"
+  fi
+  if [[ $cwd == *"/.claude/worktrees/"* ]]; then
+    rest="${cwd#*/.claude/worktrees/}"
+    WG_WORKTREE="${rest%%/*}"
+  fi
+}
+
+wg_cwd_project() {
+  wg_cwd_split "$1"
+  [[ -z $WG_PROJECT ]] || printf '%s\n' "$WG_PROJECT"
 }
 
 wg_cwd_worktree() {
-  local cwd="$1" rest
-  [[ $cwd == *"/.claude/worktrees/"* ]] || return 0
-  rest="${cwd#*/.claude/worktrees/}"
-  printf '%s\n' "${rest%%/*}"
+  wg_cwd_split "$1"
+  [[ -z $WG_WORKTREE ]] || printf '%s\n' "$WG_WORKTREE"
 }
 
 wg_project_group() {
@@ -101,27 +151,40 @@ wg_window_group() {
   wg_project_group "$project" "$state"
 }
 
-wg_title_status() {
+# A title's status (idle, busy or plain) and its text with the status glyph
+# taken off, left in WG_STATUS and WG_TEXT. Not printed, for the same reason as
+# wg_cwd_split: both are asked once per window on every menu build.
+WG_STATUS=""
+WG_TEXT=""
+
+wg_title_parse() {
   local title="$1" glyph
+  WG_STATUS=plain
+  WG_TEXT="$title"
   for glyph in "${WG_GLYPHS_IDLE[@]}"; do
-    [[ $title == "$glyph"* ]] && { printf 'idle\n'; return 0; }
+    [[ $title == "$glyph"* ]] || continue
+    WG_STATUS=idle
+    title="${title#"$glyph"}"
+    WG_TEXT="${title# }"
+    return 0
   done
   for glyph in "${WG_GLYPHS_BUSY[@]}"; do
-    [[ $title == "$glyph"* ]] && { printf 'busy\n'; return 0; }
+    [[ $title == "$glyph"* ]] || continue
+    WG_STATUS=busy
+    title="${title#"$glyph"}"
+    WG_TEXT="${title# }"
+    return 0
   done
-  printf 'plain\n'
+}
+
+wg_title_status() {
+  wg_title_parse "$1"
+  printf '%s\n' "$WG_STATUS"
 }
 
 wg_title_text() {
-  local title="$1" glyph
-  for glyph in "${WG_GLYPHS_IDLE[@]}" "${WG_GLYPHS_BUSY[@]}"; do
-    if [[ $title == "$glyph"* ]]; then
-      title="${title#"$glyph"}"
-      printf '%s\n' "${title# }"
-      return 0
-    fi
-  done
-  printf '%s\n' "$title"
+  wg_title_parse "$1"
+  printf '%s\n' "$WG_TEXT"
 }
 
 # Both of the state's window->group lookups, flattened into one associative
@@ -173,20 +236,29 @@ wg_window_table() {
   # terminal's shell is still spawning -- an answer from a scan taken before
   # that shell existed is exactly the answer it must not get.
   wg_children_load
+  # These two as well, for the same reason: loaded inside the substitution,
+  # every window would load them again.
+  wg_realpath_load
+  wg_shells_load
 
   local address pid workspace floating title
   local cwd project worktree group status
   while IFS=$'\t' read -r address pid workspace floating title; do
+    # Still a command substitution, and the only one left per window: this is
+    # the seam the tests replace with a fixture, and they replace it with a
+    # function that prints.
     cwd="$(wg_window_cwd "$pid")"
-    project="$(wg_cwd_project "$cwd")"
-    worktree="$(wg_cwd_worktree "$cwd")"
+    wg_cwd_split "$cwd"
+    project="$WG_PROJECT"
+    worktree="$WG_WORKTREE"
     # Same precedence wg_window_group applies -- an override beats the project
     # -- resolved out of the map instead of out of two jq processes.
     group="${WG_STATE_MAP[o:$address]:-}"
     if [[ -z $group && -n $project ]]; then
       group="${WG_STATE_MAP[p:$project]:-}"
     fi
-    status="$(wg_title_status "$title")"
+    wg_title_parse "$title"
+    status="$WG_STATUS"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$address" "$pid" "$workspace" "$floating" \
       "$group" "$status" "$project" "$worktree" "$title"
