@@ -8,6 +8,8 @@ source "$WG_LIB_DIR/hypr.sh"
 source "$WG_LIB_DIR/state.sh"
 # shellcheck source=lib/resolve.sh
 source "$WG_LIB_DIR/resolve.sh"
+# shellcheck source=lib/menu.sh
+source "$WG_LIB_DIR/menu.sh"
 
 # Tests point this at a stub that replaces /proc lookups with a fixture map, as
 # bin/wingroup and bin/wingroup-waybar already do. The daemon needs it for the
@@ -80,6 +82,8 @@ wg_refresh_bar() {
   else
     wg_signal_waybar 11
     wg_signal_shell
+    # SUPER+G's rows change on the same events the bar does.
+    wg_menu_cache_write || true
   fi
 }
 
@@ -312,6 +316,8 @@ wg_daemon_main() {
 
   # Overrides belonging to windows from a previous session are dead weight.
   wg_daemon_prune
+  # So the first SUPER+G after login does not wait for the first window event.
+  wg_menu_cache_write || true
 
   local sock="${XDG_RUNTIME_DIR}/hypr/${HYPRLAND_INSTANCE_SIGNATURE}/.socket2.sock"
   [[ -S $sock ]] || { printf 'wingroup-daemon: no event socket at %s\n' "$sock" >&2; exit 1; }
