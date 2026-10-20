@@ -46,15 +46,20 @@ wg_is_login_shell() {
 declare -gA WG_CHILDREN=()
 WG_CHILDREN_LOADED=0
 
+#
+# The highest child is picked in awk, not here: a desktop with a thousand
+# processes made this a thousand-turn bash loop, a third of the window table's
+# cost, and the bar builds that table on every title change. awk hands back one
+# line per parent instead.
 wg_children_load() {
   local ppid pid
   WG_CHILDREN=()
   while read -r ppid pid; do
     [[ -n $ppid && -n $pid ]] || continue
-    if [[ -z ${WG_CHILDREN[$ppid]:-} ]] || (( pid > WG_CHILDREN[$ppid] )); then
-      WG_CHILDREN[$ppid]="$pid"
-    fi
-  done < <(ps -eo ppid=,pid= 2>/dev/null || true)
+    WG_CHILDREN[$ppid]="$pid"
+  done < <(ps -eo ppid=,pid= 2>/dev/null \
+    | awk 'NF == 2 && (!($1 in top) || $2 + 0 > top[$1] + 0) { top[$1] = $2 }
+           END { for (p in top) print p, top[p] }' || true)
   WG_CHILDREN_LOADED=1
 }
 

@@ -660,12 +660,42 @@ wg_crash_clear() {
   jq -e '.crashed | has("text")' <<<"$output"
 }
 
-# The same answer a slot gives, with its group's name beside it.
-@test "--all says for each group what its own slot would say" {
-  local slot all
-  slot="$("$WG_ROOT/bin/wingroup-waybar" 0)"
+# The same answer a slot gives, with its group's name beside it -- for every
+# group, since --all describes them in one process rather than by running each
+# slot. Ten groups as well as three, so the eighth slot's "N more" line is
+# covered too.
+wg_all_matches_slots() {
+  local all n i
   all="$("$WG_ROOT/bin/wingroup-waybar" --all)"
-  [ "$(jq -c '.groups[0] | del(.name)' <<<"$all")" = "$(jq -c . <<<"$slot")" ]
+  n="$(jq '.groups | length' <<<"$all")"
+  [ "$n" -eq "$(jq '.groups | length' "$WG_STATE_DIR/state.json")" ]
+  for (( i = 0; i < n; i++ )); do
+    [ "$(jq -c ".groups[$i] | del(.name)" <<<"$all")" = \
+      "$(jq -c . <<<"$("$WG_ROOT/bin/wingroup-waybar" "$i")")" ]
+  done
+}
+
+@test "--all says for each group what its own slot would say" {
+  wg_all_matches_slots
+}
+
+@test "--all says for each of ten groups what its own slot would say" {
+  wg_seed_state state-many.json
+  wg_all_matches_slots
+}
+
+# The bar redraws on every window title change. Each group used to cost its own
+# state read, monitors query and handful of jq calls; now a redraw costs the
+# same however many groups there are.
+@test "--all costs no more jq for ten groups than for three" {
+  local three
+  wg_count_jq
+  "$WG_ROOT/bin/wingroup-waybar" --all >/dev/null
+  three="$(jq_calls)"
+  wg_seed_state state-many.json
+  : >"$WG_JQ_LOG"
+  "$WG_ROOT/bin/wingroup-waybar" --all >/dev/null
+  [ "$(jq_calls)" -eq "$three" ]
 }
 
 # Once is the point: the window table is built once for every group.

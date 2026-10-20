@@ -83,7 +83,84 @@ BarWidget {
 
   function refresh() {
     if (listProcess.running) { owed = true; return }
+    root.runAfterSwitch = root.switchSeen
     listProcess.running = true
+  }
+
+  // --- a click -------------------------------------------------------------
+  //
+  // The button lights up the moment it is clicked, not when the redraw that the
+  // switch causes lands. That redraw is a window table and a few jq calls, a
+  // good part of a second when the machine is busy, and until it lands the bar
+  // still marks the old group: the switch has happened, but the bar says it has
+  // not, so it reads as a slow switch -- and a second click to make sure of it
+  // is how the double click below got found.
+  //
+  // So the clicked group is marked active straight away, and kept so over any
+  // answer that was being worked out before the switch happened -- one of those
+  // still names the old group, and would put it back for a moment. The first
+  // answer begun after Hyprland reported the switch is the truth, and replaces
+  // the guess. A click that switches nothing (the group was already in front)
+  // gets no such report, so the guess also runs out on its own.
+  property string optimistic: ""
+  property bool switchSeen: false
+  property bool runAfterSwitch: false
+
+  function activate(name) {
+    // execDetached with an argv, not bar.run(): run() goes through `bash -lc`,
+    // and a login shell's profile costs ~40 ms before wingroup even starts.
+    Quickshell.execDetached(["wingroup", "activate", name])
+    root.optimistic = name
+    root.switchSeen = false
+    root.groups = root.markActive(root.groups, name)
+    optimisticExpiry.restart()
+  }
+
+  // A copy of groups with $name the active one. Where it is matters to its own
+  // state class only, so active, visible and busy give way; idle heat and a
+  // crash are facts about the group and stay.
+  function markActive(groups, name) {
+    var out = []
+    for (var i = 0; i < groups.length; i++) {
+      var g = groups[i], copy = {}
+      for (var k in g) copy[k] = g[k]
+      var cs = root.classes(g).filter(function (c) {
+        return c !== "active" && (g.name !== name || (c !== "visible" && c !== "busy"))
+      })
+      if (g.name === name) cs.unshift("active")
+      copy["class"] = cs
+      out.push(copy)
+    }
+    return out
+  }
+
+  Timer {
+    id: optimisticExpiry
+    interval: 2000
+    repeat: false
+    onTriggered: if (root.optimistic !== "") { root.optimistic = ""; root.refresh() }
+  }
+
+  // A double click on a group's button is one switch, not a bar gesture.
+  //
+  // The bar lays a MouseArea of its own over every module and hands left clicks
+  // to the button under them. It has no double-click handler and propagates
+  // composed events, so a double click is passed down to the first MouseArea
+  // under the pointer that does have one -- which was the bar's own, and the
+  // bar's double click toggles its transparency. Clicking a group twice in
+  // quick succession made the bar see-through.
+  //
+  // So WidgetButton's MouseArea is given a handler: it sits between the two,
+  // takes the double click, and the bar never sees it. The bar then does not
+  // report the second release as another click either, so a double click is one
+  // switch. Double-clicking empty bar is untouched and still toggles. Checked
+  // against a copy of the bar's layering under qmltestrunner (Qt 6.11).
+  function keepDoubleClick(button) {
+    for (var i = 0; i < button.children.length; i++) {
+      var child = button.children[i]
+      if (child && child.doubleClicked !== undefined && child.pressAndHoldInterval !== undefined)
+        child.doubleClicked.connect(function (mouse) { mouse.accepted = true })
+    }
   }
 
   Process {
@@ -95,7 +172,12 @@ BarWidget {
       onStreamFinished: {
         try {
           var doc = JSON.parse(String(text || "{}"))
-          root.groups = doc.groups || []
+          var groups = doc.groups || []
+          if (root.optimistic !== "") {
+            if (root.runAfterSwitch) root.optimistic = ""
+            else groups = root.markActive(groups, root.optimistic)
+          }
+          root.groups = groups
           root.crashed = doc.crashed || { text: "", tooltip: "" }
         } catch (e) {
           // A half-written answer is not worth a broken bar: keep the last one.
@@ -129,8 +211,14 @@ BarWidget {
     function onRawEvent(event) {
       if (!event || !event.name) return
       var name = String(event.name)
-      if (/^(windowtitle|openwindow|closewindow|movewindow|workspace|focusedmon|moveworkspace|activewindow)/.test(name))
+      // A switch is redrawn now, not after the debounce: it is one event, not a
+      // burst, and it is the one somebody is watching the bar for.
+      if (/^(workspace|focusedmon)/.test(name)) {
+        root.switchSeen = true
+        root.refresh()
+      } else if (/^(windowtitle|openwindow|closewindow|movewindow|moveworkspace|activewindow)/.test(name)) {
         debounce.restart()
+      }
     }
   }
 
@@ -176,7 +264,9 @@ BarWidget {
         horizontalMargin: 6
         verticalPadding: 6
         fixedHeight: root.barSize
-        onPressed: function() { root.run("wingroup activate " + Util.shellQuote(modelData.name)) }
+        id: groupButton
+        onPressed: function() { root.activate(modelData.name) }
+        Component.onCompleted: root.keepDoubleClick(groupButton)
       }
     }
 
