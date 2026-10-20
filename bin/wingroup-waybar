@@ -176,30 +176,8 @@ main() {
   # all. A machine where nothing has died has no crash file: wg_crashed_clear
   # removes it rather than leaving an empty document behind, precisely so that
   # this stays a [[ -f ]] and not a jq for the rest of the boot.
-  local -a crash_rows=() crash_lines=()
-  if [[ -f $WG_CRASHED_FILE ]]; then
-    mapfile -t crash_rows < <(wg_crashed_rows)
-  fi
-  if (( ${#crash_rows[@]} )); then
-    # wg_window_table loads WG_STATE_MAP too, but it runs inside a process
-    # substitution -- the map it filled died with that subshell, so this is not
-    # a duplicate load. It costs a jq, so it is paid only when there is a crash
-    # to place, which on a machine that is behaving is never.
-    wg_state_map_load "$state"
-    local row rest cwd killed_at
-    for row in "${crash_rows[@]}"; do
-      # Peeled apart by expansion, not `IFS=$'\t' read -r a b c`: the session id
-      # column is empty for a session that was already running when the hook was
-      # installed, and tab is IFS whitespace, so read would collapse that empty
-      # column and slide the directory into the id. Same trap wg_row_split
-      # exists for.
-      rest="${row#*$'\t'}"
-      cwd="${rest%%$'\t'*}"
-      killed_at="${rest#*$'\t'}"
-      [[ "$(wg_crashed_group "$cwd")" == "$name" ]] || continue
-      crash_lines+=("Crashed: $cwd — $(wg_crash_when "$killed_at")")
-    done
-  fi
+  wg_crash_rows_load
+  wg_group_crash_lines "$name" "$state"
 
   # activeworkspace answers for the focused monitor only, which on a
   # multi-monitor desktop is a lie by omission: a group can be on screen, in
@@ -212,22 +190,101 @@ main() {
   # Without it -- and it has not been confirmed that every waybar build and
   # config exports it -- the reference monitor is the focused one, which is
   # exactly the behaviour this module has always had.
-  #
-  # Two lines out of one jq: the reference monitor's active workspace, then how
-  # many *other* monitors have this group's workspace active.
-  local -a monitor_ws=()
-  mapfile -t monitor_ws < <(wg_hypr_query monitors | jq -r \
-    --arg out "${WAYBAR_OUTPUT_NAME:-}" --arg n "$name" '
+  wg_monitors_load
+
+  projects="$(jq -r --arg n "$name" \
+    'first(.groups[] | select(.name == $n) | .projects) | join(", ")' <<<"$state")"
+
+  WG_GROUP_NAMES=("${names[@]}")
+  wg_slot_describe "$slot" "$name" "$label" "$projects" "$total" "$idle" "$busy"
+  wg_emit "$WG_DESC_TEXT" "$WG_DESC_TOOLTIP" ${WG_DESC_CLASSES[@]+"${WG_DESC_CLASSES[@]}"}
+}
+
+# Where every monitor's active workspace is, from one query: WG_HERE is the
+# reference monitor's, WG_ELSEWHERE every other monitor's. Asked once per
+# redraw, not once per group -- the answer is the same for all of them. The
+# reference monitor is the one WAYBAR_OUTPUT_NAME names, or the focused one.
+WG_HERE=""
+declare -ga WG_ELSEWHERE=()
+
+wg_monitors_load() {
+  local -a lines=()
+  mapfile -t lines < <(wg_hypr_query monitors | jq -r \
+    --arg out "${WAYBAR_OUTPUT_NAME:-}" '
       (if $out == "" then first(.[] | select(.focused == true))
        else first(.[] | select(.name == $out)) end // null) as $self
       | ($self.activeWorkspace.name // ""),
-        ([ .[]
-           | select(.name != ($self.name // ""))
-           | select(.activeWorkspace.name == $n) ] | length)')
-  local here="${monitor_ws[0]:-}" elsewhere="${monitor_ws[1]:-0}"
+        (.[] | select(.name != ($self.name // "")) | .activeWorkspace.name // "")')
+  WG_HERE="${lines[0]:-}"
+  WG_ELSEWHERE=("${lines[@]:1}")
+}
+
+# Sessions systemd-oomd killed, as the crash file lists them, into WG_CRASH_ROWS
+# -- or nothing, for free, when there is no crash file. Read once per redraw.
+declare -ga WG_CRASH_ROWS=()
+
+wg_crash_rows_load() {
+  WG_CRASH_ROWS=()
+  if [[ -f $WG_CRASHED_FILE ]]; then
+    mapfile -t WG_CRASH_ROWS < <(wg_crashed_rows)
+  fi
+}
+
+# The crashes in WG_CRASH_ROWS that belong to group $1, as tooltip lines, into
+# WG_CRASH_LINES.
+declare -ga WG_CRASH_LINES=()
+WG_BAR_MAP_LOADED=0
+
+wg_group_crash_lines() {
+  local name="$1" state="$2" row rest cwd killed_at
+  WG_CRASH_LINES=()
+  (( ${#WG_CRASH_ROWS[@]} )) || return 0
+  # wg_window_table loads WG_STATE_MAP too, but it runs inside a process
+  # substitution -- the map it filled died with that subshell, so this is not
+  # a duplicate load. It costs a jq, so it is paid only when there is a crash
+  # to place, which on a machine that is behaving is never.
+  if (( ! WG_BAR_MAP_LOADED )); then
+    wg_state_map_load "$state"
+    WG_BAR_MAP_LOADED=1
+  fi
+  for row in "${WG_CRASH_ROWS[@]}"; do
+    # Peeled apart by expansion, not `IFS=$'\t' read -r a b c`: the session id
+    # column is empty for a session that was already running when the hook was
+    # installed, and tab is IFS whitespace, so read would collapse that empty
+    # column and slide the directory into the id. Same trap wg_row_split
+    # exists for.
+    rest="${row#*$'\t'}"
+    cwd="${rest%%$'\t'*}"
+    killed_at="${rest#*$'\t'}"
+    [[ "$(wg_crashed_group "$cwd")" == "$name" ]] || continue
+    WG_CRASH_LINES+=("Crashed: $cwd — $(wg_crash_when "$killed_at")")
+  done
+}
+
+# What one group's button says, from facts already gathered: its text, tooltip
+# and classes, into WG_DESC_TEXT, WG_DESC_TOOLTIP and WG_DESC_CLASSES. Reads
+# WG_HERE, WG_ELSEWHERE and WG_CRASH_LINES. No processes beyond a superscript's
+# subshell, so describing every group costs what describing one did.
+#
+# The overflow line ("2 more: ...") is read off WG_GROUP_NAMES, every group's
+# name in order, which the caller fills.
+#
+#   wg_slot_describe <slot> <name> <label> <projects> <total> <idle> <busy>
+declare -ga WG_GROUP_NAMES=()
+WG_DESC_TEXT=""
+WG_DESC_TOOLTIP=""
+declare -ga WG_DESC_CLASSES=()
+
+wg_slot_describe() {
+  local slot="$1" name="$2" label="$3" projects="$4"
+  local total="$5" idle="$6" busy="$7"
+  local elsewhere=0 ws
+  for ws in ${WG_ELSEWHERE[@]+"${WG_ELSEWHERE[@]}"}; do
+    [[ $ws == "$name" ]] && elsewhere=$(( elsewhere + 1 ))
+  done
 
   local class=""
-  if [[ $here == "$name" ]]; then
+  if [[ $WG_HERE == "$name" ]]; then
     class="active"
   elif (( elsewhere > 0 )); then
     class="visible"
@@ -254,32 +311,31 @@ main() {
   # a group can be the one you are looking at, warm with idle sessions, and
   # still be short a session oomd took while you were elsewhere. So it is
   # another class beside them, never instead of one.
-  (( ${#crash_lines[@]} == 0 )) || classes+=("crashed")
-
-  projects="$(jq -r --arg n "$name" \
-    'first(.groups[] | select(.name == $n) | .projects) | join(", ")' <<<"$state")"
+  (( ${#WG_CRASH_LINES[@]} == 0 )) || classes+=("crashed")
 
   local tooltip
-  tooltip="$(printf '%s — %d windows · %d idle · %d busy' "$label" "$total" "$idle" "$busy")"
+  printf -v tooltip '%s — %d windows · %d idle · %d busy' "$label" "$total" "$idle" "$busy"
   # Directly under the counts, above the projects: what died is the one thing in
   # here that needs doing something about, and `wingroup crashed --restore` is
   # what does it.
   local crash_line
-  for crash_line in ${crash_lines[@]+"${crash_lines[@]}"}; do
+  for crash_line in ${WG_CRASH_LINES[@]+"${WG_CRASH_LINES[@]}"}; do
     tooltip+=$'\n'"$crash_line"
   done
   [[ -n $projects ]] && tooltip+=$'\n'"Projects: $projects"
 
-  if (( slot == WG_SLOTS - 1 && ${#names[@]} > WG_SLOTS )); then
-    local -a overflow=("${names[@]:WG_SLOTS}")
+  if (( slot == WG_SLOTS - 1 && ${#WG_GROUP_NAMES[@]} > WG_SLOTS )); then
+    local -a overflow=("${WG_GROUP_NAMES[@]:WG_SLOTS}")
     local joined
-    joined="$(printf '%s, ' "${overflow[@]}")"
+    printf -v joined '%s, ' "${overflow[@]}"
     tooltip+=$'\n'"${#overflow[@]} more: ${joined%, }"
   fi
 
   # The superscript counts idle sessions, not busy ones: the point of the bar is
   # spotting a Claude session that has finished and can be given the next thing.
-  wg_emit "$label$(wg_superscript "$idle")" "$tooltip" ${classes[@]+"${classes[@]}"}
+  WG_DESC_TEXT="$label$(wg_superscript "$idle")"
+  WG_DESC_TOOLTIP="$tooltip"
+  WG_DESC_CLASSES=(${classes[@]+"${classes[@]}"})
 }
 
 # Every group, and the crash button's state, as one JSON document:
@@ -295,23 +351,72 @@ main() {
 # the whole window table to describe a single group: eight slots, the same
 # table eight times, 1.74 seconds of work per redraw on a desktop with eight
 # groups. Here the table is built once and handed to every slot.
+#
+# And everything else is read once per redraw too. This used to run each slot's
+# main() in a subshell, which re-read the state file and asked jq and hyprctl
+# the same questions for every group -- eight processes a group, 0.5 of the
+# 0.64 seconds a redraw took on nine groups, and the bar redraws on every window
+# title change. Now the state, the monitors and the counts are read once, every
+# group is described in this process, and one jq writes the document.
 wg_bar_all() {
-  local state name i out slot_json crashed_json
-  local -a names=()
+  local state line name label projects rest ws i
   state="$(wg_state_read)"
-  mapfile -t names < <(wg_state_group_names "$state")
 
   WG_BAR_TABLE="$(wg_window_table)"
-  export WG_BAR_TABLE
 
-  out='[]'
-  for i in "${!names[@]}"; do
-    name="${names[i]}"
-    slot_json="$(main "$i")"
-    out="$(jq -c --arg n "$name" --argjson s "$slot_json" '. + [($s + {name: $n})]' <<<"$out")"
+  # Name, label and projects of every group, one tab-separated line each.
+  local -a rows=()
+  mapfile -t rows < <(jq -r '.groups[]
+    | [.name, (.label // ""), ((.projects // []) | join(", "))] | join("\t")' <<<"$state")
+  WG_GROUP_NAMES=()
+  for line in ${rows[@]+"${rows[@]}"}; do
+    WG_GROUP_NAMES+=("${line%%$'\t'*}")
   done
-  crashed_json="$(main crashed)"
-  jq -cn --argjson g "$out" --argjson c "$crashed_json" '{groups: $g, crashed: $c}'
+
+  # Every window counted onto the workspace it is on, in one pass -- main()
+  # says why by workspace, and why wg_row_split.
+  local -A total=() idle=() busy=()
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    wg_row_split "$line"
+    ws="${WG_ROW[3]}"
+    [[ -n $ws ]] || continue
+    total["$ws"]=$(( ${total["$ws"]:-0} + 1 ))
+    case ${WG_ROW[6]} in
+      idle) idle["$ws"]=$(( ${idle["$ws"]:-0} + 1 )) ;;
+      busy) busy["$ws"]=$(( ${busy["$ws"]:-0} + 1 )) ;;
+    esac
+  done <<<"$WG_BAR_TABLE"
+
+  wg_monitors_load
+  wg_crash_rows_load
+
+  # Four arguments a group for the one jq below: name, text, tooltip, and the
+  # classes space-separated.
+  local -a args=()
+  for i in "${!rows[@]}"; do
+    line="${rows[i]}"
+    name="${line%%$'\t'*}"
+    rest="${line#*$'\t'}"
+    label="${rest%%$'\t'*}"
+    projects="${rest#*$'\t'}"
+    [[ -n $label ]] || label="$name"
+    wg_group_crash_lines "$name" "$state"
+    wg_slot_describe "$i" "$name" "$label" "$projects" \
+      "${total["$name"]:-0}" "${idle["$name"]:-0}" "${busy["$name"]:-0}"
+    args+=("$name" "$WG_DESC_TEXT" "$WG_DESC_TOOLTIP" "${WG_DESC_CLASSES[*]-}")
+  done
+
+  # Each group in wg_emit's shape -- "class" a list when there are several, else
+  # the one name or "" -- with its name after.
+  jq -cn --argjson c "$(main crashed)" '
+    $ARGS.positional as $a
+    | {groups: [range(0; $a | length; 4) as $i
+        | {text: $a[$i + 1], tooltip: $a[$i + 2],
+           class: ($a[$i + 3] | split(" ") | map(select(. != ""))
+                   | if length > 1 then . else (.[0] // "") end),
+           name: $a[$i]}],
+       crashed: $c}' --args -- ${args[@]+"${args[@]}"}
 }
 
 if [[ ${1:-} == --all ]]; then
