@@ -295,8 +295,11 @@ Three pieces do it:
   processes to keep the map current. That scan is the fallback for sessions that
   predate the hook: it cannot learn an id, but it does learn that *something* was
   running in that scope, in which directory, and — asking the compositor once a
-  pass — which workspace its window is on. After every scan it also writes
-  the map out to disk, which is what the next boot's restore reads instead of
+  pass — which workspace its window is on. A scan writes the session map once,
+  for every terminal it found together (one locked `jq` run, with the
+  old-key migration and the expiry in it), because one run per terminal cost
+  about 5 s of CPU a pass with 41 sessions and about 0.5 s batched. After
+  every scan it also writes the map out to disk, which is what the next boot's restore reads instead of
   guessing — see [Startup
   integration](#startup-integration-with-restore-claudesh).
 - **`wingroup crashed`** reads what the two of them left behind.

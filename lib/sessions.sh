@@ -279,6 +279,31 @@ wg_scope_workspaces() {
       done
 }
 
+# shellcheck disable=SC2016  # jq variables, not shell ones
+WG_SESSIONS_RECORD_DEF='
+def wg_record($scope; $session; $cwd; $source; $tty; $ws; $resume; $at; $mon; $size; $msize; $fill; $now):
+    .sessions[$scope] =
+        {session: "", source: $source}
+      + (.sessions[$scope] // {})
+      + {cwd: $cwd, seen: ($now | tonumber)}
+      + (if $session == "" then {} else {session: $session, source: $source} end)
+      + (if $tty == "" then {} else {tty: ($tty | tonumber)} end)
+      + (if $ws == "" then {} else {workspace: $ws} end)
+      + (if $resume == "" then {} else {resume_cwd: $resume} end)
+      + (if $at == "" then {} else {at: ($at | split(",") | map(tonumber))} end)
+      + (if $mon == "" then {} else {monitor: $mon} end)
+      + (if $size == "" then {} else {size: ($size | split(",") | map(tonumber))} end)
+      + (if $msize == "" then {} else {mon_size: ($msize | split(",") | map(tonumber))} end)
+    # ${12}: an id to use only when the entry has none. See wg_proc_resume_id --
+    # it fills a gap and never overrides, so a conversation switched with
+    # /resume inside a session keeps the id the hook recorded for the switch.
+    | if $fill != "" and ((.sessions[$scope].session // "") == "")
+      then .sessions[$scope] += ({session: $fill}
+             + (if (.sessions[$scope].resume_cwd // "") == "" then {resume_cwd: $cwd} else {} end))
+      else . end
+;
+'
+
 # Records the session running in $1. $2 is its id (empty when the caller cannot
 # know it), $3 its directory, $4 how we found out -- "hook" or "scan".
 #
@@ -312,27 +337,10 @@ wg_sessions_record() {
   # moved, and the scan faithfully records where to; resuming from there finds
   # no conversation and quietly starts a new one. Two of twelve sessions after
   # one reboot, which from the outside looks like "they all came back empty".
-  # shellcheck disable=SC2016  # these are jq variables, not shell ones
-  wg_runtime_update "$WG_SESSIONS_FILE" "$(wg_sessions_default)" '
-    .sessions[$scope] =
-        {session: "", source: $source}
-      + (.sessions[$scope] // {})
-      + {cwd: $cwd, seen: ($now | tonumber)}
-      + (if $session == "" then {} else {session: $session, source: $source} end)
-      + (if $tty == "" then {} else {tty: ($tty | tonumber)} end)
-      + (if $ws == "" then {} else {workspace: $ws} end)
-      + (if $resume == "" then {} else {resume_cwd: $resume} end)
-      + (if $at == "" then {} else {at: ($at | split(",") | map(tonumber))} end)
-      + (if $mon == "" then {} else {monitor: $mon} end)
-      + (if $size == "" then {} else {size: ($size | split(",") | map(tonumber))} end)
-      + (if $msize == "" then {} else {mon_size: ($msize | split(",") | map(tonumber))} end)
-    # ${12}: an id to use only when the entry has none. See wg_proc_resume_id --
-    # it fills a gap and never overrides, so a conversation switched with
-    # /resume inside a session keeps the id the hook recorded for the switch.
-    | if $fill != "" and ((.sessions[$scope].session // "") == "")
-      then .sessions[$scope] += ({session: $fill}
-             + (if (.sessions[$scope].resume_cwd // "") == "" then {resume_cwd: $cwd} else {} end))
-      else . end
+  # shellcheck disable=SC2016  # jq variables, not shell ones
+  wg_runtime_update "$WG_SESSIONS_FILE" "$(wg_sessions_default)" \
+    "$WG_SESSIONS_RECORD_DEF"'
+    wg_record($scope; $session; $cwd; $source; $tty; $ws; $resume; $at; $mon; $size; $msize; $fill; $now)
   ' --arg scope "$scope" --arg session "$session" --arg cwd "$cwd" \
     --arg source "$source" --arg now "$now" --arg tty "$tty" --arg ws "$workspace" \
     --arg resume "$resume_cwd" --arg at "$at" --arg mon "$monitor" \
@@ -373,6 +381,9 @@ wg_proc_resume_id() {
   return 0
 }
 
+# The scan's whole write, in one jq run: every terminal it found, then the
+# expiry. Each row is one terminal; rows are split on \x1e, fields on \x1f.
+#
 # Moves an entry written under a bare scope onto its terminal's key.
 #
 # Entries outlive the change that introduced the key: the hook writes the
@@ -387,17 +398,19 @@ wg_proc_resume_id() {
 # The old entry is the base and the new one wins any field they share: the scan
 # has just measured everything except the session id, and the id is the one
 # thing only the old entry can have.
-wg_sessions_migrate_scope() {
-  local scope="$1" key="$2"
-  [[ -n $scope && -n $key && $scope != "$key" ]] || return 0
-  # shellcheck disable=SC2016  # jq variables
-  wg_runtime_update "$WG_SESSIONS_FILE" "$(wg_sessions_default)" '
-    if (.sessions[$old] // null) == null then .
-    else .sessions[$new] = (.sessions[$old] + (.sessions[$new] // {}))
-         | del(.sessions[$old])
-    end
-  ' --arg old "$scope" --arg new "$key"
-}
+# shellcheck disable=SC2016  # jq variables, not shell ones
+WG_SESSIONS_BATCH_FILTER='
+def wg_migrate($old; $new):
+  if (.sessions[$old] // null) == null then .
+  else .sessions[$new] = (.sessions[$old] + (.sessions[$new] // {}))
+       | del(.sessions[$old])
+  end;
+reduce ($rows | split("\u001e") | map(select(length > 0) | split("\u001f")))[] as $r (.;
+  wg_migrate($r[1]; $r[0])
+  | wg_record($r[0]; ""; $r[2]; "scan"; $r[3]; $r[4]; ""; $r[5]; $r[6]; $r[7]; $r[8]; $r[9]; $now))
+| .sessions |= with_entries(select(
+    (($now | tonumber) - (.value.seen // 0)) < ($ttl | tonumber)))
+'
 
 # Refreshes the map from every live claude process.
 #
@@ -429,7 +442,7 @@ wg_sessions_scan_prefer() {
 }
 
 wg_sessions_scan() {
-  local dir pid comm scope cwd tty key fill found=0
+  local dir pid comm scope cwd tty key fill rows='' found=0 now
   local -a stat=()
   local -A pick_pid=() pick_tty=() pick_cwd=() pick_scope=() terminals_in=()
   # One compositor query for the whole pass, not one per session: the answer is
@@ -520,7 +533,6 @@ wg_sessions_scan() {
     if [[ ${pick_tty[$key]:-0} == 0 && -n ${terminals_in[$scope]:-} ]]; then
       continue
     fi
-    wg_sessions_migrate_scope "$scope" "$key"
     # Where the window is, but only when the scope has one window to speak of.
     #
     # The compositor answers "which window belongs to this scope", and for two
@@ -537,28 +549,17 @@ wg_sessions_scan() {
     # hook's -- folded into the one write the scan makes anyway.
     fill="$(wg_proc_resume_id "${pick_pid[$key]}")"
     if (( ${windows_of[$scope]:-0} == 1 )); then
-      wg_sessions_record "$key" "" "${pick_cwd[$key]}" scan "${pick_tty[$key]}" \
-        "${ws_of[$scope]:-}" "" "${at_of[$scope]:-}" "${mon_of[$scope]:-}" \
-        "${size_of[$scope]:-}" "${monsize_of[$scope]:-}" "$fill"
+      rows+="$key"$'\x1f'"$scope"$'\x1f'"${pick_cwd[$key]}"$'\x1f'"${pick_tty[$key]}"$'\x1f'"${ws_of[$scope]:-}"$'\x1f'"${at_of[$scope]:-}"$'\x1f'"${mon_of[$scope]:-}"$'\x1f'"${size_of[$scope]:-}"$'\x1f'"${monsize_of[$scope]:-}"$'\x1f'"$fill"$'\x1e'
     else
-      wg_sessions_record "$key" "" "${pick_cwd[$key]}" scan "${pick_tty[$key]}" \
-        "" "" "" "" "" "" "$fill"
+      rows+="$key"$'\x1f'"$scope"$'\x1f'"${pick_cwd[$key]}"$'\x1f'"${pick_tty[$key]}"$'\x1f\x1f\x1f\x1f\x1f\x1f'"$fill"$'\x1e'
     fi
     found=$(( found + 1 ))
   done
-  wg_sessions_expire
-  printf '%s\n' "$found"
-}
-
-# Drops entries nothing has refreshed for WG_SESSIONS_TTL seconds.
-wg_sessions_expire() {
-  local now
   now="$(date +%s)"
-  # shellcheck disable=SC2016  # jq variables
-  wg_runtime_update "$WG_SESSIONS_FILE" "$(wg_sessions_default)" '
-    .sessions |= with_entries(select(
-      (($now | tonumber) - (.value.seen // 0)) < ($ttl | tonumber)))
-  ' --arg now "$now" --arg ttl "$WG_SESSIONS_TTL"
+  wg_runtime_update "$WG_SESSIONS_FILE" "$(wg_sessions_default)" \
+    "$WG_SESSIONS_RECORD_DEF$WG_SESSIONS_BATCH_FILTER" \
+    --arg rows "$rows" --arg now "$now" --arg ttl "$WG_SESSIONS_TTL"
+  printf '%s\n' "$found"
 }
 
 # The `env` arguments that strip this process's Claude Code variables from a
