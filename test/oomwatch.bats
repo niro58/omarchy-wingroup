@@ -1023,6 +1023,49 @@ notified_twice() { (( $(notifies) >= 2 )); }
   [ "$(jq -r --arg s "$WG_SCOPE" '.sessions | has($s)' "$WG_SESSIONS_FILE")" = "false" ]
 }
 
+# One scan is one locked write however many terminals it finds: a write is a
+# jq run and a file replace, and forty of them every fifteen seconds was the
+# load.
+@test "a scan of several terminals writes the session map once" {
+  local n
+  for n in 1 2 3 4 5; do
+    wg_fake_proc "$((2000 + n))" claude "$(wg_fake_scope "0000000$n")" "$WG_TMP/projects/p$n" "$((34815 + n))"
+  done
+  eval "wg_orig_$(declare -f wg_runtime_update)"
+  wg_runtime_update() { printf 'w\n' >>"$WG_TMP/writes"; wg_orig_wg_runtime_update "$@"; }
+
+  run wg_sessions_scan
+  [ "$output" -eq 5 ]
+  [ "$(wc -l <"$WG_TMP/writes")" -eq 1 ]
+  [ "$(jq '.sessions | length' "$WG_SESSIONS_FILE")" -eq 5 ]
+}
+
+# Rows travel through one string, so a field read from the wrong slot would
+# hand a terminal another's directory or tty, and nothing else would notice.
+@test "a batched scan keeps each terminal's own directory, tty, id and migrated entry" {
+  local n key
+  wg_sessions_record "$(wg_fake_scope 00000003)" "hooked-id" "$WG_TMP/projects/p3" hook "" "" "$WG_TMP/projects/p3"
+  wg_sessions_record "$(wg_fake_scope 00000009)" "stale" "$WG_TMP/projects/p9" hook
+  jq '.sessions |= map_values(if .session == "stale" then .seen = 1 else . end)' "$WG_SESSIONS_FILE" >"$WG_TMP/m.json"
+  mv "$WG_TMP/m.json" "$WG_SESSIONS_FILE"
+  for n in 1 2 3 4; do
+    wg_fake_proc "$((2000 + n))" claude "$(wg_fake_scope "0000000$n")" "$WG_TMP/projects/p$n" "$((34815 + n))"
+  done
+
+  run wg_sessions_scan
+  [ "$output" -eq 4 ]
+  [ "$(jq '.sessions | length' "$WG_SESSIONS_FILE")" -eq 4 ]
+  for n in 1 2 3 4; do
+    key="$(wg_sessions_key "$(wg_fake_scope "0000000$n")" "$((34815 + n))")"
+    [ "$(jq -r --arg k "$key" '.sessions[$k].cwd' "$WG_SESSIONS_FILE")" = "$WG_TMP/projects/p$n" ]
+    [ "$(jq -r --arg k "$key" '.sessions[$k].tty' "$WG_SESSIONS_FILE")" = "$((34815 + n))" ]
+  done
+  key="$(wg_sessions_key "$(wg_fake_scope 00000003)" 34818)"
+  [ "$(jq -r --arg k "$key" '.sessions[$k].session' "$WG_SESSIONS_FILE")" = "hooked-id" ]
+  [ "$(jq -r --arg k "$(wg_fake_scope 00000003)" '.sessions | has($k)' "$WG_SESSIONS_FILE")" = "false" ]
+  [ "$(jq -r '[.sessions[].session] | index("stale")' "$WG_SESSIONS_FILE")" = "null" ]
+}
+
 # --- the id from a relaunched session's own command line ----------------------
 #
 # The hook is the only thing Claude tells a session id to, and for a day it
@@ -1182,4 +1225,31 @@ wg_fake_cmdline() {
   run "$WG_ROOT/bin/wingroup-oomwatch" --once
   [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 1 ]
   [ "$(jq -r '.empty_since // "unset"' "$WG_SNAPSHOT_FILE")" = "unset" ]
+}
+
+@test "the next scan is due a full interval after the last one ends, not after it starts" {
+  export WG_SCAN_INTERVAL=2
+  run env WG_OOMWATCH_NO_MAIN=1 bash -c '
+    source "$1/bin/wingroup-oomwatch"
+    wg_sessions_scan() { sleep 2.2; printf 0; }
+    wg_snapshot_write() { :; }
+    wg_oomwatch_scan
+    if wg_oomwatch_scan_due; then echo scanned-at-once; else echo waited; fi
+  ' _ "$WG_ROOT"
+  [ "$status" -eq 0 ]
+  [ "$output" = "waited" ]
+}
+
+@test "a slow scan stretches the gap to three times its own length" {
+  export WG_SCAN_INTERVAL=1
+  run env WG_OOMWATCH_NO_MAIN=1 bash -c '
+    source "$1/bin/wingroup-oomwatch"
+    wg_sessions_scan() { sleep 2.2; printf 0; }
+    wg_snapshot_write() { :; }
+    wg_oomwatch_scan
+    sleep 3
+    if wg_oomwatch_scan_due; then echo scanned-too-soon; else echo waited; fi
+  ' _ "$WG_ROOT"
+  [ "$status" -eq 0 ]
+  [ "$output" = "waited" ]
 }

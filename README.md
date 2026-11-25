@@ -295,8 +295,11 @@ Three pieces do it:
   processes to keep the map current. That scan is the fallback for sessions that
   predate the hook: it cannot learn an id, but it does learn that *something* was
   running in that scope, in which directory, and — asking the compositor once a
-  pass — which workspace its window is on. After every scan it also writes
-  the map out to disk, which is what the next boot's restore reads instead of
+  pass — which workspace its window is on. A scan writes the session map once,
+  for every terminal it found together (one locked `jq` run, with the
+  old-key migration and the expiry in it), because one run per terminal cost
+  about 5 s of CPU a pass with 41 sessions and about 0.5 s batched. After
+  every scan it also writes the map out to disk, which is what the next boot's restore reads instead of
   guessing — see [Startup
   integration](#startup-integration-with-restore-claudesh).
 - **`wingroup crashed`** reads what the two of them left behind.
@@ -1087,7 +1090,7 @@ All optional; the defaults are what install and the autostart lines use.
 | `WG_RESTORE_SCRIPT` | `~/restore-claude.sh` | Restore, install — the fallback when there is no snapshot |
 | `WG_RESTORE_SETTLE` | `5` (seconds) | Restore |
 | `WG_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/wingroup` | Hook, watcher, bar, `crashed` |
-| `WG_SCAN_INTERVAL` | `15` (seconds) | Watcher — also how stale the boot snapshot can be |
+| `WG_SCAN_INTERVAL` | `15` (seconds, counted from the end of one scan to the start of the next, and never less than three times the last scan took) | Watcher — also how stale the boot snapshot can be |
 | `WG_SESSIONS_TTL` | `21600` (seconds) | Watcher |
 | `WG_JOURNAL_CMD` | `journalctl --user -f -n0 -o short-iso` | Watcher |
 | `WG_LAUNCH_CMD` | `uwsm-app` | `crashed --restore`, restore from the snapshot |

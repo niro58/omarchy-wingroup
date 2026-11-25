@@ -42,6 +42,7 @@ source "$WG_LIB_DIR/notify.sh"
 WG_JOURNAL_PID=""
 WG_JOURNAL_FD=""
 WG_LAST_SCAN=0
+WG_SCAN_GAP=$WG_SCAN_INTERVAL
 # Scopes this watcher has already filed a crash for, so that systemd saying the
 # same death twice does not redraw the bar twice. See wg_oomwatch_handle_line.
 declare -A WG_FILED=()
@@ -230,7 +231,7 @@ wg_oomwatch_notify() {
 }
 
 wg_oomwatch_scan() {
-  WG_LAST_SCAN=$SECONDS
+  local started=$SECONDS
   # wg_sessions_scan prints how many live sessions it found. Nothing here wants
   # the number -- the map it leaves behind is the whole point -- and a watcher
   # started by Hyprland's autostart has nowhere to print it to anyway.
@@ -240,10 +241,12 @@ wg_oomwatch_scan() {
   # guessing from file timestamps; it is only ever one scan interval stale, and
   # a failure to write it is not worth taking the watcher down over.
   wg_snapshot_write || true
+  WG_LAST_SCAN=$SECONDS
+  WG_SCAN_GAP=$(( WG_SCAN_INTERVAL > 3 * (SECONDS - started) ? WG_SCAN_INTERVAL : 3 * (SECONDS - started) ))
 }
 
 wg_oomwatch_scan_due() {
-  (( SECONDS - WG_LAST_SCAN >= WG_SCAN_INTERVAL )) || return 1
+  (( SECONDS - WG_LAST_SCAN >= WG_SCAN_GAP )) || return 1
   wg_oomwatch_scan
 }
 
