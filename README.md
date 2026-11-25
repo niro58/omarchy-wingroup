@@ -1087,7 +1087,7 @@ All optional; the defaults are what install and the autostart lines use.
 | `WG_RESTORE_SCRIPT` | `~/restore-claude.sh` | Restore, install — the fallback when there is no snapshot |
 | `WG_RESTORE_SETTLE` | `5` (seconds) | Restore |
 | `WG_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/wingroup` | Hook, watcher, bar, `crashed` |
-| `WG_SCAN_INTERVAL` | `15` (seconds) | Watcher — also how stale the boot snapshot can be |
+| `WG_SCAN_INTERVAL` | `15` (seconds, counted from the end of one scan to the start of the next, and never less than three times the last scan took) | Watcher — also how stale the boot snapshot can be |
 | `WG_SESSIONS_TTL` | `21600` (seconds) | Watcher |
 | `WG_JOURNAL_CMD` | `journalctl --user -f -n0 -o short-iso` | Watcher |
 | `WG_LAUNCH_CMD` | `uwsm-app` | `crashed --restore`, restore from the snapshot |

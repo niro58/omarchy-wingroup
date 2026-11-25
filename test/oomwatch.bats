@@ -1183,3 +1183,30 @@ wg_fake_cmdline() {
   [ "$(jq '.sessions | length' "$WG_SNAPSHOT_FILE")" -eq 1 ]
   [ "$(jq -r '.empty_since // "unset"' "$WG_SNAPSHOT_FILE")" = "unset" ]
 }
+
+@test "the next scan is due a full interval after the last one ends, not after it starts" {
+  export WG_SCAN_INTERVAL=2
+  run env WG_OOMWATCH_NO_MAIN=1 bash -c '
+    source "$1/bin/wingroup-oomwatch"
+    wg_sessions_scan() { sleep 2.2; printf 0; }
+    wg_snapshot_write() { :; }
+    wg_oomwatch_scan
+    if wg_oomwatch_scan_due; then echo scanned-at-once; else echo waited; fi
+  ' _ "$WG_ROOT"
+  [ "$status" -eq 0 ]
+  [ "$output" = "waited" ]
+}
+
+@test "a slow scan stretches the gap to three times its own length" {
+  export WG_SCAN_INTERVAL=1
+  run env WG_OOMWATCH_NO_MAIN=1 bash -c '
+    source "$1/bin/wingroup-oomwatch"
+    wg_sessions_scan() { sleep 2.2; printf 0; }
+    wg_snapshot_write() { :; }
+    wg_oomwatch_scan
+    sleep 3
+    if wg_oomwatch_scan_due; then echo scanned-too-soon; else echo waited; fi
+  ' _ "$WG_ROOT"
+  [ "$status" -eq 0 ]
+  [ "$output" = "waited" ]
+}
