@@ -1040,6 +1040,49 @@ notified_twice() { (( $(notifies) >= 2 )); }
   [ "$(jq '.sessions | length' "$WG_SESSIONS_FILE")" -eq 5 ]
 }
 
+# Each of the four lookups is a fork when it runs inside $( ): forty terminals
+# every fifteen seconds was a hundred and sixty processes for nothing. The
+# scan's own shell must answer them.
+@test "a scan looks up scope, directory, key and resume id without a subshell" {
+  local n
+  for n in 1 2 3; do
+    wg_fake_proc "$((2000 + n))" claude "$(wg_fake_scope "0000000$n")" "$WG_TMP/projects/p$n" "$((34815 + n))"
+  done
+  declare -F wg_proc_scope_set wg_proc_cwd_set wg_sessions_key_set wg_proc_resume_id_set >/dev/null
+  local fn
+  for fn in wg_proc_scope_set wg_proc_cwd_set wg_sessions_key_set wg_proc_resume_id_set; do
+    eval "wg_orig_$(declare -f "$fn")"
+    eval "$fn() { [[ \$BASHPID == $BASHPID ]] && printf '$fn\\n' >>\"$WG_TMP/inline\"; wg_orig_$fn \"\$@\"; }"
+  done
+
+  : >"$WG_TMP/inline"
+  wg_sessions_scan >"$WG_TMP/count"
+  [ "$(cat "$WG_TMP/count")" -eq 3 ]
+  [ "$(grep -c '^wg_proc_scope_set$' "$WG_TMP/inline")" -eq 3 ]
+  [ "$(grep -c '^wg_proc_cwd_set$' "$WG_TMP/inline")" -eq 3 ]
+  [ "$(grep -c '^wg_sessions_key_set$' "$WG_TMP/inline")" -eq 3 ]
+  [ "$(grep -c '^wg_proc_resume_id_set$' "$WG_TMP/inline")" -eq 3 ]
+}
+
+@test "a scan still reports the directory of a session whose directory was deleted" {
+  wg_fake_proc 2001 claude "$(wg_fake_scope 00000001)" "$WG_TMP/projects/p1" 34816
+  ln -sfn "$WG_TMP/projects/gone (deleted)" "$WG_PROC_DIR/2001/cwd"
+
+  run wg_sessions_scan
+  [ "$output" -eq 1 ]
+  [ "$(jq -r '.sessions | to_entries[0].value.cwd' "$WG_SESSIONS_FILE")" = "$WG_TMP/projects/gone (deleted)" ]
+}
+
+@test "the printing forms of the lookups still answer for the hook" {
+  printf '0::/user.slice/app.slice/%s\n' "$(wg_fake_scope 00000001)" >"$WG_TMP/cgroup"
+  mkdir -p "$WG_PROC_DIR/77"
+  cp "$WG_TMP/cgroup" "$WG_PROC_DIR/77/cgroup"
+  [ "$(wg_proc_scope 77)" = "$(wg_fake_scope 00000001)" ]
+  [ "$(wg_sessions_key "$(wg_fake_scope 00000001)" 5)" = "$(wg_fake_scope 00000001)#5" ]
+  printf 'claude\0--resume\0aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\0' >"$WG_PROC_DIR/77/cmdline"
+  [ "$(wg_proc_resume_id 77)" = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" ]
+}
+
 # Rows travel through one string, so a field read from the wrong slot would
 # hand a terminal another's directory or tty, and nothing else would notice.
 @test "a batched scan keeps each terminal's own directory, tty, id and migrated entry" {

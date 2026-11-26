@@ -298,7 +298,15 @@ Three pieces do it:
   pass — which workspace its window is on. A scan writes the session map once,
   for every terminal it found together (one locked `jq` run, with the
   old-key migration and the expiry in it), because one run per terminal cost
-  about 5 s of CPU a pass with 41 sessions and about 0.5 s batched. After
+  about 5 s of CPU a pass with 41 sessions and about 0.5 s batched. The
+  per-session lookups (scope, working directory, map key, resume id) leave their
+  answer in a variable (`wg_proc_scope_set`, `wg_proc_cwd_set`,
+  `wg_sessions_key_set`, `wg_proc_resume_id_set`) instead of printing it into a
+  `$( )`, because each of those was a fork: 147 processes a scan with 25
+  sessions, 22 after. The working directory comes from bash's `realpath`
+  loadable and falls back to `readlink` when the loadable is missing or the
+  directory was deleted, which the loadable refuses. The printing forms stay for
+  the hook. After
   every scan it also writes the map out to disk, which is what the next boot's restore reads instead of
   guessing — see [Startup
   integration](#startup-integration-with-restore-claudesh).
