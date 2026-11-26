@@ -179,12 +179,20 @@ wg_crashed_read()  { wg_runtime_read "$WG_CRASHED_FILE" "$(wg_crashed_default)";
 # The whole unit name is the key, not the hex tail of it. The journal prints the
 # same string, escapes and all, so keying on it needs no parsing on either side
 # and keeps working for a terminal launched into a scope of some other shape.
-wg_proc_scope() {
+WG_SCOPE=""
+
+wg_proc_scope_set() {
   local pid="$1" line=""
+  WG_SCOPE=""
   read -r line < "$WG_PROC_DIR/$pid/cgroup" 2>/dev/null || return 0
   line="${line##*/}"
   [[ $line == *.scope ]] || return 0
-  printf '%s\n' "$line"
+  WG_SCOPE="$line"
+}
+
+wg_proc_scope() {
+  wg_proc_scope_set "$1"
+  [[ -z $WG_SCOPE ]] || printf '%s\n' "$WG_SCOPE"
 }
 
 # The key one terminal's entry lives under: its scope and the terminal itself.
@@ -197,11 +205,42 @@ wg_proc_scope() {
 # in the browser or inside another app, and they are excluded from the snapshot
 # anyway; they get a key of their own here so that they cannot overwrite the
 # entry of a terminal that happens to share their scope.
-wg_sessions_key() {
+WG_SESSION_KEY=""
+
+wg_sessions_key_set() {
   local scope="$1" tty="${2:-}"
+  WG_SESSION_KEY=""
   [[ -n $scope ]] || return 0
   [[ $tty =~ ^[0-9]+$ ]] || tty=0
-  printf '%s#%s\n' "$scope" "$tty"
+  WG_SESSION_KEY="$scope#$tty"
+}
+
+wg_sessions_key() {
+  wg_sessions_key_set "$@"
+  [[ -z $WG_SESSION_KEY ]] || printf '%s\n' "$WG_SESSION_KEY"
+}
+
+WG_PROC_CWD=""
+WG_CWD_BUILTIN=""
+
+wg_proc_cwd_set() {
+  local pid="$1" lib
+  local -a link=()
+  WG_PROC_CWD=""
+  if [[ -z $WG_CWD_BUILTIN ]]; then
+    WG_CWD_BUILTIN=0
+    for lib in /usr/lib/bash/realpath /usr/local/lib/bash/realpath /usr/lib/x86_64-linux-gnu/bash/realpath; do
+      if [[ -f $lib ]] && enable -f "$lib" realpath 2>/dev/null; then
+        WG_CWD_BUILTIN=1
+        break
+      fi
+    done
+  fi
+  if [[ $WG_CWD_BUILTIN == 1 ]] && realpath -q -a link "$WG_PROC_DIR/$pid/cwd" 2>/dev/null && [[ -n ${link[0]:-} ]]; then
+    WG_PROC_CWD="${link[0]}"
+    return 0
+  fi
+  WG_PROC_CWD="$(readlink "$WG_PROC_DIR/$pid/cwd" 2>/dev/null)" || WG_PROC_CWD=""
 }
 
 # The controlling terminal of $1, as /proc/<pid>/stat reports it: 0 for a
@@ -362,9 +401,17 @@ wg_sessions_record() {
 # switches to another conversation while the command line still names the
 # first; the hook fires for the switch and records the new id, and from then on
 # the command line is the one that is wrong.
+WG_RESUME_ID=""
+
 wg_proc_resume_id() {
+  wg_proc_resume_id_set "$1"
+  [[ -z $WG_RESUME_ID ]] || printf '%s\n' "$WG_RESUME_ID"
+}
+
+wg_proc_resume_id_set() {
   local pid="$1" arg want=0
   local -a args=()
+  WG_RESUME_ID=""
   [[ -n $pid ]] || return 0
   # Readable first, and not `mapfile ... < file 2>/dev/null`: redirections are
   # applied left to right, so the complaint about a missing file is printed
@@ -373,7 +420,7 @@ wg_proc_resume_id() {
   mapfile -d '' -t args < "$WG_PROC_DIR/$pid/cmdline" || return 0
   for arg in ${args[@]+"${args[@]}"}; do
     if (( want )); then
-      [[ $arg =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && printf '%s\n' "$arg"
+      [[ $arg =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && WG_RESUME_ID="$arg"
       return 0
     fi
     [[ $arg == --resume || $arg == -r ]] && want=1
@@ -466,9 +513,11 @@ wg_sessions_scan() {
     pid="${dir##*/}"
     read -r comm < "$dir/comm" 2>/dev/null || continue
     [[ $comm == "claude" ]] || continue
-    scope="$(wg_proc_scope "$pid")"
+    wg_proc_scope_set "$pid"
+    scope="$WG_SCOPE"
     [[ -n $scope ]] || continue
-    cwd="$(readlink "$dir/cwd" 2>/dev/null)" || continue
+    wg_proc_cwd_set "$pid"
+    cwd="$WG_PROC_CWD"
     [[ -n $cwd ]] || continue
     # Field 7 of /proc/<pid>/stat is the controlling terminal, and 0 means there
     # is none. That is what tells a session running in a terminal from one that
@@ -497,7 +546,8 @@ wg_sessions_scan() {
     # Bucketed by terminal rather than by scope, which is the whole point: two
     # sibling terminals share a scope and are two sessions, while everything a
     # session starts inside its own terminal shares that terminal and is one.
-    key="$(wg_sessions_key "$scope" "$tty")"
+    wg_sessions_key_set "$scope" "$tty"
+    key="$WG_SESSION_KEY"
     [[ -z $tty || $tty == 0 ]] || terminals_in[$scope]=1
     # Not recorded yet: one terminal can hold several Claude processes, and only
     # one of them is the session. See below.
@@ -547,7 +597,8 @@ wg_sessions_scan() {
     # session itself was.
     # The id this terminal's claude was relaunched with, as a fallback for the
     # hook's -- folded into the one write the scan makes anyway.
-    fill="$(wg_proc_resume_id "${pick_pid[$key]}")"
+    wg_proc_resume_id_set "${pick_pid[$key]}"
+    fill="$WG_RESUME_ID"
     if (( ${windows_of[$scope]:-0} == 1 )); then
       rows+="$key"$'\x1f'"$scope"$'\x1f'"${pick_cwd[$key]}"$'\x1f'"${pick_tty[$key]}"$'\x1f'"${ws_of[$scope]:-}"$'\x1f'"${at_of[$scope]:-}"$'\x1f'"${mon_of[$scope]:-}"$'\x1f'"${size_of[$scope]:-}"$'\x1f'"${monsize_of[$scope]:-}"$'\x1f'"$fill"$'\x1e'
     else
